@@ -1,0 +1,25 @@
+# PureScript
+output/
+.spago/
+
+# JavaScript/Node
+node_modules/
+public/bundle.js
+
+# Build artifacts
+.server.pid
+
+# OS/Editor
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.claude/
+.cursor/
+.cursorrules*

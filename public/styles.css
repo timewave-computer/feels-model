@@ -1,0 +1,469 @@
+/* Orderbook-style UI CSS */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: #000000;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'SF Pro Text', Roboto, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #000000;
+  color: #e0e0e0;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+h1 {
+  text-align: center;
+  color: #ffffff;
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 30px;
+  letter-spacing: -0.5px;
+}
+
+h2 {
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+}
+
+h3 {
+  color: #b0b0b0;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 15px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+h4 {
+  color: #b0b0b0;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 15px 0 10px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Main layout */
+.main-layout {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+/* Control panel */
+.control-panel {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 24px;
+  position: sticky;
+  top: 20px;
+  overflow: hidden;
+}
+
+/* Balance display */
+.balance-display {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 20px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.balances {
+  display: grid;
+  gap: 8px;
+}
+
+.balance-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+}
+
+.balance-item span {
+  color: #808080;
+  font-size: 13px;
+}
+
+.balance-item strong {
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Action selector */
+.action-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.action-btn {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  color: #808080;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.action-btn:hover {
+  background: #202020;
+  color: #a0a0a0;
+}
+
+.action-btn.active {
+  background: #0066ff;
+  border-color: #0066ff;
+  color: #ffffff;
+}
+
+/* Position inputs */
+.position-inputs {
+  display: grid;
+  gap: 20px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.input-group {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.input-group label {
+  color: #b0b0b0;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.input-group input,
+.input-group select {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  color: #e0e0e0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: all 0.2s;
+  width: 100%;
+  max-width: 100%;
+}
+
+.input-group select {
+  padding-right: 24px;
+}
+
+.input-group input:focus,
+.input-group select:focus {
+  outline: none;
+  border-color: #0066ff;
+  background: #1f1f1f;
+}
+
+.input-group small {
+  color: #606060;
+  font-size: 11px;
+}
+
+/* Price range inputs */
+.price-range-inputs {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.range-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Unified params */
+.unified-params {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.param-grid {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Position preview */
+.position-preview {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.preview-info {
+  display: grid;
+  gap: 8px;
+}
+
+.preview-info div {
+  color: #b0b0b0;
+  font-size: 13px;
+}
+
+/* Execute button */
+.execute-btn {
+  background: #0066ff;
+  color: #ffffff;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.execute-btn:hover {
+  background: #0052cc;
+  transform: translateY(-1px);
+}
+
+.execute-btn:active {
+  transform: translateY(0);
+}
+
+/* Orderbook section */
+.orderbook {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.no-pool {
+  padding: 60px 20px;
+  text-align: center;
+  color: #606060;
+  font-size: 14px;
+}
+
+.orderbook-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.orderbook-header h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 16px;
+}
+
+.pool-stats {
+  display: flex;
+  gap: 24px;
+}
+
+.pool-stats span {
+  color: #808080;
+  font-size: 13px;
+}
+
+.pool-stats span strong {
+  color: #e0e0e0;
+  font-weight: 600;
+}
+
+/* Orderbook grid */
+.orderbook-grid {
+  display: grid;
+  font-size: 13px;
+}
+
+.orderbook-labels {
+  display: grid;
+  grid-template-columns: minmax(120px, 150px) minmax(80px, 100px) minmax(120px, 150px) minmax(120px, 150px) minmax(60px, 80px) minmax(80px, 100px);
+  gap: 12px;
+  padding: 12px 24px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+  min-width: fit-content;
+}
+
+.orderbook-labels span {
+  color: #808080;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.orderbook-entry {
+  display: grid;
+  grid-template-columns: minmax(120px, 150px) minmax(80px, 100px) minmax(120px, 150px) minmax(120px, 150px) minmax(60px, 80px) minmax(80px, 100px);
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #1a1a1a;
+  transition: background 0.2s;
+  cursor: pointer;
+  min-width: fit-content;
+}
+
+.orderbook-entry:hover {
+  background: #1a1a1a;
+}
+
+.orderbook-entry.in-range {
+  background: #0a1a0a;
+  border-left: 3px solid #00ff00;
+}
+
+.orderbook-entry.in-range:hover {
+  background: #0f1f0f;
+}
+
+.price-range {
+  color: #e0e0e0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.liquidity {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.amounts {
+  color: #b0b0b0;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.amounts div {
+  margin: 2px 0;
+}
+
+.params {
+  color: #808080;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.params div {
+  margin: 2px 0;
+}
+
+.fee {
+  color: #ff9900;
+  font-weight: 600;
+}
+
+.owner {
+  color: #606060;
+  font-size: 12px;
+  font-family: 'SF Mono', Monaco, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+  }
+  
+  .control-panel {
+    position: static;
+    max-width: 100%;
+  }
+  
+  .orderbook {
+    overflow-x: scroll;
+  }
+  
+  .orderbook-grid {
+    min-width: 800px;
+  }
+}
+
+/* Button base styles */
+.btn {
+  background: #0066ff;
+  color: #ffffff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn:hover {
+  background: #0052cc;
+}
+
+.btn:active {
+  background: #0040a0;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #404040;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #505050;
+}
