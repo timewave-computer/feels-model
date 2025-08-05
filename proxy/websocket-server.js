@@ -6,6 +6,8 @@
 const WebSocket = require('ws');
 const http = require('http');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -14,6 +16,32 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const PORT = 3002;
+
+// Setup logging to logs/ directory
+const logsDir = path.join(__dirname, '..', 'logs');
+const logFile = path.join(logsDir, 'websocket-server.log');
+
+// Ensure logs directory exists
+if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+}
+
+// Custom logging function that writes to both console and file
+function log(...args) {
+    const timestamp = new Date().toISOString();
+    const message = args.join(' ');
+    const logLine = `[${timestamp}] ${message}\n`;
+    
+    // Write to console
+    console.log(message);
+    
+    // Append to log file
+    try {
+        fs.appendFileSync(logFile, logLine);
+    } catch (error) {
+        console.error('Failed to write to log file:', error);
+    }
+}
 let connectedClients = new Set();
 let commandQueue = [];
 let commandId = 0;
@@ -21,9 +49,12 @@ let commandId = 0;
 // Store WebSocket clients that are listening for console output
 let consoleListeners = new Set();
 
+// Track command senders to route responses back
+let commandSenders = new Map(); // commandId -> sender WebSocket
+
 // Track connected clients
 wss.on('connection', (ws) => {
-    console.log('Browser client connected');
+    log('Browser client connected');
     connectedClients.add(ws);
     
     // Send any queued commands
@@ -39,11 +70,39 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             
             // Handle different message types
-            if (data.type === 'console') {
+            if (data.type === 'ping') {
+                // Respond to ping with pong
+                ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+            } else if (data.type === 'command') {
+                // Relay command from non-browser client to browser clients
+                log(`Relaying command ${data.id} to browser clients:`, data.action);
+                
+                // Store the sender so we can route the response back
+                commandSenders.set(data.id, ws);
+                
+                let commandSent = false;
+                connectedClients.forEach(client => {
+                    // Send to all clients except the sender (assuming browser clients don't send commands)
+                    if (client !== ws && client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify(data));
+                        commandSent = true;
+                    }
+                });
+                if (!commandSent) {
+                    // No browser clients to send to
+                    ws.send(JSON.stringify({
+                        type: 'response',
+                        commandId: data.id,
+                        status: 'error',
+                        error: 'No browser clients connected'
+                    }));
+                    commandSenders.delete(data.id);
+                }
+            } else if (data.type === 'console') {
                 // Format console messages
                 const timestamp = new Date(data.timestamp).toLocaleTimeString();
                 const level = data.level.toUpperCase().padEnd(5);
-                console.log(`[${timestamp}] [${level}] ${data.message}`);
+                log(`[${timestamp}] [${level}] ${data.message}`);
                 
                 // Broadcast console messages to all other connected clients
                 connectedClients.forEach(client => {
@@ -52,28 +111,35 @@ wss.on('connection', (ws) => {
                     }
                 });
             } else if (data.type === 'response') {
-                console.log(`Command ${data.commandId} completed:`, data.status);
+                log(`Command ${data.commandId} completed:`, data.status);
                 if (data.result) {
-                    console.log('Result:', JSON.stringify(data.result, null, 2));
+                    log('Result:', JSON.stringify(data.result, null, 2));
                 }
                 if (data.error) {
-                    console.error('Error:', data.error);
+                    log('Error:', data.error);
+                }
+                
+                // Route response back to command sender
+                const sender = commandSenders.get(data.commandId);
+                if (sender && sender.readyState === WebSocket.OPEN) {
+                    sender.send(JSON.stringify(data));
+                    commandSenders.delete(data.commandId);
                 }
             } else {
-                console.log('Received from browser:', data);
+                log('Received from browser:', data);
             }
         } catch (e) {
-            console.error('Error parsing message:', e);
+            log('Error parsing message:', e);
         }
     });
     
     ws.on('close', () => {
-        console.log('Browser client disconnected');
+        log('Browser client disconnected');
         connectedClients.delete(ws);
     });
     
     ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        log('WebSocket error:', error);
         connectedClients.delete(ws);
     });
 });
@@ -94,7 +160,7 @@ app.post('/command', (req, res) => {
         timestamp: Date.now()
     };
     
-    console.log(`Sending command to ${connectedClients.size} clients:`, command);
+    log(`Sending command to ${connectedClients.size} clients:`, command);
     
     if (connectedClients.size === 0) {
         // Queue command for when a client connects
@@ -133,22 +199,23 @@ app.get('/status', (req, res) => {
 
 // Start server
 server.listen(PORT, () => {
-    console.log(`\nRemote Control Server`);
-    console.log(`WebSocket: ws://localhost:${PORT}`);
-    console.log(`HTTP API: http://localhost:${PORT}`);
-    console.log(`\nAvailable endpoints:`);
-    console.log(`  POST /command - Send command to browser`);
-    console.log(`  GET /status - Check server status`);
-    console.log(`\nExample command:`);
-    console.log(`  curl -X POST http://localhost:${PORT}/command \\`);
-    console.log(`    -H "Content-Type: application/json" \\`);
-    console.log(`    -d '{"action": "runSimulation", "params": {}}'`);
-    console.log(`\nWaiting for connections...\n`);
+    log(`\nRemote Control Server`);
+    log(`WebSocket: ws://localhost:${PORT}`);
+    log(`HTTP API: http://localhost:${PORT}`);
+    log(`Log file: ${logFile}`);
+    log(`\nAvailable endpoints:`);
+    log(`  POST /command - Send command to browser`);
+    log(`  GET /status - Check server status`);
+    log(`\nExample command:`);
+    log(`  curl -X POST http://localhost:${PORT}/command \\`);
+    log(`    -H "Content-Type: application/json" \\`);
+    log(`    -d '{"action": "runSimulation", "params": {}}'`);
+    log(`\nWaiting for connections...\n`);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\nShutting down remote control server...');
+    log('\nShutting down remote control server...');
     wss.close(() => {
         server.close(() => {
             process.exit(0);

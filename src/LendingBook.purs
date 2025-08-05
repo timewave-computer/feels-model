@@ -28,12 +28,15 @@ module LendingBook
 import Prelude
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Either (Either(..))
-import Data.Array ((:), filter, find, foldr, sortBy, take, uncons)
+import Data.Array ((:), filter, find, foldr, sortBy, take, uncons, length)
 import Data.Traversable (traverse)
 import Data.Foldable (sum)
 import Data.Int as Int
+import Data.Number (abs)
+import Control.Monad (when)
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, write, modify_)
+import Effect.Console (log)
 import Token (TokenType)
 import LendingRecord (LendingRecord, LendingSide(..), LendingTerms(..), LendingStatus(..), 
                       UnbondingPeriod(..), unbondingPeriodToDays,
@@ -129,6 +132,11 @@ takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms =
   -- Find matching offers
   offers <- getMatchingOffers book lendAsset collateralAsset terms amount
   
+  -- Log matching process
+  log $ "TakeLoan: Looking for " <> show amount <> " " <> show lendAsset <> " with " <> show collateralAmount <> " " <> show collateralAsset
+  log $ "  Terms: " <> show terms
+  log $ "  Found " <> show (length offers) <> " matching offers"
+  
   case offers of
     [] -> pure $ Left "No matching offers available"
     _ -> do
@@ -141,8 +149,12 @@ takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms =
           let requiredRatio = bestOffer.collateralAmount  -- For lenders, this is the ratio
               actualRatio = collateralAmount / amount
           
+          -- Log collateral validation
+          log $ "  Best offer requires ratio: " <> show requiredRatio <> " " <> show bestOffer.collateralAsset <> " per " <> show bestOffer.lendAsset
+          log $ "  Borrower provides ratio: " <> show actualRatio <> " (amount: " <> show collateralAmount <> ")"
+          
           if actualRatio < requiredRatio
-            then pure $ Left $ "Insufficient collateral. Required ratio: " <> show requiredRatio
+            then pure $ Left $ "Insufficient collateral. Required ratio: " <> show requiredRatio <> ", provided: " <> show actualRatio
             else do
               id <- getNextId book
               timestamp <- currentTime
@@ -166,7 +178,12 @@ matchAndExecute ::
   Effect (Either String MatchResult)
 matchAndExecute book borrower lender = do
   if not (canMatch lender borrower)
-    then pure $ Left "Records cannot be matched"
+    then do
+      -- Log why matching failed for debugging
+      log $ "MATCH FAILED between lender #" <> show lender.id <> " and borrower #" <> show borrower.id
+      log $ "  Lender: " <> show lender.lendAsset <> " -> " <> show lender.collateralAsset <> " terms: " <> show lender.terms
+      log $ "  Borrower: " <> show borrower.lendAsset <> " -> " <> show borrower.collateralAsset <> " terms: " <> show borrower.terms
+      pure $ Left "Records cannot be matched"
     else do
       timestamp <- currentTime
       let executedAmount = borrower.lendAmount
@@ -222,12 +239,38 @@ getMatchingOffers ::
   Effect (Array LendingRecord)
 getMatchingOffers book lendAsset collateralAsset terms minAmount = do
   lenders <- getLenderRecords book
-  let matching = filter (\r ->
+  
+  -- Import compatibleTerms from LendingRecord
+  let compatibleTerms' = \t1 t2 -> case t1, t2 of
+        SwapTerms, SwapTerms -> true
+        StakingTerms _, StakingTerms _ -> true
+        LeverageTerms l1, LeverageTerms l2 -> abs (l1 - l2) < 0.5
+        _, _ -> false
+  
+  -- First filter by assets
+  let assetMatching = filter (\r ->
         r.lendAsset == lendAsset &&
-        r.collateralAsset == collateralAsset &&
-        r.terms == terms &&
-        getAvailableAmount r >= minAmount
+        r.collateralAsset == collateralAsset
       ) lenders
+      
+  -- Then filter by terms
+  let termsMatching = filter (\r ->
+        compatibleTerms' r.terms terms
+      ) assetMatching
+      
+  -- Finally filter by amount
+  let matching = filter (\r ->
+        getAvailableAmount r >= minAmount
+      ) termsMatching
+      
+  -- Log available offers for debugging
+  when (length lenders > 0) $ do
+    log $ "getMatchingOffers: Looking for " <> show lendAsset <> "/" <> show collateralAsset <> " " <> show terms
+    log $ "  Total lender records: " <> show (length lenders)
+    log $ "  Matching assets: " <> show (length assetMatching)
+    log $ "  Matching terms: " <> show (length termsMatching)
+    log $ "  Matching amount (>= " <> show minAmount <> "): " <> show (length matching)
+  
   -- Sort by best collateral ratio (lowest first)
   pure $ sortBy (\a b -> compare a.collateralAmount b.collateralAmount) matching
 

@@ -17,6 +17,7 @@ module LendingRecord
   , isAvailable
   , isActive
   , canMatch
+  , compatibleTerms
   , getAvailableAmount
   , unbondingPeriodToDays
   ) where
@@ -26,6 +27,7 @@ import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
 import Token (TokenType(..))
 import Data.Int as Int
+import Data.Number (abs)
 
 --------------------------------------------------------------------------------
 -- Core Types
@@ -235,10 +237,18 @@ canMatch lender borrower =
   isAvailable lender &&
   lender.lendAsset == borrower.lendAsset &&
   lender.collateralAsset == borrower.collateralAsset &&
-  lender.terms == borrower.terms &&
+  compatibleTerms lender.terms borrower.terms &&  -- More flexible term matching
   case lender.status of
     Available amt -> amt >= borrower.lendAmount
     _ -> false
+
+-- Check if lending terms are compatible (not necessarily identical)
+compatibleTerms :: LendingTerms -> LendingTerms -> Boolean
+compatibleTerms lenderTerms borrowerTerms = case lenderTerms, borrowerTerms of
+  SwapTerms, SwapTerms -> true
+  StakingTerms _, StakingTerms _ -> true  -- Any staking period matches
+  LeverageTerms l1, LeverageTerms l2 -> abs (l1 - l2) < 0.5  -- Close leverage values match
+  _, _ -> false
 
 -- Get available amount for a lender record
 getAvailableAmount :: LendingRecord -> Number

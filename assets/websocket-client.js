@@ -22,6 +22,12 @@
     let ws = null;
     let reconnectInterval = null;
     let isConnecting = false;
+    let reconnectAttempts = 0;
+    let heartbeatInterval = null;
+    let lastPongTime = Date.now();
+    const MAX_RECONNECT_ATTEMPTS = 10;
+    const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+    const PONG_TIMEOUT = 5000; // 5 seconds to respond to ping
     
     // Console forwarding function
     function forwardConsoleMessage(level, args) {
@@ -94,9 +100,40 @@
     // Test that console override is working
     console.log('Console override active - this should be forwarded');
     
+    // Heartbeat mechanism
+    function startHeartbeat() {
+        stopHeartbeat(); // Clear any existing heartbeat
+        
+        heartbeatInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Check if we've received a pong recently
+                if (Date.now() - lastPongTime > HEARTBEAT_INTERVAL + PONG_TIMEOUT) {
+                    console.warn('WebSocket appears unresponsive, closing connection');
+                    ws.close();
+                    return;
+                }
+                
+                // Send ping
+                try {
+                    ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+                } catch (e) {
+                    console.error('Failed to send ping:', e);
+                }
+            }
+        }, HEARTBEAT_INTERVAL);
+    }
+    
+    function stopHeartbeat() {
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        }
+    }
+    
     // Store reference to UI actions
     window.remoteControl = {
         actions: {},
+        connectionState: 'disconnected',
         registerAction: function(name, handler) {
             this.actions[name] = handler;
             console.log(`Remote action registered: ${name}`);
@@ -104,10 +141,36 @@
         executeAction: function(name, params) {
             if (this.actions[name]) {
                 console.log(`Executing remote action: ${name}`, params);
-                return this.actions[name](params);
+                try {
+                    return this.actions[name](params);
+                } catch (error) {
+                    console.error(`Error executing action ${name}:`, error);
+                    return Promise.reject(error);
+                }
             } else {
                 console.error(`Unknown remote action: ${name}`);
                 return Promise.reject(`Unknown action: ${name}`);
+            }
+        },
+        getConnectionState: function() {
+            return this.connectionState;
+        },
+        isConnected: function() {
+            return ws && ws.readyState === WebSocket.OPEN;
+        },
+        reconnect: function() {
+            console.log('Manual reconnect requested');
+            reconnectAttempts = 0; // Reset attempts for manual reconnect
+            if (ws) {
+                ws.close();
+            }
+            connect();
+        },
+        disconnect: function() {
+            console.log('Manual disconnect requested');
+            reconnectAttempts = MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
+            if (ws) {
+                ws.close();
             }
         }
     };
@@ -117,8 +180,16 @@
             return;
         }
         
+        // Check max reconnection attempts
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            console.error(`Failed to connect after ${MAX_RECONNECT_ATTEMPTS} attempts. Giving up.`);
+            window.remoteControl.connectionState = 'failed';
+            return;
+        }
+        
         isConnecting = true;
-        console.log('Connecting to remote control server...');
+        window.remoteControl.connectionState = 'connecting';
+        console.log(`Connecting to remote control server... (attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
         
         try {
             ws = new WebSocket(WS_URL);
@@ -126,12 +197,18 @@
             ws.onopen = function() {
                 originalLog.call(console, 'Connected to remote control server'); // Use original to avoid recursion
                 isConnecting = false;
+                reconnectAttempts = 0; // Reset reconnection attempts on successful connection
+                window.remoteControl.connectionState = 'connected';
+                lastPongTime = Date.now(); // Reset pong timer
                 
                 // Clear reconnect interval
                 if (reconnectInterval) {
                     clearInterval(reconnectInterval);
                     reconnectInterval = null;
                 }
+                
+                // Start heartbeat
+                startHeartbeat();
                 
                 // Send ready message
                 ws.send(JSON.stringify({
@@ -146,6 +223,13 @@
             ws.onmessage = async function(event) {
                 try {
                     const message = JSON.parse(event.data);
+                    
+                    // Handle pong messages for heartbeat
+                    if (message.type === 'pong') {
+                        lastPongTime = Date.now();
+                        return;
+                    }
+                    
                     console.log('Received message:', message);
                     
                     if (message.type === 'command') {
@@ -231,17 +315,28 @@
             ws.onerror = function(error) {
                 console.error('WebSocket error:', error);
                 isConnecting = false;
+                window.remoteControl.connectionState = 'error';
             };
             
-            ws.onclose = function() {
-                console.log('Disconnected from remote control server');
+            ws.onclose = function(event) {
+                console.log('Disconnected from remote control server', event.code, event.reason);
                 isConnecting = false;
+                window.remoteControl.connectionState = 'disconnected';
                 ws = null;
                 
-                // Start reconnection attempts
-                if (!reconnectInterval) {
-                    console.log('Will attempt to reconnect in 5 seconds...');
-                    reconnectInterval = setInterval(connect, 5000);
+                // Stop heartbeat
+                stopHeartbeat();
+                
+                // Start reconnection attempts with exponential backoff
+                if (!reconnectInterval && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++;
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, then cap at 60s
+                    const backoffDelay = Math.min(Math.pow(2, reconnectAttempts - 1) * 1000, 60000);
+                    console.log(`Will attempt to reconnect in ${backoffDelay / 1000} seconds...`);
+                    reconnectInterval = setTimeout(() => {
+                        reconnectInterval = null;
+                        connect();
+                    }, backoffDelay);
                 }
             };
         } catch (e) {
@@ -275,6 +370,19 @@
             readyState: document.readyState,
             hasUI: !!document.getElementById('app'),
             timestamp: Date.now()
+        };
+    });
+    
+    window.remoteControl.registerAction('getConnectionStatus', () => {
+        return {
+            state: window.remoteControl.connectionState,
+            isConnected: window.remoteControl.isConnected(),
+            reconnectAttempts: reconnectAttempts,
+            maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
+            lastPongTime: lastPongTime,
+            timeSinceLastPong: Date.now() - lastPongTime,
+            wsReadyState: ws ? ws.readyState : null,
+            wsReadyStateString: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'NO_SOCKET'
         };
     });
     

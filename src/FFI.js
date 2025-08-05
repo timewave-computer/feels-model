@@ -47,6 +47,10 @@ function getVolatilityKey(fromToken, toToken) {
 
 // Math functions
 export const sqrt = (x) => Math.sqrt(x);
+export const sin = (x) => Math.sin(x);
+export const cos = (x) => Math.cos(x);
+export const log = (x) => Math.log(x);
+export const exp = (x) => Math.exp(x);
 
 // System state exports
 export const totalStaked = () => systemGlobalState.totalStaked;
@@ -852,7 +856,7 @@ function renderMultiTokenChart(ctx, data) {
   // Add JitoSOL/FeelsSOL as line chart
   const jitoData = data.map((point) => {
     const block = Number(point.block) || 0;  // Use block number
-    const price = point.price || 1.0; // Default JitoSOL/FeelsSOL price
+    const price = point.price || 1.22; // Default JitoSOL/FeelsSOL price (current market rate)
     
     return {
       x: block,  // Use block number for x-axis

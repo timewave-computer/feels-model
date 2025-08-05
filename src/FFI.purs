@@ -40,6 +40,10 @@ foreign import onDOMReady :: Effect Unit -> Effect Unit
 -- Math functions
 foreign import log10 :: Number -> Number
 foreign import sqrt :: Number -> Number
+foreign import sin :: Number -> Number
+foreign import cos :: Number -> Number
+foreign import log :: Number -> Number
+foreign import exp :: Number -> Number
 foreign import generateRecordId :: Effect Int
 
 -- DOM attribute access

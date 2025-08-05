@@ -19,6 +19,7 @@ build:
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
     @cp assets/feels_guy.png dist/
+    @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
     @npx spago build
@@ -38,6 +39,7 @@ _build-quiet:
     @cp assets/favicon.ico dist/ > /dev/null 2>&1 || exit 1
     @cp assets/favicon.svg dist/ > /dev/null 2>&1 || exit 1
     @cp assets/feels_guy.png dist/ > /dev/null 2>&1 || exit 1
+    @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @if [ ! -f src/Main.purs ]; then exit 1; fi
     @npx spago build > /dev/null 2>&1 || exit 1
     @echo "import * as Main from \"../output/Main/index.js\";" > output/entry.js
@@ -176,6 +178,7 @@ build-prod:
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
     @cp assets/feels_guy.png dist/
+    @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
     @npx spago build

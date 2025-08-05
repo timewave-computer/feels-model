@@ -7,6 +7,7 @@ module UI
 import Prelude
 import Data.Array ((:), length, find, last, head, zip, range, reverse, filter, groupBy, take, null, sortBy, drop)
 import Data.Array.NonEmpty as NEA
+import Effect.Ref (new)
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Traversable (traverse_, traverse)
 import Data.Either (Either(..))
@@ -156,7 +157,7 @@ defaultSimulationConfig =
   { scenario: BullMarket
   , numAccounts: 5      -- Reduced from 10
   , simulationBlocks: 100
-  , initialJitoSOLPrice: 1.05
+  , initialJitoSOLPrice: 1.22  -- Correct JitoSOL/SOL price
   , priceVolatility: 0.02
   , accountProfiles: [Whale, Aggressive, Conservative]
   , actionFrequency: 1.0  -- Reduced from 2.0
@@ -816,14 +817,28 @@ handleAction = case _ of
     H.modify_ _ { api = Just protocol, loading = false }
     
     -- Register remote control actions
+    -- We need to store a reference to trigger Halogen actions from outside
+    self <- H.liftEffect $ do
+      ref <- new Nothing
+      pure ref
+    
     H.liftEffect $ registerRemoteAction "runSimulation" \params -> do
-      log "Remote action: runSimulation triggered"
-      -- For now, return a success response immediately
-      -- The actual simulation will be triggered by the triggerUIAction call
-      success <- triggerUIAction "runSimulation"
-      pure $ if success
-        then { status: "success", message: "Simulation button clicked successfully" }
-        else { status: "error", message: "Failed to find or click simulation button" }
+      log "Remote action: runSimulation triggered via WebSocket"
+      -- Click the simulation button directly
+      button <- getElementById "run-simulation-btn"
+      case toMaybe button of
+        Just btn -> do
+          log "Found simulation button, clicking..."
+          -- Dispatch click event
+          void $ setTimeout (do
+            success <- triggerUIAction "runSimulation"
+            log $ "Trigger result: " <> show success
+            pure unit
+          ) 100
+          pure { status: "success", message: "Simulation button click scheduled" }
+        Nothing -> do
+          log "ERROR: Simulation button not found!"
+          pure { status: "error", message: "Simulation button not found" }
     
     H.liftEffect $ registerRemoteAction "refreshData" \_ -> do
       log "Remote action: refreshData triggered"
@@ -1084,6 +1099,16 @@ handleAction = case _ of
           protocolState.lendingBook
           protocolState.oracle
         
+        -- Seed initial JitoSOL/FeelsSOL liquidity at correct price
+        H.liftEffect $ log "Seeding initial JitoSOL/FeelsSOL liquidity..."
+        _ <- H.liftEffect $ do
+          -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
+          -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
+          _ <- executeCommand protocol (A.CreateLendingPosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 SwapTerms Nothing)
+          -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
+          _ <- executeCommand protocol (A.CreateLendingPosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 SwapTerms Nothing)
+          pure unit
+        
         -- Run simulation
         finalState <- H.liftEffect $ executeSimulation state.simulationConfig simState
         
@@ -1173,7 +1198,7 @@ handleAction = case _ of
                   jitoSOLObs = find (\obs -> obs.baseAsset == JitoSOL) group
                   jitoPrice = case jitoSOLObs of
                     Just obs -> obs.impliedPrice
-                    Nothing -> 1.05  -- Default
+                    Nothing -> 1.22  -- Default JitoSOL price
                   
                   -- Get prices for all live tokens
                   tokenPrices = map (\token ->
@@ -1233,7 +1258,29 @@ handleAction = case _ of
         log $ "Creating token: " <> ticker <> " for user: " <> userId
         result <- executeCommand protocol (A.CreateToken userId ticker name)
         case result of
-          Right _ -> log $ "Successfully created token: " <> ticker
+          Right _ -> do
+            log $ "Successfully created token: " <> ticker
+            -- Immediately stake 100 FeelsSOL to make the token go live
+            stakeResult <- executeCommand protocol 
+              (A.CreateLendingPosition userId FeelsSOL 100.0 (Token ticker) 100.0 
+                (StakingTerms Infinite) (Just ticker))
+            case stakeResult of
+              Right _ -> do
+                log $ "Successfully staked 100 FeelsSOL for " <> ticker <> " to make it live"
+                -- Add initial liquidity for token trading
+                -- Token -> FeelsSOL: 100 tokens for 100 FeelsSOL (1:1 ratio)
+                liquidity1 <- executeCommand protocol 
+                  (A.CreateLendingPosition userId (Token ticker) 100.0 FeelsSOL 100.0 SwapTerms Nothing)
+                case liquidity1 of
+                  Right _ -> log $ "Added initial " <> ticker <> " -> FeelsSOL liquidity"
+                  Left err -> log $ "Failed to add token liquidity: " <> show err
+                -- FeelsSOL -> Token: 100 FeelsSOL for 100 tokens (1:1 ratio)
+                liquidity2 <- executeCommand protocol 
+                  (A.CreateLendingPosition userId FeelsSOL 100.0 (Token ticker) 100.0 SwapTerms Nothing)
+                case liquidity2 of
+                  Right _ -> log $ "Added initial FeelsSOL -> " <> ticker <> " liquidity"
+                  Left err -> log $ "Failed to add FeelsSOL liquidity: " <> show err
+              Left err -> log $ "Failed to stake for token launch: " <> show err
           Left err -> log $ "Failed to create token: " <> show err
       _ -> pure unit
 

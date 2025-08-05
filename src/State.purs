@@ -32,8 +32,9 @@ import Token (TokenType(..), TokenMetadata, TokenRegistry, createAndRegisterToke
 import LendingBook (LendingBook, initLendingBook, createLendOffer, getUserRecords, getBorrowerRecords, getLenderRecords, getActiveRecords, takeLoan)
 import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), createLenderRecord, createBorrowerRecord)
 import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
-import NFV (NFVState, initNFV, getNFVBalance, getNFVMetrics, contributeToTokenNFV, createNFVTicks)
-import Oracle (Oracle, initOracle)
+import SyntheticSOL (getTotalSupply)
+import NFV (NFVState, initNFV, getNFVBalance, getNFVMetrics, contributeToTokenNFV, createNFVTicks, captureStakingRewards)
+import Oracle (Oracle, initOracle, takeMarketSnapshot)
 import Incentives (MarketDynamics, initMarketDynamics)
 import BalanceManager (BalanceRegistry)
 import FFI (currentTime, generateRecordId)
@@ -54,6 +55,7 @@ type AppState =
   , positionTokenMap :: Array { positionId :: Int, tokenTicker :: String }
   , currentUser :: String  -- For demo purposes, in production would be wallet-based
   , timestamp :: Number
+  , lastJitoSOLPrice :: Number  -- Track JitoSOL price for rebase capture
   }
 
 -- Runtime wrapper for application state
@@ -158,7 +160,7 @@ initState = do
     ]
   
   -- Initialize gateway
-  let priceOracle = pure 1.05  -- JitoSOL/SOL = 1.05
+  let priceOracle = pure 1.22  -- JitoSOL/SOL = 1.22 (current market price)
   gateway <- initGateway priceOracle 0.001 0.002 balances nfvState
   
   -- Initialize NFV for system tokens only (JitoSOL and FeelsSOL)
@@ -187,6 +189,7 @@ initState = do
         , positionTokenMap: []
         , currentUser: "user1"
         , timestamp
+        , lastJitoSOLPrice: 1.22  -- Initial JitoSOL price
         }
   
   stateRef <- new initialState
@@ -194,6 +197,49 @@ initState = do
   nextListenerIdRef <- new 0
   
   pure { state: stateRef, listeners: listenersRef, nextListenerId: nextListenerIdRef }
+
+--------------------------------------------------------------------------------
+-- Rebase Capture
+--------------------------------------------------------------------------------
+
+-- Capture JitoSOL/FeelsSOL rebase differential for NFV
+-- Should be called periodically (e.g. each block or time interval)
+captureRebaseDifferential :: AppRuntime -> Effect Unit
+captureRebaseDifferential runtime = do
+  state <- read runtime.state
+  
+  -- Get current JitoSOL price from oracle
+  snapshot <- takeMarketSnapshot state.oracle
+  let jitoObs = find (\obs -> obs.baseAsset == JitoSOL) snapshot.priceObservations
+  
+  case jitoObs of
+    Just obs -> do
+      let currentJitoPrice = obs.impliedPrice
+          previousPrice = state.lastJitoSOLPrice
+          
+      -- Only capture if price has increased (staking rewards)
+      when (currentJitoPrice > previousPrice) $ do
+        -- Get total FeelsSOL supply from gateway
+        totalSupply <- getTotalSupply state.gateway.syntheticSOL
+        
+        -- Calculate differential value
+        let priceAppreciation = currentJitoPrice - previousPrice
+            differentialValue = totalSupply * priceAppreciation
+        
+        -- Capture to NFV
+        when (differentialValue > 0.0) $ do
+          captureStakingRewards state.nfvState totalSupply currentJitoPrice
+          
+          -- Update state with new price
+          let newState = state { lastJitoSOLPrice = currentJitoPrice }
+          write newState runtime.state
+          
+          -- Notify listeners
+          listeners <- read runtime.listeners
+          _ <- traverse (\l -> l.callback newState) listeners
+          pure unit
+    
+    Nothing -> pure unit  -- No JitoSOL price data
 
 --------------------------------------------------------------------------------
 -- Command Processing
@@ -272,8 +318,10 @@ processCommand state = case _ of
                   collateralAmount terms timestamp
         
         -- Add to lending book
+        -- createLendOffer expects a ratio, not absolute amount
+        let collateralRatio = collateralAmount / amount
         result <- createLendOffer state.lendingBook user lendAsset amount 
-                    collateralAsset collateralAmount terms
+                    collateralAsset collateralRatio terms
         
         case result of
           Left err -> pure $ Left $ SystemError err

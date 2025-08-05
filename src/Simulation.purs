@@ -45,7 +45,7 @@ import LendingBook (LendingBook, initLendingBook, createLendOffer, takeLoan, mat
 import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
 import SyntheticSOL (SyntheticSOLState, initSyntheticSOL)
 import Utils (formatAmount, formatPercentage)
-import FFI (currentTime, sqrt)
+import FFI (currentTime, sqrt, log, cos) as FFI
 import NFV (NFVState, initNFV)
 import Oracle (Oracle, PriceObservation, observeMarket, observeMarketWithBlock, initOracle, takeMarketSnapshot)
 
@@ -261,8 +261,8 @@ generateMarketScenario config currentBlock = do
   let volatility = config.priceVolatility * baseVolatility
   
   -- Log scenario effect periodically
-  when (currentBlock <= 5 || currentBlock `mod` 20 == 0) $ do
-    log $ "Market scenario " <> show config.scenario <> " at block " <> show currentBlock
+  -- when (currentBlock <= 5 || currentBlock `mod` 20 == 0) $ do
+  --   log $ "Market scenario " <> show config.scenario <> " at block " <> show currentBlock
   
   case config.scenario of
     BullMarket -> do
@@ -328,14 +328,20 @@ generateTradingSequence config state = do
   -- If tokens exist, bias heavily towards token trading to generate fees
   let hasTokens = length (getRecentlyCreatedTokens state.actionHistory) > 0
   
+  -- Log token activity
+  -- when (state.currentBlock `mod` 10 == 0 && hasTokens) $ do
+  --   log $ "Block " <> show state.currentBlock <> ": Active tokens: " <> show (getRecentlyCreatedTokens state.actionHistory)
+  
   actions <- sequence $ map (\i -> 
     if i == 1 && shouldCreateToken
       then generateTokenCreationAction config state  -- Conditionally create tokens
-      else if hasTokens && i <= (numActions * 2 / 3)  -- 2/3 of actions are token trades when tokens exist
+      else if hasTokens && i <= (numActions * 4 / 5)  -- 80% of actions are token trades when tokens exist
         then do
           -- Generate swap actions for active trading and fee generation
           let eligibleAccounts = filter (\acc -> acc.feelsSOLBalance > 10.0) state.accounts
-          case head (drop (i `mod` length eligibleAccounts) eligibleAccounts) of
+              -- Better account distribution to ensure variety
+              accountIndex = (i * 7 + state.currentBlock) `mod` max 1 (length eligibleAccounts)
+          case head (drop accountIndex eligibleAccounts) of
             Just acc -> generateTokenSwapAction config state acc
             Nothing -> generatePositionCreationAction config state
       else if i <= (numActions * 3 / 4)
@@ -376,19 +382,63 @@ generateTokenCreationAction config state = do
 -- Generate token swap action for price discovery
 generateTokenSwapAction :: SimulationConfig -> SimulationState -> SimulatedAccount -> Effect TradingAction
 generateTokenSwapAction config state account = do
-  -- Get recently created tokens
+  -- Get recently created tokens and cycle through them
   let existingTokens = getRecentlyCreatedTokens state.actionHistory
+      -- Rotate through different tokens based on block number for variety
+      tokenIndex = state.currentBlock `mod` max 1 (length existingTokens)
   
-  case head existingTokens of
-    Nothing -> generateLendOfferAction config state account  -- Fallback if no tokens
+  case head (drop tokenIndex existingTokens) of
+    Nothing -> pure $ WaitBlocks 1  -- No tokens yet, wait
     Just tokenTicker -> do
-      -- Generate a realistic price for the token (0.1 to 5.0 FeelsSOL per token)
+      -- Apply market scenario to token prices
+      marketMovement <- generateMarketScenario config state.currentBlock
       priceRand <- random
-      let tokenPrice = 0.1 + priceRand * 4.9
+      
+      -- Get current market price from oracle if available, otherwise use random
+      currentMarketPrice <- case state.oracle of
+        oracle -> do
+          snapshot <- takeMarketSnapshot oracle
+          let tokenObs = find (\obs -> case obs.baseAsset of
+                                         Token t -> t == tokenTicker
+                                         _ -> false) snapshot.priceObservations
+          pure $ case tokenObs of
+            Just obs -> obs.impliedPrice
+            Nothing -> 0.2 + priceRand * 4.8  -- Initial price 0.2-5.0 FeelsSOL
+      
+      -- Apply Brownian motion for realistic price movements
+      -- Generate two random components for Box-Muller transform
+      u1 <- random  -- Returns 0 to 1
+      u2 <- random  -- Returns 0 to 1
+      
+      -- Box-Muller transform to get normal distribution
+      let z0 = FFI.sqrt (-2.0 * FFI.log (max 0.0001 u1)) * FFI.cos (2.0 * 3.14159 * u2)
+          -- z0 is now normally distributed with mean 0 and variance 1
+          
+          -- Volatility parameters (per block)
+          -- Tokens are more volatile than system tokens
+          volatility = 0.02  -- 2% volatility per block for tokens
+          
+          -- Drift can be influenced by market scenario
+          drift = marketMovement * 0.5  -- Market scenario affects drift
+          
+          -- Geometric Brownian motion: S(t+1) = S(t) * exp((μ - σ²/2)dt + σ√dt * Z)
+          -- For small time steps, this approximates to: S(t+1) = S(t) * (1 + μdt + σ√dt * Z)
+          -- Since dt = 1 block, we simplify to:
+          -- Cap the multiplier to prevent extreme moves (max ±15% per block)
+          priceMultiplier = max 0.85 (min 1.15 (1.0 + drift + (volatility * z0)))
+          
+          -- Apply the price change with reasonable bounds
+          -- Keep token prices between 0.2 and 5.0 FeelsSOL to prevent extreme collateral ratios
+          unboundedPrice = currentMarketPrice * priceMultiplier
+          tokenPrice = max 0.2 (min 5.0 unboundedPrice)
+      
+      -- Log price movement periodically
+      -- when (state.currentBlock `mod` 10 == 0) $ do
+      --   log $ "Token " <> tokenTicker <> " price: " <> show tokenPrice <> " FeelsSOL (was " <> show currentMarketPrice <> ")"
       
       -- Decide between creating offer or taking existing offer
       actionTypeRand <- random
-      if actionTypeRand < 0.7  -- 70% chance to take existing offers (execute trades)
+      if actionTypeRand < 0.85 && account.feelsSOLBalance > 10.0  -- 85% chance to take existing offers
         then do
           -- Try to take an existing loan (execute a trade)
           directionRand <- random
@@ -396,29 +446,35 @@ generateTokenSwapAction config state account = do
             then do
               -- Buy token by taking a FeelsSOL loan (collateralized by tokens)
               let feelsAmount = min account.feelsSOLBalance (20.0 + priceRand * 80.0)  -- 20-100 FeelsSOL
-                  tokenCollateral = feelsAmount / tokenPrice * 1.1  -- 10% extra for collateral
+                  -- IMPORTANT: Match the exact collateral ratio that lenders expect
+                  -- For swap trades, lenders specify collateral ratio = 1/price (tokens per FeelsSOL)
+                  tokenCollateral = feelsAmount / tokenPrice * 1.2  -- 20% extra to ensure match
               pure $ TakeLoan account.id FeelsSOL feelsAmount (Token tokenTicker) tokenCollateral SwapTerms
             else do
               -- Sell token by taking a token loan (collateralized by FeelsSOL)
               let tokenAmount = 5.0 + priceRand * 45.0  -- 5-50 tokens
-                  feelsCollateral = tokenAmount * tokenPrice * 1.1  -- 10% extra for collateral
+                  -- For token loans, lenders specify collateral ratio = price (FeelsSOL per token)
+                  feelsCollateral = tokenAmount * tokenPrice * 1.2  -- 20% extra to ensure match
               pure $ TakeLoan account.id (Token tokenTicker) tokenAmount FeelsSOL feelsCollateral SwapTerms
         else do
-          -- Create new offers (30% chance)
+          -- Create new offers (15% chance) - always at current market prices
           directionRand <- random
-          if directionRand < 0.5
+          if directionRand < 0.5 && account.feelsSOLBalance > 10.0
             then do
-              -- Create buy offer
+              -- Create buy offer: Lend FeelsSOL, get tokens as collateral
               let feelsAmount = min account.feelsSOLBalance (50.0 + priceRand * 150.0)  -- 50-200 FeelsSOL
-                  tokenAmount = feelsAmount / tokenPrice
-                  exchangeRate = tokenPrice
-              pure $ CreateLendOffer account.id FeelsSOL feelsAmount (Token tokenTicker) exchangeRate SwapTerms Nothing
+                  -- For swaps, we want 1:1 collateral at the desired exchange rate
+                  -- If we're lending X FeelsSOL and want Y tokens, collateral = Y tokens
+                  tokenCollateral = feelsAmount / tokenPrice
+                  collateralRatio = tokenCollateral / feelsAmount  -- This should be 1/price
+              pure $ CreateLendOffer account.id FeelsSOL feelsAmount (Token tokenTicker) collateralRatio SwapTerms Nothing
             else do
-              -- Create sell offer
+              -- Create sell offer: Lend tokens, get FeelsSOL as collateral
               let tokenAmount = 10.0 + priceRand * 90.0  -- 10-100 tokens
-                  feelsAmount = tokenAmount * tokenPrice
-                  exchangeRate = 1.0 / tokenPrice
-              pure $ CreateLendOffer account.id (Token tokenTicker) tokenAmount FeelsSOL exchangeRate SwapTerms Nothing
+                  -- If we're lending X tokens and want Y FeelsSOL, collateral = Y FeelsSOL
+                  feelsCollateral = tokenAmount * tokenPrice
+                  collateralRatio = feelsCollateral / tokenAmount  -- This should be price
+              pure $ CreateLendOffer account.id (Token tokenTicker) tokenAmount FeelsSOL collateralRatio SwapTerms Nothing
 
 -- Generate position creation action
 generatePositionCreationAction :: SimulationConfig -> SimulationState -> Effect TradingAction
@@ -427,7 +483,7 @@ generatePositionCreationAction config state = do
   let eligibleAccounts = filter (\acc -> acc.feelsSOLBalance > 10.0) state.accounts
   
   case head eligibleAccounts of
-    Just account -> generateLendOfferAction config state account
+    Just account -> generateTokenSwapAction config state account
     Nothing -> do
       -- No one has enough FeelsSOL, pick someone to enter
       accountIndex <- randomInt 0 (length state.accounts - 1)
@@ -459,7 +515,7 @@ generateRandomAction config state = do
       shouldCreateTokenSwap <- if length existingTokens > 0 && account.feelsSOLBalance > 50.0
         then do
           swapRoll <- random
-          pure $ swapRoll < 0.3  -- 30% chance if conditions are met
+          pure $ swapRoll < 0.5  -- 50% chance if conditions are met (increased from 30%)
         else pure false
       
       if shouldCreateTokenSwap
@@ -467,17 +523,63 @@ generateRandomAction config state = do
         else do
           -- Weighted action selection for better balance
           actionRoll <- random
-          if actionRoll < 0.15
-            then generateEntryAction config account      -- 15% chance
-            else if actionRoll < 0.25
+          if actionRoll < 0.10
+            then generateEntryAction config account      -- 10% chance
+            else if actionRoll < 0.20
               then generateExitAction config account     -- 10% chance
-              else if actionRoll < 0.50
-                then generateLendOfferAction config state account  -- 25% chance
-                else if actionRoll < 0.75
-                  then generateBorrowAction config account   -- 25% chance
-                  else if actionRoll < 0.90
-                    then generateCloseAction config account  -- 15% chance
-                    else pure $ WaitBlocks 1                 -- 10% chance to wait
+              else if actionRoll < 0.40
+                then generateJitoSOLSwapAction config state account  -- 20% chance
+                else if actionRoll < 0.60
+                  then generateTokenStakingAction config state account  -- 20% chance
+                  else if actionRoll < 0.80
+                    then generateTokenSwapAction config state account   -- 20% chance
+                    else if actionRoll < 0.95
+                      then generateCloseAction config account  -- 15% chance
+                      else pure $ WaitBlocks 1                 -- 5% chance to wait
+
+-- Generate JitoSOL/FeelsSOL swap action with realistic pricing
+generateJitoSOLSwapAction :: SimulationConfig -> SimulationState -> SimulatedAccount -> Effect TradingAction
+generateJitoSOLSwapAction config state account = do
+  -- JitoSOL price is fixed at 1.22 for simulation purposes
+  let jitoPrice = 1.22
+  
+  -- Decide direction and whether to create offer or take existing
+  directionRand <- random
+  actionTypeRand <- random
+  u1 <- random
+  u2 <- random
+  
+  if actionTypeRand < 0.9  -- 90% chance to take existing offers to generate fees
+    then do
+      -- Take existing offers (execute trades)
+      if directionRand < 0.5 && account.feelsSOLBalance > 10.0
+        then do
+          -- Buy JitoSOL with FeelsSOL
+          let feelsAmount = min account.feelsSOLBalance (50.0 + u1 * 100.0)
+              jitoCollateral = feelsAmount / jitoPrice
+          pure $ TakeLoan account.id FeelsSOL feelsAmount JitoSOL jitoCollateral SwapTerms
+        else if account.jitoSOLBalance > 10.0
+          then do
+            -- Sell JitoSOL for FeelsSOL
+            let jitoAmount = min account.jitoSOLBalance (50.0 + u2 * 50.0)
+                feelsCollateral = jitoAmount * jitoPrice
+            pure $ TakeLoan account.id JitoSOL jitoAmount FeelsSOL feelsCollateral SwapTerms
+          else pure $ WaitBlocks 1
+    else do
+      -- Create new offers (10% chance)
+      if directionRand < 0.5 && account.feelsSOLBalance > 10.0
+        then do
+          -- Offer to lend FeelsSOL for JitoSOL
+          let feelsAmount = min account.feelsSOLBalance (100.0 + u1 * 100.0)
+              collateralRatio = 1.0 / jitoPrice  -- JitoSOL per FeelsSOL
+          pure $ CreateLendOffer account.id FeelsSOL feelsAmount JitoSOL collateralRatio SwapTerms Nothing
+        else if account.jitoSOLBalance > 10.0
+          then do
+            -- Offer to lend JitoSOL for FeelsSOL
+            let jitoAmount = min account.jitoSOLBalance (50.0 + u2 * 50.0)
+                collateralRatio = jitoPrice  -- FeelsSOL per JitoSOL
+            pure $ CreateLendOffer account.id JitoSOL jitoAmount FeelsSOL collateralRatio SwapTerms Nothing
+          else pure $ WaitBlocks 1
 
 -- Generate entry action (user deposits JitoSOL)
 generateEntryAction :: SimulationConfig -> SimulatedAccount -> Effect TradingAction
@@ -504,72 +606,31 @@ generateExitAction config account = do
       let amount = account.feelsSOLBalance * (0.1 + portion * 0.5)  -- 10-60%
       pure $ ExitProtocol account.id amount FeelsSOL
 
--- Generate lending offer action
-generateLendOfferAction :: SimulationConfig -> SimulationState -> SimulatedAccount -> Effect TradingAction
-generateLendOfferAction config state account = do
+-- Generate token staking offer action
+generateTokenStakingAction :: SimulationConfig -> SimulationState -> SimulatedAccount -> Effect TradingAction
+generateTokenStakingAction config state account = do
   -- Only create offers if user has FeelsSOL
   if account.feelsSOLBalance <= 0.0
     then pure $ WaitBlocks 1
     else do
-      portion <- random
-      let amount = account.feelsSOLBalance * (0.2 + portion * 0.6)  -- 20-80%
-      
-      -- Choose collateral ratio based on risk profile
-      ratioRand <- random
-      let collateralRatio = case account.profile of
-            Conservative -> 1.2 + ratioRand * 0.3   -- 120-150%
-            Moderate -> 1.1 + ratioRand * 0.4       -- 110-150%
-            Aggressive -> 1.05 + ratioRand * 0.25   -- 105-130%
-            Whale -> 1.15 + ratioRand * 0.35        -- 115-150%
-            Arbitrageur -> 1.08 + ratioRand * 0.17  -- 108-125%
-            Retail -> 1.25 + ratioRand * 0.5        -- 125-175%
-      
-      -- Choose terms based on preferences
-      terms <- generateLendingTerms config
-      
-      -- If this is a staking term, potentially target a recently created token
-      targetToken <- case terms of
-        StakingTerms _ -> do
-          -- Get recently created tokens from action history
-          let recentTokens = getRecentlyCreatedTokens state.actionHistory
-          if length recentTokens > 0
-            then do
-              -- 80% chance to stake to existing tokens to ensure they get activity
-              stakeChoice <- random
-              if stakeChoice < 0.8
-                then do
-                  -- Pick a random token to stake
-                  tokenIndex <- randomInt 0 (max 0 (length recentTokens - 1))
-                  pure $ head (drop tokenIndex recentTokens)
-                else pure Nothing
-            else pure Nothing
-        _ -> pure Nothing
-      
-      -- When staking for a token, create a position involving that token
-      case targetToken of
-        Just ticker -> 
-          -- Create a FeelsSOL -> Token position for staking
-          pure $ CreateLendOffer account.id FeelsSOL amount (Token ticker) collateralRatio terms targetToken
-        Nothing ->
-          -- Regular FeelsSOL/JitoSOL position
-          pure $ CreateLendOffer account.id FeelsSOL amount JitoSOL collateralRatio terms targetToken
+      -- Get recently created tokens
+      let recentTokens = getRecentlyCreatedTokens state.actionHistory
+      if length recentTokens == 0
+        then pure $ WaitBlocks 1  -- No tokens to stake
+        else do
+          -- Pick a random token to stake
+          tokenIndex <- randomInt 0 (max 0 (length recentTokens - 1))
+          case head (drop tokenIndex recentTokens) of
+            Nothing -> pure $ WaitBlocks 1
+            Just ticker -> do
+              -- Stake 50-200 FeelsSOL to support token liquidity
+              stakingRand <- random
+              let stakingAmount = min account.feelsSOLBalance (50.0 + stakingRand * 150.0)
+                  
+              -- For staking, use 1:1 collateral ratio (staking is about supporting the token)
+              pure $ CreateLendOffer account.id FeelsSOL stakingAmount (Token ticker) 1.0 
+                     (StakingTerms Infinite) (Just ticker)
 
--- Generate borrowing action
-generateBorrowAction :: SimulationConfig -> SimulatedAccount -> Effect TradingAction
-generateBorrowAction config account = do
-  -- Only borrow if user has JitoSOL for collateral
-  if account.jitoSOLBalance <= 0.0
-    then pure $ WaitBlocks 1
-    else do
-      portion <- random
-      -- Base amount on available collateral
-      let maxBorrowAmount = account.jitoSOLBalance / 1.5  -- 150% collateralization
-      let amount = maxBorrowAmount * (0.1 + portion * 0.4)  -- 10-50% of max
-      let collateralAmount = amount * 1.5
-      
-      terms <- generateLendingTerms config
-      
-      pure $ TakeLoan account.id FeelsSOL amount JitoSOL collateralAmount terms
 
 -- Generate position closing action
 generateCloseAction :: SimulationConfig -> SimulatedAccount -> Effect TradingAction
@@ -647,9 +708,13 @@ executeSimulation config initialState = do
 -- Execute a single simulation block
 executeSimulationBlock :: SimulationConfig -> SimulationState -> Int -> Effect SimulationState
 executeSimulationBlock config state blockNum = do
+  -- Apply market dynamics to update base prices
+  marketMovement <- generateMarketScenario config blockNum
+  -- when (blockNum `mod` 20 == 0) $ do
+  --   log $ "Block " <> show blockNum <> ": Market movement " <> show (marketMovement * 100.0) <> "%"
   -- Log block execution
-  when (blockNum <= 5 || Int.toNumber blockNum `mod` 10.0 == 0.0) $ do
-    log $ "Executing simulation block " <> show blockNum
+  -- when (blockNum <= 5 || Int.toNumber blockNum `mod` 10.0 == 0.0) $ do
+  --   log $ "Executing simulation block " <> show blockNum
   
   -- Generate market-influenced price movement for this block
   priceMovement <- generateMarketScenario config blockNum
@@ -688,7 +753,7 @@ executeAction stateEffect action = do
   state <- stateEffect
   case action of
     EnterProtocol userId amount asset -> do
-      log $ "Executing: " <> show action
+      -- log $ "Executing: " <> show action
       -- Update account balances to simulate gateway entry
       -- Deduct JitoSOL and add FeelsSOL (1:1 exchange rate for simplicity)
       let updatedAccounts1 = updateAccountBalances state.accounts userId (-amount) JitoSOL
@@ -705,14 +770,15 @@ executeAction stateEffect action = do
       pure $ state { accounts = updatedAccounts2 }
     
     CreateToken userId ticker name -> do
-      log $ "Executing: " <> show action
+      -- log $ "Executing: " <> show action
       -- In simulation, we don't have direct access to token registry
       -- But the action will be recorded in the action history
       -- When we connect to the actual protocol, it will create the token
+      -- Also simulate initial staking to make token go live
       pure state
     
     CreateLendOffer userId lendAsset amount collAsset ratio terms targetToken -> do
-      log $ "Executing: " <> show action
+      -- log $ "Executing: " <> show action
       -- Actually create the lending offer in the book
       result <- createLendOffer state.lendingBook userId lendAsset amount collAsset ratio terms
       case result of
@@ -732,7 +798,7 @@ executeAction stateEffect action = do
           pure state
     
     TakeLoan userId borrowAsset amount collAsset collAmount terms -> do
-      log $ "Executing: " <> show action
+      -- log $ "Executing: " <> show action
       -- Actually execute the loan (take existing offers)
       result <- takeLoan state.lendingBook userId borrowAsset amount collAsset collAmount terms
       case result of
@@ -750,7 +816,7 @@ executeAction stateEffect action = do
           pure $ state { accounts = updatedAccounts3 }
     
     ClosePosition userId posId -> do
-      log $ "Executing: " <> show action
+      -- log $ "Executing: " <> show action
       pure state
     
     WaitBlocks blocks -> 
@@ -768,7 +834,7 @@ calculateResults config finalState = do
   let prices = if length jitoSOLPrices > 0 then jitoSOLPrices else [config.initialJitoSOLPrice]
   let avgPrice = sum prices / Int.toNumber (length prices)
   let variance = sum (map (\p -> (p - avgPrice) * (p - avgPrice)) prices) / Int.toNumber (length prices)
-  let volatility = sqrt variance / avgPrice
+  let volatility = FFI.sqrt variance / avgPrice
   
   -- Calculate other metrics (TODO: Fix when getTotalLiquidity signature is clarified)
   let totalLiquidity = 0.0  -- getTotalLiquidity finalState.lendingBook
