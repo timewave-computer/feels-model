@@ -1,0 +1,1115 @@
+/* =============================================================================
+   Feels Protocol Design System
+   A consistent, token-based design system using Sass
+   ============================================================================= */
+
+/* =============================================================================
+   Design Tokens
+   ============================================================================= */
+
+// Color System - Light Theme
+$color-bg-primary: #ffffff;
+$color-bg-secondary: #f9f9f9;
+$color-bg-tertiary: #f5f5f5;
+$color-bg-quaternary: #f0f0f0;
+$color-bg-quinary: #eeeeee;
+
+$color-border-primary: #e0e0e0;
+$color-border-secondary: #d0d0d0;
+$color-border-accent: #c0c0c0;
+
+$color-text-primary: #000000;
+$color-text-secondary: #2d2d2d;
+$color-text-tertiary: #4f4f4f;
+$color-text-quaternary: #808080;
+$color-text-quinary: #a0a0a0;
+$color-text-disabled: #c0c0c0;
+
+$color-brand-primary: #ffc0cb;
+$color-brand-secondary: #ffb6c1;
+$color-brand-tertiary: #ff91a4;
+
+$color-success: #16a34a;
+$color-warning: #ffa500;
+$color-error: #dc2626;
+$color-info: #000000;
+
+// Typography Scale
+$font-family-primary: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'SF Pro Text', Roboto, sans-serif;
+$font-family-mono: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+
+$font-size-xs: 11px;
+$font-size-sm: 12px;
+$font-size-base: 14px;
+$font-size-lg: 16px;
+$font-size-xl: 18px;
+$font-size-2xl: 24px;
+
+$font-weight-normal: 400;
+$font-weight-medium: 500;
+$font-weight-semibold: 600;
+$font-weight-bold: 700;
+
+$line-height-tight: 1.25;
+$line-height-normal: 1.5;
+
+// Spacing Scale (4px base unit)
+$space-1: 4px;
+$space-2: 8px;
+$space-3: 12px;
+$space-4: 16px;
+$space-5: 20px;
+$space-6: 24px;
+$space-8: 32px;
+$space-10: 40px;
+
+// Radii
+$radius-sm: 2px;
+$radius-base: 4px;
+$radius-lg: 6px;
+
+// Transitions
+$transition-base: 0.2s ease;
+
+/* =============================================================================
+   Base Styles
+   ============================================================================= */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: $color-bg-primary;
+  font-family: $font-family-primary;
+  font-size: $font-size-base;
+  line-height: $line-height-normal;
+  color: $color-text-secondary;
+  min-height: 100vh;
+  background-image: url('feels_guy.png');
+  background-repeat: no-repeat;
+  background-position: bottom 20px right 20px;
+  background-size: 200px auto;
+  background-attachment: fixed;
+}
+
+/* =============================================================================
+   Base Component Classes
+   ============================================================================= */
+
+// Text Hierarchy
+%text-h1 {
+  color: $color-text-primary;
+  font-size: $font-size-2xl;
+  font-weight: $font-weight-semibold;
+  line-height: $line-height-tight;
+  margin: 0 0 $space-8 0;
+  letter-spacing: -0.5px;
+}
+
+%text-h2 {
+  color: $color-text-primary;
+  font-size: $font-size-xl;
+  font-weight: $font-weight-semibold;
+  line-height: $line-height-tight;
+  margin: 0 0 $space-5 0;
+}
+
+%text-h3 {
+  color: $color-text-tertiary;
+  font-size: $font-size-base;
+  font-weight: $font-weight-semibold;
+  line-height: $line-height-tight;
+  margin: 0 0 $space-4 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+%text-body {
+  color: $color-text-secondary;
+  font-size: $font-size-base;
+  font-weight: $font-weight-normal;
+  line-height: $line-height-normal;
+}
+
+%text-body-sm {
+  color: $color-text-tertiary;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-normal;
+  line-height: $line-height-normal;
+}
+
+%text-caption {
+  color: $color-text-quaternary;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-normal;
+  line-height: $line-height-normal;
+}
+
+%text-mono {
+  font-family: $font-family-mono;
+}
+
+// Layout Patterns
+%layout-stack {
+  display: flex;
+  flex-direction: column;
+  gap: $space-5;
+}
+
+%layout-stack-sm {
+  display: flex;
+  flex-direction: column;
+  gap: $space-3;
+}
+
+%layout-row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: $space-4;
+}
+
+%layout-row {
+  display: flex;
+  align-items: center;
+  gap: $space-3;
+}
+
+// Input and Button Base Styles
+%input {
+  @extend %form-input;
+}
+
+%button-primary {
+  @extend %btn-primary;
+}
+
+%button-secondary {
+  @extend %btn-secondary;
+}
+
+%button-ghost {
+  @extend %btn-secondary;
+  background: transparent;
+  
+  &:hover {
+    background: $color-bg-quaternary;
+  }
+}
+
+%button-large {
+  padding: $space-4 $space-6;
+  font-size: $font-size-lg;
+}
+
+// Base Component Styles
+%panel {
+  background: $color-bg-tertiary;
+  border: 1px solid $color-border-primary;
+  border-radius: $radius-lg;
+  padding: $space-6;
+}
+
+%card {
+  background: $color-bg-quaternary;
+  border: 1px solid $color-border-primary;
+  border-radius: $radius-base;
+  padding: $space-4;
+  transition: background $transition-base;
+
+  &:hover {
+    background: $color-bg-quinary;
+  }
+}
+
+%form-field {
+  display: flex;
+  flex-direction: column;
+  gap: $space-2;
+}
+
+%form-label {
+  color: $color-text-tertiary;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+%form-input {
+  background: $color-bg-primary;
+  border: 1px solid $color-border-primary;
+  color: $color-text-secondary;
+  padding: $space-3 $space-4;
+  border-radius: $radius-base;
+  font-size: $font-size-base;
+  font-family: inherit;
+  transition: all $transition-base;
+
+  &:focus {
+    outline: none;
+    border-color: $color-brand-primary;
+    background: $color-bg-primary;
+  }
+}
+
+%btn-base {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: $space-3 $space-5;
+  border-radius: $radius-base;
+  font-size: $font-size-base;
+  font-weight: $font-weight-normal;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all $transition-base;
+  border: none;
+  text-decoration: none;
+}
+
+%btn-primary {
+  @extend %btn-base;
+  background: $color-brand-primary;
+  color: $color-text-primary;
+
+  &:hover {
+    background: $color-brand-secondary;
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
+  }
+
+  &:disabled,
+  &--disabled {
+    background: #e0e0e0 !important;
+    color: #a0a0a0 !important;
+    cursor: not-allowed !important;
+    transform: none !important;
+    opacity: 0.7;
+    
+    &:hover {
+      background: #e0e0e0 !important;
+      transform: none !important;
+    }
+  }
+}
+
+%btn-secondary {
+  @extend %btn-base;
+  background: $color-bg-quaternary;
+  color: $color-text-secondary;
+  border: 1px solid $color-border-primary;
+
+  &:hover {
+    background: $color-bg-quinary;
+    color: $color-text-primary;
+  }
+}
+
+%btn-toggle {
+  @extend %btn-secondary;
+  font-size: $font-size-sm;
+  padding: $space-2 $space-3;
+
+  &.active {
+    background: $color-brand-primary;
+    border-color: $color-brand-primary;
+    color: $color-text-primary;
+  }
+}
+
+/* =============================================================================
+   Layout Components
+   ============================================================================= */
+
+.container {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: $space-5;
+}
+
+// Remove duplicate main-layout (already defined later)
+
+/* =============================================================================
+   Typography Components
+   ============================================================================= */
+
+h1 {
+  @extend %text-h1;
+  text-align: center;
+}
+
+h2 {
+  @extend %text-h2;
+}
+
+h3 {
+  @extend %text-h3;
+}
+
+/* =============================================================================
+   UI Components
+   ============================================================================= */
+
+// Balance Components
+.balance-section {
+  @extend %panel;
+  margin-bottom: 0;
+}
+
+.balance-display {
+  @extend %card;
+  margin-bottom: $space-5;
+}
+
+.balance-item {
+  @extend %layout-row-between;
+  padding: $space-2 0;
+
+  span {
+    @extend %text-body-sm;
+  }
+
+  strong {
+    color: $color-text-primary;
+    font-weight: $font-weight-semibold;
+  }
+}
+
+// Unified Panel Component
+.panel {
+  @extend %panel;
+}
+
+// Unified Form System
+.form {
+  &__field {
+    @extend %form-input;
+  }
+  
+  &__label {
+    @extend %form-label;
+  }
+  
+  &__input {
+    @extend %form-input;
+  }
+  
+  &__select {
+    @extend %form-input;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6,9 12,15 18,9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right $space-3 center;
+    background-size: 16px;
+    padding-right: $space-10;
+  }
+  
+  &__hint {
+    color: $color-text-quinary;
+    font-size: $font-size-sm;
+    font-style: italic;
+  }
+}
+
+.form-group {
+  @extend %form-field;
+  padding: $space-3 0;
+}
+
+
+// Unified Button System
+.btn {
+  @extend %btn-base;
+  
+  &--primary {
+    @extend %btn-primary;
+  }
+  
+  &--secondary {
+    @extend %btn-secondary;
+  }
+  
+  &--large {
+    padding: $space-4 $space-6;
+    font-size: $font-size-lg;
+    width: 100%;
+    margin-top: $space-2;
+  }
+  
+  &--toggle {
+    @extend %btn-toggle;
+  }
+}
+
+// Unified List Item System
+.list-item {
+  @extend %card;
+  
+  &__header {
+    @extend %layout-row-between;
+    margin-bottom: $space-3;
+  }
+  
+  &__content {
+    @extend %layout-stack-sm;
+    gap: $space-2;
+  }
+  
+  &__meta {
+    @extend %text-caption;
+    @extend %text-mono;
+  }
+  
+  &__status {
+    @extend %text-caption;
+    color: $color-success;
+    font-weight: $font-weight-medium;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    
+    &--pending {
+      color: $color-text-tertiary;
+    }
+    
+    &--active {
+      color: $color-success;
+    }
+    
+    &--error {
+      color: $color-error;
+    }
+  }
+}
+
+
+.system-metrics {
+  @extend %layout-stack;
+}
+
+.metric-group {
+  @extend %layout-stack-sm;
+  padding: $space-4;
+  background: $color-bg-quaternary;
+  border-radius: $radius-base;
+  border: 1px solid $color-border-primary;
+
+  &:not(:last-child) {
+    margin-bottom: $space-4;
+  }
+
+  h3 {
+    margin-bottom: $space-3;
+    color: $color-text-primary;
+    font-size: $font-size-sm;
+    font-weight: $font-weight-semibold;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+}
+
+.position-type-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: $space-2;
+  margin-bottom: $space-6;
+}
+
+
+.form-fields {
+  @extend %layout-stack;
+}
+
+.field {
+  @extend %form-field;
+
+  label {
+    @extend %form-label;
+  }
+
+  input {
+    @extend %form-input;
+  }
+
+  select {
+    @extend %form-input;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6,9 12,15 18,9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right $space-3 center;
+    background-size: 16px;
+    padding-right: $space-10;
+  }
+}
+
+.field-hint {
+  color: $color-text-quinary;
+  font-size: $font-size-sm;
+  font-style: italic;
+}
+
+
+// Position Components
+.positions {
+  @extend %panel;
+  margin-top: 0;
+}
+
+.no-positions,
+.no-tokens {
+  @extend %text-body-sm;
+  text-align: center;
+  padding: $space-5;
+  font-style: italic;
+}
+
+.positions-list,
+.tokens-list {
+  @extend %layout-stack-sm;
+}
+
+
+.loan-offer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: $space-4;
+  padding: $space-4;
+  background: $color-bg-tertiary;
+  border-radius: $radius-base;
+  border: 1px solid $color-border-secondary;
+  margin-bottom: $space-3;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+
+.position-id,
+.token-id {
+  @extend %text-caption;
+  @extend %text-mono;
+}
+
+
+.position-asset {
+  @extend %text-body;
+  color: $color-info;
+  font-weight: $font-weight-semibold;
+}
+
+.position-collateral {
+  @extend %text-body-sm;
+}
+
+.position-status,
+.token-status {
+  @extend %text-caption;
+  color: $color-success;
+  font-weight: $font-weight-medium;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.position-description {
+  @extend %text-body-sm;
+  color: $color-text-tertiary;
+  font-style: italic;
+}
+
+.target-token-info {
+  @extend %text-body-sm;
+  color: $color-brand-primary;
+  font-weight: $font-weight-medium;
+  padding: $space-2 $space-3;
+  background: rgba($color-brand-primary, 0.1);
+  border-radius: $radius-sm;
+  border-left: 3px solid $color-brand-primary;
+}
+
+.token-name {
+  @extend %text-body;
+  color: $color-text-secondary;
+}
+
+.token-supply,
+.token-staked {
+  @extend %text-body-sm;
+  color: $color-text-tertiary;
+}
+
+.token-progress {
+  @extend %text-body-sm;
+  color: $color-brand-primary;
+  font-weight: $font-weight-medium;
+}
+
+// Chart Components
+
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+
+  &.price-dot {
+    background: $color-info;
+  }
+
+  &.nfv-dot {
+    background: $color-success;
+  }
+}
+
+.current-nfv {
+  @extend %text-body-sm;
+  color: $color-success;
+  font-weight: $font-weight-semibold;
+  margin-left: auto;
+}
+
+.chart-container {
+  padding-bottom: $space-5;
+}
+
+.no-price-data {
+  @extend %text-body-sm;
+  text-align: center;
+  padding: $space-10 $space-5;
+  background: $color-bg-secondary;
+  border-radius: $radius-base;
+  border: 1px dashed $color-border-secondary;
+}
+
+.price-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: $space-4;
+  padding: $space-4;
+  background: $color-bg-tertiary;
+  border-radius: $radius-base;
+  border: 1px solid $color-border-secondary;
+}
+
+#price-chart {
+  width: 100%;
+  height: 500px;
+  background: $color-bg-tertiary;
+  border-radius: $radius-sm;
+}
+
+.chart-data {
+  display: none !important;
+}
+
+/* =============================================================================
+   Utility Classes
+   ============================================================================= */
+
+.hidden { 
+  display: none !important; 
+}
+
+.text-primary { color: $color-text-primary; }
+.text-secondary { color: $color-text-secondary; }
+.text-tertiary { color: $color-text-tertiary; }
+.text-success { color: $color-success; }
+.text-warning { color: $color-warning; }
+.text-error { color: $color-error; }
+.text-info { color: $color-info; }
+
+/* =============================================================================
+   Layout Components
+   ============================================================================= */
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  
+  &::after {
+    content: '';
+    position: fixed;
+    bottom: 10px;
+    right: 30px;
+    width: 200px;
+    height: 200px;
+    background-image: url('feels_guy.png');
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+    pointer-events: none;
+    z-index: 1000;
+    opacity: 0.85;
+  }
+}
+
+.header {
+  @extend %panel;
+  text-align: center;
+  margin-bottom: $space-6;
+  
+  h1 {
+    margin: 0 0 $space-2 0;
+    color: $color-text-primary;
+  }
+  
+  p {
+    margin: 0;
+    color: $color-text-tertiary;
+  }
+}
+
+.loading {
+  @extend %panel;
+  text-align: center;
+  padding: $space-10;
+  color: $color-text-tertiary;
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1.5fr;
+  gap: $space-6;
+  padding: $space-6 $space-6 $space-6;
+  max-width: 1600px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.main-layout.two-column {
+  grid-template-columns: 400px 1fr;
+  gap: $space-6;
+}
+
+.left-column,
+.middle-column,
+.right-column {
+  @extend %layout-stack;
+  gap: $space-5;
+}
+
+/* =============================================================================
+   Component Updates
+   ============================================================================= */
+
+
+.gateway-content {
+  @extend %layout-stack;
+  gap: $space-4;
+}
+
+
+.gateway-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: $space-3;
+}
+
+
+
+
+.position-list {
+  @extend %layout-stack;
+  gap: $space-3;
+}
+
+
+.status {
+  @extend %text-caption;
+  padding: $space-1 $space-3;
+  border-radius: $radius-sm;
+  background: $color-bg-tertiary;
+  
+  &.status-active {
+    background: rgba($color-success, 0.1);
+    color: $color-success;
+  }
+}
+
+.simulation-config {
+  @extend %layout-stack;
+  gap: $space-4;
+  margin-bottom: $space-5;
+}
+
+.simulation-results {
+  @extend %card;
+  margin-top: $space-5;
+  
+  h3 {
+    margin-bottom: $space-4;
+  }
+}
+
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: $space-4;
+}
+
+
+.offer-list {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch; // Smooth scrolling on iOS
+  max-width: 100%;
+  position: relative;
+  
+  // Add padding for scroll indicators
+  padding-bottom: $space-3;
+  
+  // Custom scrollbar styling
+  &::-webkit-scrollbar {
+    height: 8px;
+  }
+  
+  &::-webkit-scrollbar-track {
+    background: $color-bg-tertiary;
+    border-radius: $radius-base;
+  }
+  
+  &::-webkit-scrollbar-thumb {
+    background: $color-border-secondary;
+    border-radius: $radius-base;
+    
+    &:hover {
+      background: $color-border-primary;
+    }
+  }
+  
+  // Firefox scrollbar
+  scrollbar-width: thin;
+  scrollbar-color: $color-border-secondary $color-bg-tertiary;
+}
+
+.offer {
+  &__header {
+    display: grid;
+    grid-template-columns: 60px 120px 80px 150px 150px 120px 100px; // Fixed widths for 7 columns
+    gap: $space-3;
+    padding: $space-3;
+    min-width: max-content;
+    @extend %text-caption;
+    color: $color-text-tertiary;
+    border-bottom: 1px solid $color-border-primary;
+    
+    > * {
+      text-align: left;
+      white-space: nowrap;
+    }
+  }
+  
+  &__item {
+    @extend %card;
+    display: grid;
+    grid-template-columns: 60px 120px 80px 150px 150px 120px 100px; // Match header widths
+    gap: $space-3;
+    padding: $space-2;
+    margin: $space-1 0;
+    font-size: $font-size-sm;
+    min-width: max-content;
+    
+    > * {
+      text-align: left;
+      align-self: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+  
+  // Column-specific styling
+  &__id {
+    font-weight: $font-weight-medium;
+    color: $color-text-tertiary;
+  }
+  
+  &__owner {
+    @extend %text-mono;
+    font-size: $font-size-xs;
+  }
+  
+  &__amount {
+    font-weight: $font-weight-medium;
+  }
+  
+  &__status {
+    .status-available {
+      color: $color-success;
+    }
+    .status-partial {
+      color: $color-warning;
+    }
+    .status-filled {
+      color: $color-text-tertiary;
+    }
+  }
+}
+
+.chart {
+  &__legend {
+    @extend %layout-row;
+    gap: $space-5;
+    margin-bottom: $space-4;
+    flex-wrap: wrap;
+  }
+  
+  &__legend-item {
+    @extend %layout-row;
+    @extend %text-body-sm;
+    gap: $space-2;
+    align-items: center;
+  }
+}
+
+.legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  
+  &.price-dot {
+    background: $color-info;
+  }
+  
+  &.nfv-dot {
+    background: $color-warning;
+  }
+}
+
+.token-list {
+  @extend %layout-stack;
+  gap: $space-3;
+}
+
+
+.status-live {
+  color: $color-success;
+}
+
+.status-pending {
+  color: $color-text-tertiary;
+}
+
+.error-message {
+  @extend %panel;
+  background: rgba($color-error, 0.1);
+  border: 1px solid rgba($color-error, 0.3);
+  color: $color-error;
+  padding: $space-3 $space-4;
+  margin-bottom: $space-4;
+}
+
+// Token validation styles
+.validation-warnings {
+  margin-top: $space-2;
+  display: flex;
+  flex-direction: column;
+  gap: $space-1;
+}
+
+.warning-message {
+  padding: $space-2 $space-3;
+  background: rgba($color-warning, 0.1);
+  border: 1px solid rgba($color-warning, 0.3);
+  color: $color-warning;
+  border-radius: $radius-base;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  display: flex;
+  align-items: center;
+  gap: $space-1;
+}
+
+.info-text {
+  @extend %text-caption;
+  color: $color-text-tertiary;
+  margin-top: $space-2;
+}
+
+/* =============================================================================
+   Responsive Design
+   ============================================================================= */
+
+@media (max-width: 1200px) {
+  .main-layout {
+    grid-template-columns: 1fr 1fr;
+    gap: $space-4;
+    padding: 0 $space-4 $space-4;
+  }
+  
+  .main-layout.two-column {
+    grid-template-columns: 1fr;
+    gap: $space-4;
+    padding: 0 $space-4 $space-4;
+  }
+  
+  .right-column {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: $space-4;
+  }
+  
+  .main-layout.two-column {
+    grid-template-columns: 1fr;
+    gap: $space-3;
+    padding: $space-3;
+  }
+  
+  .main-layout.two-column .left-column {
+    min-width: unset;
+  }
+  
+  .chart__legend {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: $space-2;
+  }
+  
+  .current-nfv {
+    margin-left: 0;
+  }
+  
+  #price-chart {
+    height: 350px;
+  }
+  
+  .price-summary {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* =============================================================================
+   Scrollbar Styling
+   ============================================================================= */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: $color-bg-quaternary;
+}
+
+::-webkit-scrollbar-thumb {
+  background: $color-border-accent;
+  border-radius: $radius-sm;
+
+  &:hover {
+    background: $color-text-quaternary;
+  }
+}

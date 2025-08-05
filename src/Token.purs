@@ -1,10 +1,17 @@
+-- Token system supporting the unified lending protocol's asset management.
+-- Defines core token types (JitoSOL, FeelsSOL, user tokens, position tokens) and
+-- manages token metadata, creation, and validation. All tokens in the system can serve
+-- as either lending assets or collateral in the "Everything is Lending" paradigm.
+-- Handles token launching mechanics and price discovery for user-created assets.
 module Token 
   ( TokenType(..)
   , TokenAmount
   , TokenMetadata
   , TokenCreationParams
   , ValidationResult
+  , TokenRegistry
   , createToken
+  , createAndRegisterToken
   , launchToken
   , calculateTokenPrice
   , isValidTicker
@@ -13,13 +20,21 @@ module Token
   , getTokenByTicker
   , validate
   , validateTokenTicker
+  , initTokenRegistry
+  , registerToken
+  , getTokenFromRegistry
+  , getTokenByType
+  , getAllTokens
+  , getSystemTokens
   ) where
 
 import Prelude
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..), isRight)
+import Data.Array (filter, (:), find)
 import Data.String as String
 import Effect (Effect)
+import Effect.Ref (Ref, new, read, write, modify_)
 import FFI (currentTime, generateId)
 
 --------------------------------------------------------------------------------
@@ -28,19 +43,17 @@ import FFI (currentTime, generateId)
 
 -- Core token types in the system
 data TokenType 
-  = JitoSOL               -- User deposit token (external)
-  | SyntheticSOL          -- Internal base currency
+  = JitoSOL               -- External collateral token (sole entry point)
+  | FeelsSOL              -- Base synthetic representation of SOL
   | Token String          -- User-created token with custom ticker
-  | PositionToken         -- Represents ownership of any unified position
   
 derive instance eqTokenType :: Eq TokenType
 derive instance ordTokenType :: Ord TokenType
 
 instance showTokenType :: Show TokenType where
-  show JitoSOL = "jitoSOL"
-  show SyntheticSOL = "SOL"
+  show JitoSOL = "JitoSOL"
+  show FeelsSOL = "FeelsSOL"
   show (Token ticker) = ticker
-  show PositionToken = "POSITION"
 
 -- Token amount representation
 -- Combines a token type with its quantity
@@ -54,12 +67,12 @@ type TokenMetadata =
   { id :: Int
   , ticker :: String
   , name :: String
+  , tokenType :: TokenType           -- The actual token type for this metadata
   , creator :: String
   , createdAt :: Number
-  , launched :: Boolean              -- True if 100 SyntheticSOL deposited
-  , poolBalance :: Number            -- SyntheticSOL in token pool
+  , live :: Boolean              -- True if 100 FeelsSOL deposited via loan book
   , totalSupply :: Number            -- Total supply of token
-  , pricePerToken :: Number          -- Current price in SyntheticSOL
+  , stakedFeelsSOL :: Number         -- Amount of FeelsSOL staked into this token
   }
 
 -- Token creation parameters
@@ -73,7 +86,7 @@ type TokenCreationParams =
 -- Token Creation Functions
 --------------------------------------------------------------------------------
 
--- Create a new token (not launched until 100 SyntheticSOL deposited)
+-- Create a new token (not live until 100 FeelsSOL deposited via loan book)
 createToken :: TokenCreationParams -> Effect TokenMetadata
 createToken params = do
   timestamp <- currentTime
@@ -82,33 +95,36 @@ createToken params = do
     { id: tokenId
     , ticker: params.ticker
     , name: params.name
+    , tokenType: Token params.ticker
     , creator: params.creator
     , createdAt: timestamp
-    , launched: false
-    , poolBalance: 0.0
+    , live: true  -- Auto-live for simulation
     , totalSupply: 1000000.0  -- Default 1M supply
-    , pricePerToken: 0.0001   -- Initial price 0.0001 SyntheticSOL
+    , stakedFeelsSOL: 100.0     -- Simulate initial staking
     }
 
--- Launch a token by depositing SyntheticSOL
-launchToken :: TokenMetadata -> Number -> TokenMetadata
-launchToken token depositAmount =
-  let newBalance = token.poolBalance + depositAmount
-      isLaunched = newBalance >= 100.0
-  in token 
-    { poolBalance = newBalance
-    , launched = isLaunched
-    , pricePerToken = if isLaunched 
-                      then newBalance / token.totalSupply 
-                      else token.pricePerToken
-    }
+-- Create a token and automatically register it in the global registry
+createAndRegisterToken :: TokenRegistry -> TokenCreationParams -> Effect TokenMetadata
+createAndRegisterToken registry params = do
+  token <- createToken params
+  registerToken registry token
+  pure token
 
--- Calculate token price based on constant product formula
-calculateTokenPrice :: TokenMetadata -> Number
-calculateTokenPrice token =
-  if token.launched && token.poolBalance > 0.0
-  then token.poolBalance / token.totalSupply
-  else token.pricePerToken
+-- Launch a token when sufficient loan book activity has occurred
+-- This function would typically be called by the loan book system
+launchToken :: TokenMetadata -> Number -> TokenMetadata  
+launchToken token totalLoanBookValue =
+  let isLive = totalLoanBookValue >= 100.0  -- 100 FeelsSOL threshold
+  in token { live = isLive }
+
+-- Calculate token price based on loan book activity
+-- Note: This is a placeholder - actual price discovery happens in the loan book
+-- Price should be calculated by analyzing loan offers and market activity
+calculateTokenPrice :: TokenMetadata -> Number -> Number
+calculateTokenPrice token loanBookValue =
+  if token.live && loanBookValue > 0.0
+  then loanBookValue / token.totalSupply
+  else 0.0  -- No price for non-live tokens or tokens without loan book activity
 
 --------------------------------------------------------------------------------
 -- Token Validation Functions
@@ -129,6 +145,8 @@ validateTokenTicker ticker = do
   _ <- validate (isAlphanumeric ticker) "Ticker must be alphanumeric"
   _ <- validate (ticker /= "SOL") "Cannot use reserved ticker SOL"
   _ <- validate (ticker /= "JITO") "Cannot use reserved ticker JITO"
+  _ <- validate (String.toUpper ticker /= "FEELSSOL") "Cannot use reserved ticker FEELSSOL"
+  _ <- validate (String.toUpper ticker /= "JITOSOL") "Cannot use reserved ticker JITOSOL"
   Right unit
   where
     -- Simplified alphanumeric check - in production would use regex or proper char validation
@@ -139,15 +157,15 @@ isValidTicker :: String -> Boolean
 isValidTicker ticker = isRight (validateTokenTicker ticker)
 
 -- Validate token pair for positions
--- All operations must be Synthetic SOL ↔ Token pairs
+-- All operations must be FeelsSOL ↔ Token pairs
 isValidPair :: TokenType -> TokenType -> Boolean
-isValidPair SyntheticSOL (Token _) = true
-isValidPair (Token _) SyntheticSOL = true
+isValidPair FeelsSOL (Token _) = true
+isValidPair (Token _) FeelsSOL = true
 isValidPair _ _ = false  -- No direct token ↔ token or jitoSOL operations
 
--- Check if a token is tradeable (launched)
+-- Check if a token is tradeable (live)
 isTradeable :: TokenMetadata -> Boolean
-isTradeable token = token.launched
+isTradeable token = token.live
 
 -- Get token by ticker from registry
 getTokenByTicker :: String -> Array TokenMetadata -> Maybe TokenMetadata
@@ -155,7 +173,62 @@ getTokenByTicker ticker tokens =
   case filter (\t -> t.ticker == ticker) tokens of
     [token] -> Just token
     _ -> Nothing
-  where
-    filter :: forall a. (a -> Boolean) -> Array a -> Array a
-    filter _ [] = []
-    filter pred xs = [] -- Simplified
+
+--------------------------------------------------------------------------------
+-- Global Token Registry
+--------------------------------------------------------------------------------
+
+-- Global token registry type
+type TokenRegistry = Ref (Array TokenMetadata)
+
+-- Initialize token registry with system tokens
+initTokenRegistry :: Effect TokenRegistry
+initTokenRegistry = do
+  let systemTokens = getSystemTokens
+  new systemTokens
+
+-- Get built-in system tokens
+getSystemTokens :: Array TokenMetadata
+getSystemTokens = 
+  [ { id: 1
+    , ticker: "JitoSOL"
+    , name: "Jito Staked SOL"
+    , tokenType: JitoSOL
+    , totalSupply: 1000000.0
+    , creator: "system"
+    , createdAt: 0.0
+    , live: true
+    , stakedFeelsSOL: 0.0
+    }
+  , { id: 2
+    , ticker: "FeelsSOL"
+    , name: "Feels SOL"
+    , tokenType: FeelsSOL
+    , totalSupply: 1000000.0
+    , creator: "system"
+    , createdAt: 0.0
+    , live: true
+    , stakedFeelsSOL: 0.0
+    }
+  ]
+
+-- Register a new token in the global registry
+registerToken :: TokenRegistry -> TokenMetadata -> Effect Unit
+registerToken registry token = do
+  modify_ (\tokens -> token : tokens) registry
+
+-- Get token from registry by ticker
+getTokenFromRegistry :: TokenRegistry -> String -> Effect (Maybe TokenMetadata)
+getTokenFromRegistry registry ticker = do
+  tokens <- read registry
+  pure $ getTokenByTicker ticker tokens
+
+-- Get token from registry by TokenType
+getTokenByType :: TokenRegistry -> TokenType -> Effect (Maybe TokenMetadata)
+getTokenByType registry tokenType = do
+  tokens <- read registry
+  pure $ find (\t -> t.tokenType == tokenType) tokens
+
+-- Get all tokens from registry
+getAllTokens :: TokenRegistry -> Effect (Array TokenMetadata)
+getAllTokens registry = read registry

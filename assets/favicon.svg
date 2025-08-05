@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Pink "F" for Feels -->
+  <rect width="32" height="32" rx="6" fill="#ffc0cb"/>
+  <text x="16" y="24" 
+        font-family="SF Pro Text, -apple-system, BlinkMacSystemFont, Roboto, sans-serif" 
+        font-size="20" 
+        font-weight="600" 
+        text-anchor="middle" 
+        fill="#2d2d2d">F</text>
+</svg>

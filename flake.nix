@@ -1,5 +1,5 @@
 {
-  description = "Hello World PureScript application";
+  description = "Feels Model PureScript application";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
@@ -22,6 +22,8 @@
               nodePackages.http-server
               esbuild
               just
+              dart-sass
+              rsync
             ];
             shellHook = ''
               echo "PureScript development environment ready!"
@@ -32,6 +34,7 @@
               echo "  just test    - Run tests"
               echo "  just serve   - Serve the project"
               echo "  just watch   - Watch for changes (polls every 2s on macOS)"
+              echo "  just deploy  - Deploy to server (requires .env file)"
             '';
           };
         });

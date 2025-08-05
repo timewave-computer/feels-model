@@ -1,11 +1,15 @@
+-- Property-based tests validating the mathematical properties of the lending model.
+-- Uses QuickCheck to verify invariants across position types, risk calculations,
+-- and system behaviors. Ensures the "Everything is Lending" paradigm maintains
+-- consistency and correctness across all financial operations.
 module Test.Model where
 
 import Prelude
 
 import Data.Int as Int
 import Token (TokenType(..), TokenAmount)
-import Position (PositionParams)
-import Risk (SystemRisk(..), PoolRisk(..), UserRisk(..), getRiskAssessment)
+import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..))
+import Risk (calculateLendingRisk)
 import Data.Array (elem)
 import Data.Number (abs)
 import Data.Array.NonEmpty as NEA
@@ -25,7 +29,7 @@ newtype TestTokenType = TestTokenType TokenType
 
 -- Arbitrary instance for testing
 instance arbitraryTestTokenType :: Arbitrary TestTokenType where
-  arbitrary = TestTokenType <$> elements (NEA.cons' SyntheticSOL [Token "TEST1", Token "TEST2", PositionToken])
+  arbitrary = TestTokenType <$> elements (NEA.cons' FeelsSOL [Token "TEST1", Token "TEST2", JitoSOL])
 
 -- Test data generators
 genTokenAmount :: TestTokenType -> Number -> TokenAmount
@@ -43,9 +47,11 @@ testRedenominationAssociativity input x y =
     then Success
     else Failed $ "Associativity test failed for leverage " <> show x <> " * " <> show y <> " = " <> show expectedLeverage
 
--- Helper to extract leverage from unified parameters
-getLeverageFromParams :: PositionParams -> Number
-getLeverageFromParams params = leverageRateToRatio params.leverageRate
+-- Helper to extract leverage from lending record
+getLeverageFromRecord :: LendingRecord -> Number
+getLeverageFromRecord record = case record.terms of
+  LeverageTerms mult -> mult
+  _ -> 1.0
 
 -- Identity property tests
 -- Tests that Redenom(Token, 1x) = Token (no change)

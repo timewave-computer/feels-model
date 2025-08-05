@@ -4,10 +4,20 @@ output/
 
 # JavaScript/Node
 node_modules/
-public/bundle.js
+
+# Build output directory
+dist/
+
+# Sass cache
+.sass-cache/
 
 # Build artifacts
 .server.pid
+.log-server.pid
+
+# Temporary files
+/tmp/watch_files.txt
+/tmp/purescript_files.txt
 
 # OS/Editor
 .DS_Store
@@ -23,3 +33,9 @@ public/bundle.js
 .claude/
 .cursor/
 .cursorrules*
+
+# Working
+work/
+
+# Environment variables
+.env

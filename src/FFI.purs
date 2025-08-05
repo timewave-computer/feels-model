@@ -1,9 +1,15 @@
+-- Foreign Function Interface providing JavaScript interop for the lending protocol.
+-- Bridges PureScript business logic with JavaScript runtime functionality including
+-- DOM manipulation, state management, system metrics, and browser APIs. Enables
+-- the web-based interface for the "Everything is Lending" DeFi application.
 module FFI where
 
 import Prelude
 import Effect (Effect)
 import Data.Unit (Unit)
+import Data.Nullable (Nullable)
 import Web.DOM.Element (Element)
+import Foreign (Foreign)
 
 -- System state functions
 foreign import totalStaked :: Effect Number
@@ -33,4 +39,22 @@ foreign import onDOMReady :: Effect Unit -> Effect Unit
 
 -- Math functions
 foreign import log10 :: Number -> Number
-foreign import generatePositionId :: Effect Int
+foreign import sqrt :: Number -> Number
+foreign import generateRecordId :: Effect Int
+
+-- DOM attribute access
+foreign import getAttribute :: String -> Element -> Effect String
+
+-- Chart rendering
+foreign import initializePriceChart :: Effect Unit
+foreign import checkAndInitializeChart :: Effect Unit
+
+-- Remote control functions
+foreign import registerRemoteAction :: forall a. String -> (Foreign -> Effect a) -> Effect Unit
+foreign import triggerUIAction :: String -> Effect Boolean
+
+-- Selective DOM updates
+foreign import getElementById :: String -> Effect (Nullable Element)
+foreign import setElementInnerHTML :: String -> String -> Effect Unit
+foreign import setElementAttribute :: String -> String -> String -> Effect Unit
+foreign import removeElementAttribute :: String -> String -> Effect Unit

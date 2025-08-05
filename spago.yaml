@@ -1,5 +1,5 @@
 package:
-  name: hello-world-purescript
+  name: feels-model
   dependencies:
     - arrays
     - console
@@ -10,6 +10,13 @@ package:
     - strings
     - web-dom
     - web-html
+    - halogen
+    - halogen-subscriptions
+    - refs
+    - either
+    - tuples
+    - transformers
+    - safe-coerce
   test:
     main: Test.Main
     dependencies:
