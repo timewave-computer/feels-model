@@ -14,7 +14,7 @@ build:
     @cp assets/index.html dist/
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
-    @cp assets/chartjs-chart-financial.js dist/
+
     @cp assets/app.js dist/
     @cp assets/feels_guy.png dist/
     @echo "Building PureScript project..."
@@ -35,7 +35,6 @@ _build-quiet:
     @cp assets/index.html dist/ > /dev/null 2>&1 || exit 1
     @cp assets/favicon.ico dist/ > /dev/null 2>&1 || exit 1
     @cp assets/favicon.svg dist/ > /dev/null 2>&1 || exit 1
-    @cp assets/chartjs-chart-financial.js dist/ > /dev/null 2>&1 || exit 1
     @cp assets/app.js dist/ > /dev/null 2>&1 || exit 1
     @cp assets/feels_guy.png dist/ > /dev/null 2>&1 || exit 1
     @if [ ! -f src/Main.purs ]; then exit 1; fi
@@ -58,7 +57,7 @@ serve:
     @echo "Copying log-mirror.js to dist..."
     @cp assets/log-mirror.js dist/
     @echo "Installing express temporarily and starting browser log mirror server..."
-    @pkill -f "node.*scripts/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @echo ""
     @echo "Browser Log Mirror: http://localhost:3001"
@@ -68,7 +67,7 @@ serve:
     @echo "Hit CTRL-C to stop both servers"
     @echo ""
     @# Install express temporarily and start log server in background
-    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node scripts/log-mirror-server.js) > /dev/null 2>&1 & echo $$! > .log-server.pid
+    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node proxy/log-mirror-server.js) > /dev/null 2>&1 & echo $$! > .log-server.pid
     @sleep 2
     @# Start static file server
     @npx http-server dist -c-1 -p 9000 --no-dotfiles || npx http-server dist -c-1 -p 9001 --no-dotfiles
@@ -128,7 +127,7 @@ watch:
 # Clean build artifacts
 clean:
     @echo "Cleaning build artifacts..."
-    @pkill -f "node.*scripts/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
     @rm -f .server.pid .log-server.pid
@@ -137,7 +136,7 @@ clean:
 # Clean and also remove browser logs
 clean-all:
     @echo "Cleaning build artifacts and browser logs..."
-    @pkill -f "node.*scripts/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
     @rm -f .server.pid .log-server.pid browser.log
@@ -153,7 +152,7 @@ build-production:
     @cp assets/index.production.html dist/index.html
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
-    @cp assets/chartjs-chart-financial.js dist/
+
     @cp assets/app.js dist/
     @cp assets/feels_guy.png dist/
     @echo "Building PureScript project..."

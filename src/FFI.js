@@ -650,28 +650,11 @@ function renderSingleTokenChart(ctx, data) {
       return;
     }
     
-    // Convert data to Chart.js format
-    // For financial chart, we need OHLC data format
-    // Since we only have price data, we'll create synthetic OHLC data
-    const priceData = validData.map((point, index) => {
-      const block = Number(point.block) || 0;  // Use block number for x-axis
-      const price = Number(point.price);
-      
-      // Create synthetic OHLC data with small variations
-      const variation = 0.01; // 1% variation
-      const open = index === 0 ? price : Number(validData[index - 1].price);
-      const close = price;
-      const high = Math.max(open, close) * (1 + variation * Math.random());
-      const low = Math.min(open, close) * (1 - variation * Math.random());
-      
-      return {
-        x: block,  // Use block number for x-axis
-        o: open,
-        h: high,
-        l: low,
-        c: close
-      };
-    });
+    // Convert data to Chart.js format for line charts
+    const priceData = validData.map(point => ({
+      x: Number(point.block) || 0,  // Use block number for x-axis
+      y: Number(point.price)
+    }));
     
     console.log('Price data sample:', priceData.slice(0, 3));
   
@@ -693,12 +676,10 @@ function renderSingleTokenChart(ctx, data) {
     // Always use line chart - removed financial plugin dependency
     const chartType = 'line';
     
-    // Convert data to line chart format - use close price
-    const chartData = priceData.map(d => ({ x: d.x, y: d.c }));
-    console.log('Converted chartData:', chartData.slice(0, 3));
+    console.log('Chart data ready:', priceData.slice(0, 3));
     
     console.log('Creating Chart instance with type:', chartType);
-    console.log('Chart data points:', chartData.length);
+    console.log('Chart data points:', priceData.length);
     console.log('NFV data points:', nfvData.length);
     
     chartInstance = new Chart(ctx, {
@@ -706,7 +687,7 @@ function renderSingleTokenChart(ctx, data) {
       data: {
         datasets: [{
           label: 'JitoSOL/FeelsSOL Price',
-          data: chartData,
+          data: priceData,
           borderColor: '#ffc0cb',
           backgroundColor: 'rgba(255, 192, 203, 0.1)',
           borderWidth: 2,
