@@ -4,6 +4,10 @@
 default:
     @just --list
 
+# Ensure logs directory exists
+_ensure-logs:
+    @mkdir -p logs
+
 # Build the PureScript project and bundle JavaScript
 build:
     @echo "Preparing build directories..."
@@ -14,8 +18,6 @@ build:
     @cp assets/index.html dist/
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
-
-    @cp assets/app.js dist/
     @cp assets/feels_guy.png dist/
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
@@ -35,7 +37,6 @@ _build-quiet:
     @cp assets/index.html dist/ > /dev/null 2>&1 || exit 1
     @cp assets/favicon.ico dist/ > /dev/null 2>&1 || exit 1
     @cp assets/favicon.svg dist/ > /dev/null 2>&1 || exit 1
-    @cp assets/app.js dist/ > /dev/null 2>&1 || exit 1
     @cp assets/feels_guy.png dist/ > /dev/null 2>&1 || exit 1
     @if [ ! -f src/Main.purs ]; then exit 1; fi
     @npx spago build > /dev/null 2>&1 || exit 1
@@ -50,24 +51,46 @@ test:
     @echo "Running PureScript tests..."
     @npx spago test
 
+# Start WebSocket control server (development)
+ws-server:
+    @echo "Starting WebSocket control server..."
+    @echo "WebSocket: ws://localhost:3002"
+    @echo "HTTP API: http://localhost:3002"
+    @echo "Hit CTRL-C to stop"
+    @echo ""
+    @node proxy/websocket-server.js
+
+# Send command via WebSocket CLI
+ws-cmd action="ping":
+    @node proxy/websocket-cli.js {{action}}
+
+# Send ping command (shortcut)
+ping:
+    @just ws-cmd ping
+
+# Trigger simulation via WebSocket
+sim:
+    @just ws-cmd runSimulation
+
 # Serve the application locally (with log mirroring)
 serve:
     @echo "Starting development servers..."
     @if [ ! -f dist/bundle.js ]; then echo "Bundle not found. Running build first..."; just build; fi
-    @echo "Copying log-mirror.js to dist..."
-    @cp assets/log-mirror.js dist/
+    @echo "Copying log-client.js to dist..."
+    @cp assets/log-client.js dist/
     @echo "Installing express temporarily and starting browser log mirror server..."
-    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @echo ""
     @echo "Browser Log Mirror: http://localhost:3001"
     @echo "Application: http://127.0.0.1:9000"
-    @echo "Logs will be saved to: browser.log"
-    @echo "To tail logs in another terminal: tail -f browser.log"
+    @echo "Logs will be saved to: logs/browser-console.log"
+    @echo "To tail logs in another terminal: tail -f logs/browser-console.log"
     @echo "Hit CTRL-C to stop both servers"
     @echo ""
+    @mkdir -p logs
     @# Install express temporarily and start log server in background
-    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node proxy/log-mirror-server.js) > /dev/null 2>&1 & echo $$! > .log-server.pid
+    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node proxy/log-server.js) > /dev/null 2>&1 & echo $$! > .log-server.pid
     @sleep 2
     @# Start static file server
     @npx http-server dist -c-1 -p 9000 --no-dotfiles || npx http-server dist -c-1 -p 9001 --no-dotfiles
@@ -127,7 +150,7 @@ watch:
 # Clean build artifacts
 clean:
     @echo "Cleaning build artifacts..."
-    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
     @rm -f .server.pid .log-server.pid
@@ -136,14 +159,14 @@ clean:
 # Clean and also remove browser logs
 clean-all:
     @echo "Cleaning build artifacts and browser logs..."
-    @pkill -f "node.*proxy/log-mirror-server.js" 2>/dev/null || true
+    @pkill -f "node.*proxy/log-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
-    @rm -f .server.pid .log-server.pid browser.log
+    @rm -f .server.pid .log-server.pid
     @echo "Clean complete!"
 
 # Build production version without remote control and logging
-build-production:
+build-prod:
     @echo "Building production version..."
     @mkdir -p dist output/Main
     @echo "Compiling SCSS..."
@@ -152,8 +175,6 @@ build-production:
     @cp assets/index.production.html dist/index.html
     @cp assets/favicon.ico dist/
     @cp assets/favicon.svg dist/
-
-    @cp assets/app.js dist/
     @cp assets/feels_guy.png dist/
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
@@ -182,7 +203,7 @@ deploy:
     echo "Server: root@${feels_server}"
     echo ""
     echo "Building production version..."
-    just build-production
+    just build-prod
     if [ ! -d "dist" ] || [ ! -f "dist/index.html" ]; then
         echo "Error: Build failed or dist directory not found"
         exit 1

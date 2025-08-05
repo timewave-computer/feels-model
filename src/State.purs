@@ -1,13 +1,13 @@
--- Unified protocol state management providing a clean API for the frontend.
+-- Core state management system for the Feels Protocol.
 -- Centralizes all state operations and ensures consistency across the system.
-module Protocol
-  ( ProtocolState
-  , ProtocolRuntime
-  , ProtocolCommand(..)
-  , ProtocolQuery(..)
-  , ProtocolResult(..)
-  , ProtocolError(..)
-  , initProtocol
+module State
+  ( AppState
+  , AppRuntime
+  , AppCommand(..)
+  , AppQuery(..)
+  , AppResult(..)
+  , AppError(..)
+  , initState
   , executeCommand
   , executeQuery
   , subscribe
@@ -42,8 +42,8 @@ import FFI (currentTime, generateRecordId)
 -- Types
 --------------------------------------------------------------------------------
 
--- Complete protocol state
-type ProtocolState =
+-- Complete application state
+type AppState =
   { tokenRegistry :: TokenRegistry
   , lendingBook :: LendingBook
   , gateway :: GatewayState
@@ -56,15 +56,15 @@ type ProtocolState =
   , timestamp :: Number
   }
 
--- Runtime wrapper for protocol state
-type ProtocolRuntime =
-  { state :: Ref ProtocolState
-  , listeners :: Ref (Array { id :: Int, callback :: ProtocolState -> Effect Unit })
+-- Runtime wrapper for application state
+type AppRuntime =
+  { state :: Ref AppState
+  , listeners :: Ref (Array { id :: Int, callback :: AppState -> Effect Unit })
   , nextListenerId :: Ref Int
   }
 
 -- Commands that modify state
-data ProtocolCommand
+data AppCommand
   = CreateToken String String String  -- creator, ticker, name
   | CreateLendingPosition String TokenType Number TokenType Number LendingTerms (Maybe String)  -- user, lendAsset, amount, collateralAsset, collateralAmount, terms, targetToken
   | TransferTokens String String TokenType Number  -- from, to, token, amount
@@ -74,19 +74,19 @@ data ProtocolCommand
   | WithdrawPosition String Int   -- user, positionId
 
 -- Queries that read state
-data ProtocolQuery
+data AppQuery
   = GetUserTokens String
   | GetAllTokens
   | GetUserPositions String
   | GetUserBalance String TokenType
   | GetTokenByTicker String
   | GetLenderOffers
-  | GetProtocolStats
+  | GetSystemStats
   | GetNFVMetrics
   | GetPositionTargetToken Int
 
 -- Results from operations
-data ProtocolResult
+data AppResult
   = TokenCreated TokenMetadata
   | PositionCreated LendingRecord
   | TokensTransferred { from :: String, to :: String, token :: TokenType, amount :: Number }
@@ -99,7 +99,7 @@ data ProtocolResult
   | Balance Number
   | TokenInfo (Maybe TokenMetadata)
   | LenderOfferList (Array LendingRecord)
-  | ProtocolStatsResult 
+  | SystemStatsResult 
     { totalValueLocked :: Number
     , totalUsers :: Int
     , activePositions :: Int
@@ -117,7 +117,7 @@ data ProtocolResult
   | TargetTokenInfo (Maybe String)
 
 -- Errors
-data ProtocolError
+data AppError
   = InvalidCommand String
   | InsufficientBalance String
   | TokenNotFound String
@@ -126,9 +126,9 @@ data ProtocolError
   | InvalidAmount Number
   | SystemError String
 
-derive instance eqProtocolError :: Eq ProtocolError
+derive instance eqAppError :: Eq AppError
 
-instance showProtocolError :: Show ProtocolError where
+instance showAppError :: Show AppError where
   show (InvalidCommand msg) = "Invalid command: " <> msg
   show (InsufficientBalance msg) = "Insufficient balance: " <> msg
   show (TokenNotFound ticker) = "Token not found: " <> ticker
@@ -141,9 +141,9 @@ instance showProtocolError :: Show ProtocolError where
 -- Initialization
 --------------------------------------------------------------------------------
 
--- Initialize protocol with empty state
-initProtocol :: Effect ProtocolRuntime
-initProtocol = do
+-- Initialize state with empty state
+initState :: Effect AppRuntime
+initState = do
   -- Initialize all subsystems
   tokenRegistry <- initTokenRegistry
   lendingBook <- initLendingBook
@@ -200,7 +200,7 @@ initProtocol = do
 --------------------------------------------------------------------------------
 
 -- Execute a command that modifies state
-executeCommand :: ProtocolRuntime -> ProtocolCommand -> Effect (Either ProtocolError ProtocolResult)
+executeCommand :: AppRuntime -> AppCommand -> Effect (Either AppError AppResult)
 executeCommand runtime cmd = do
   state <- read runtime.state
   result <- processCommand state cmd
@@ -218,7 +218,7 @@ executeCommand runtime cmd = do
     Left err -> pure $ Left err
 
 -- Process a command and return new state
-processCommand :: ProtocolState -> ProtocolCommand -> Effect (Either ProtocolError (Tuple ProtocolState ProtocolResult))
+processCommand :: AppState -> AppCommand -> Effect (Either AppError (Tuple AppState AppResult))
 processCommand state = case _ of
   CreateToken creator ticker name -> do
     -- Validate inputs
@@ -278,7 +278,7 @@ processCommand state = case _ of
         case result of
           Left err -> pure $ Left $ SystemError err
           Right lendingRecord -> do
-            -- Automatically collect protocol fees and contribute to NFV
+            -- Automatically collect fees and contribute to NFV
             let feeRate = case terms of
                   StakingTerms _ -> 0.0005  -- 0.05% for staking
                   LeverageTerms _ -> 0.001   -- 0.1% for leverage
@@ -358,13 +358,13 @@ processCommand state = case _ of
 --------------------------------------------------------------------------------
 
 -- Execute a query that reads state
-executeQuery :: ProtocolRuntime -> ProtocolQuery -> Effect (Either ProtocolError ProtocolResult)
+executeQuery :: AppRuntime -> AppQuery -> Effect (Either AppError AppResult)
 executeQuery runtime query = do
   state <- read runtime.state
   processQuery state query
 
 -- Process a query and return result
-processQuery :: ProtocolState -> ProtocolQuery -> Effect (Either ProtocolError ProtocolResult)
+processQuery :: AppState -> AppQuery -> Effect (Either AppError AppResult)
 processQuery state = case _ of
   GetUserTokens user -> do
     -- In a real implementation, we'd filter tokens by owner
@@ -392,7 +392,7 @@ processQuery state = case _ of
     offers <- getLenderRecords state.lendingBook
     pure $ Right $ LenderOfferList offers
   
-  GetProtocolStats -> do
+  GetSystemStats -> do
     activeRecords <- getActiveRecords state.lendingBook
     lenderRecords <- getLenderRecords state.lendingBook
     let allRecords = activeRecords <> lenderRecords
@@ -412,7 +412,7 @@ processQuery state = case _ of
     balances <- read state.balances
     let feelsSOLSupply = sum $ map (\b -> if b.token == FeelsSOL then b.amount else 0.0) balances
         jitoSOLLocked = sum $ map (\b -> if b.token == JitoSOL then b.amount else 0.0) balances
-    pure $ Right $ ProtocolStatsResult
+    pure $ Right $ SystemStatsResult
       { totalValueLocked: totalValueLocked  
       , totalUsers: userCount  
       , activePositions: length activeRecords
@@ -445,7 +445,7 @@ processQuery state = case _ of
 --------------------------------------------------------------------------------
 
 -- Subscribe to state changes
-subscribe :: ProtocolRuntime -> (ProtocolState -> Effect Unit) -> Effect Int
+subscribe :: AppRuntime -> (AppState -> Effect Unit) -> Effect Int
 subscribe runtime callback = do
   id <- read runtime.nextListenerId
   _ <- write (id + 1) runtime.nextListenerId
@@ -455,7 +455,7 @@ subscribe runtime callback = do
   pure id
 
 -- Unsubscribe from state changes
-unsubscribe :: ProtocolRuntime -> Int -> Effect Unit
+unsubscribe :: AppRuntime -> Int -> Effect Unit
 unsubscribe runtime listenerId = do
   _ <- modify_ (filter (\l -> l.id /= listenerId)) runtime.listeners
   pure unit

@@ -16,6 +16,18 @@ Risk assessment and fee calculation form a critical part of the system, implemen
 
 ## Usage
 
-- `nix develop` to enter the development shell
-- `just build` to compile the PureScript code
-- `just serve` to serve the application at `http://localhost:8000`
+### Development
+- `nix develop` - Enter development shell
+- `just build` - Build application (dev version with proxy system)
+- `just serve` - Serve with log mirroring on port 9000
+- `just serve-simple` - Serve without log mirroring
+
+### WebSocket Control (Development)
+- `just ws-server` - Start WebSocket server (port 3002)
+- `just ping` - Test WebSocket connection
+- `just sim` - Trigger simulation in running app
+- `just ws-cmd <action>` - Send custom command
+
+### Production
+- `just build-prod` - Build for production (no proxy system)
+- `just deploy` - Deploy to server (requires .env config)

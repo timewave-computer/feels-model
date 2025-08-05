@@ -17,7 +17,7 @@ Main WebSocket server providing HTTP API and WebSocket bridge.
 
 **Start the server:**
 ```bash
-node proxy/websocket-server.js
+just ws-server
 ```
 
 **Endpoints:**
@@ -38,18 +38,18 @@ Command-line interface for sending commands to the WebSocket server.
 
 **Usage:**
 ```bash
-node proxy/websocket-cli.js <action> [params...]
-node proxy/websocket-cli.js ping
-node proxy/websocket-cli.js runSimulation
+just ping
+just sim  
+just ws-cmd <action>
 ```
 
-### `log-mirror-server.js`
-Express server that mirrors browser console logs to a web interface and saves them to `browser.log`.
+### `log-server.js`
+Express server that mirrors browser console logs to a web interface and saves them to `logs/browser-console.log`.
 
 **Features:**
 - Web interface at `http://localhost:3001`
 - Real-time log streaming
-- File logging to `browser.log`
+- File logging to `logs/browser-console.log`
 - Integrated with `just serve` command
 
 ## Development Workflow
@@ -61,7 +61,7 @@ just serve
 This automatically starts:
 1. Log mirror server on port 3001
 2. Main application on port 9000
-3. Saves logs to `browser.log`
+3. Saves logs to `logs/browser-console.log`
 
 ### WebSocket Control Session
 1. Start the main application:
@@ -71,18 +71,20 @@ This automatically starts:
 
 2. In another terminal, start WebSocket server:
    ```bash
-   node proxy/websocket-server.js
+   just ws-server
    ```
 
-3. Send commands via CLI:
+3. Send commands:
    ```bash
-   node proxy/websocket-cli.js ping
-   node proxy/websocket-cli.js runSimulation
+   just ping
+   just sim
+   just ws-cmd <action>
    ```
 
 ### Available Commands
-- `ping` - Test connectivity (returns "pong")
-- `runSimulation` - Trigger simulation in the UI
+- `just ping` - Test connectivity (returns "pong")
+- `just sim` - Trigger simulation in the UI
+- `just ws-cmd <action>` - Send custom command
 - Custom actions registered via `registerRemoteAction()`
 
 ## Production Build
@@ -90,20 +92,20 @@ This automatically starts:
 For production deployment **without** the proxy system:
 
 ```bash
-just build-production
+just build-prod
 ```
 
 This builds the application using `index.production.html` which excludes:
-- `remote-control-client.js`
-- `log-mirror.js`
+- `websocket-client.js`
+- `log-client.js`
 - All WebSocket/logging functionality
 
 The production build is clean and contains only the core application code.
 
-## Files Integration
+## Application Integration
 
-- `assets/remote-control-client.js` - Browser WebSocket client (dev only)
-- `assets/log-mirror.js` - Browser console interceptor (dev only)
+- `assets/websocket-client.js` - Browser WebSocket client (dev only)
+- `assets/log-client.js` - Browser console interceptor (dev only)
 - `assets/index.html` - Development HTML (includes proxy scripts)
 - `assets/index.production.html` - Production HTML (excludes proxy scripts)
 

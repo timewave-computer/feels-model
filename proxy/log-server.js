@@ -9,7 +9,8 @@ const path = require('path');
 
 const app = express();
 const PORT = 3001;
-const LOG_FILE = path.join(__dirname, '..', 'browser.log');
+const LOG_DIR = path.join(__dirname, '..', 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'browser-console.log');
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -120,10 +121,13 @@ app.listen(PORT, () => {
     console.log(`\nBrowser Log Mirror Server`);
     console.log(`Running on http://localhost:${PORT}`);
     console.log(`Logs saved to: ${LOG_FILE}`);
-    console.log(`To tail logs: tail -f browser.log`);
+    console.log(`To tail logs: tail -f logs/browser-console.log`);
     console.log(`To stop: Ctrl+C\n`);
     
-    // Create log file if it doesn't exist
+    // Create logs directory and log file if they don't exist
+    if (!fs.existsSync(LOG_DIR)) {
+        fs.mkdirSync(LOG_DIR, { recursive: true });
+    }
     if (!fs.existsSync(LOG_FILE)) {
         fs.writeFileSync(LOG_FILE, `# Browser Console Logs - Started ${new Date().toISOString()}\n`);
     }

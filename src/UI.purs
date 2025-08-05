@@ -30,10 +30,10 @@ import Halogen.Aff.Util (selectElement)
 import Web.DOM.ParentNode (QuerySelector(..))
 import Partial.Unsafe (unsafePartial)
 
--- Import protocol API
-import Protocol as P
-import Protocol (ProtocolRuntime, ProtocolResult(..), 
-                 ProtocolError(..), initProtocol, executeCommand, executeQuery, subscribe)
+-- Import API
+import API as A
+import API (APIRuntime, APIResult(..), 
+                 APIError(..), initAPI, executeCommand, executeQuery, subscribe)
 
 -- Import types we need for display
 import Token (TokenType(..), TokenMetadata)
@@ -53,7 +53,7 @@ import Utils (formatAmount, formatPercentage)
 --------------------------------------------------------------------------------
 
 type UIState =
-  { protocol :: Maybe ProtocolRuntime
+  { api :: Maybe APIRuntime
   , currentUser :: String
   -- Position Creation
   , inputAmount :: Number
@@ -178,7 +178,7 @@ component =
 
 initialUIState :: UIState
 initialUIState =
-  { protocol: Nothing
+  { api: Nothing
   , currentUser: "main-user"
   -- Position Creation
   , inputAmount: 100.0
@@ -806,14 +806,14 @@ handleAction :: forall o m. MonadAff m => Action -> H.HalogenM UIState Action ()
 handleAction = case _ of
   Initialize -> do
     -- Initialize protocol
-    protocol <- H.liftEffect initProtocol
+    protocol <- H.liftEffect initAPI
     
     -- Subscribe to protocol state changes
     _ <- H.liftEffect $ subscribe protocol \_ -> do
       log "Protocol state changed, refreshing UI data"
     
     -- Store protocol runtime
-    H.modify_ _ { protocol = Just protocol, loading = false }
+    H.modify_ _ { api = Just protocol, loading = false }
     
     -- Register remote control actions
     H.liftEffect $ registerRemoteAction "runSimulation" \params -> do
@@ -851,18 +851,18 @@ handleAction = case _ of
   
   RefreshData -> do
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> pure unit
       Just protocol -> do
         -- Get user positions
-        posResult <- H.liftEffect $ executeQuery protocol (P.GetUserPositions state.currentUser)
+        posResult <- H.liftEffect $ executeQuery protocol (A.GetUserPositions state.currentUser)
         case posResult of
           Right (PositionList positions) -> 
             H.modify_ _ { userPositions = positions }
           _ -> pure unit
         
         -- Get lender offers
-        offersResult <- H.liftEffect $ executeQuery protocol P.GetLenderOffers
+        offersResult <- H.liftEffect $ executeQuery protocol A.GetLenderOffers
         case offersResult of
           Right (LenderOfferList offers) -> do
             H.liftEffect $ log $ "RefreshData: Found " <> show (length offers) <> " lender offers"
@@ -878,9 +878,9 @@ handleAction = case _ of
           _ -> pure unit
         
         -- Get protocol stats
-        statsResult <- H.liftEffect $ executeQuery protocol P.GetProtocolStats
+        statsResult <- H.liftEffect $ executeQuery protocol A.GetSystemStats
         case statsResult of
-          Right (ProtocolStatsResult stats) -> do
+          Right (SystemStatsResult stats) -> do
             H.liftEffect $ log $ "RefreshData: Updated protocol stats - TVL: " <> show stats.totalValueLocked <> ", Users: " <> show stats.totalUsers
             H.modify_ _ { protocolStats = Just stats }
           Left err ->
@@ -888,15 +888,15 @@ handleAction = case _ of
           _ -> pure unit
         
         -- Get wallet balances
-        jitoBalanceResult <- H.liftEffect $ executeQuery protocol (P.GetUserBalance state.currentUser JitoSOL)
+        jitoBalanceResult <- H.liftEffect $ executeQuery protocol (A.GetUserBalance state.currentUser JitoSOL)
         case jitoBalanceResult of
-          Right (P.Balance balance) ->
+          Right (Balance balance) ->
             H.modify_ _ { jitoSOLBalance = balance }
           _ -> pure unit
         
-        feelsBalanceResult <- H.liftEffect $ executeQuery protocol (P.GetUserBalance state.currentUser FeelsSOL)
+        feelsBalanceResult <- H.liftEffect $ executeQuery protocol (A.GetUserBalance state.currentUser FeelsSOL)
         case feelsBalanceResult of
-          Right (P.Balance balance) ->
+          Right (Balance balance) ->
             H.modify_ _ { feelsSOLBalance = balance }
           _ -> pure unit
         
@@ -952,7 +952,7 @@ handleAction = case _ of
 
   CreateTokenUI -> do
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> pure unit
       Just protocol -> do
         let ticker = trim state.tokenTicker
@@ -962,7 +962,7 @@ handleAction = case _ of
           then do
             -- Execute create token command
             result <- H.liftEffect $ executeCommand protocol 
-              (P.CreateToken state.currentUser ticker name)
+              (A.CreateToken state.currentUser ticker name)
             
             case result of
               Right (TokenCreated token) -> do
@@ -986,7 +986,7 @@ handleAction = case _ of
   
   CreatePosition -> do
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> pure unit
       Just protocol -> do
         -- Determine terms based on which fields are filled
@@ -1001,7 +1001,7 @@ handleAction = case _ of
         
         -- Execute create position command
         result <- H.liftEffect $ executeCommand protocol
-          (P.CreateLendingPosition 
+          (A.CreateLendingPosition 
             state.currentUser
             state.selectedAsset
             state.inputAmount
@@ -1031,11 +1031,11 @@ handleAction = case _ of
 
   EnterGateway -> do
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> pure unit
       Just protocol -> do
         result <- H.liftEffect $ executeCommand protocol
-          (P.EnterGateway state.currentUser state.jitoSOLAmount)
+          (A.EnterGateway state.currentUser state.jitoSOLAmount)
         
         case result of
           Right (GatewayEntered info) -> do
@@ -1048,12 +1048,12 @@ handleAction = case _ of
 
   ExitGateway -> do
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> pure unit
       Just protocol -> do
         -- For exit, we use the input amount as FeelsSOL amount to convert
         result <- H.liftEffect $ executeCommand protocol
-          (P.ExitGateway state.currentUser state.feelsSOLAmount)
+          (A.ExitGateway state.currentUser state.feelsSOLAmount)
         
         case result of
           Right (GatewayExited info) -> do
@@ -1072,7 +1072,7 @@ handleAction = case _ of
     H.modify_ _ { simulationRunning = true, error = Nothing }
     
     state <- H.get
-    case state.protocol of
+    case state.api of
       Nothing -> H.modify_ _ { error = Just "Protocol not initialized" }
       Just protocol -> do
         -- Extract the protocol's lending book instead of creating a new one
@@ -1099,7 +1099,7 @@ handleAction = case _ of
         _ <- traverse (processTokenCreation protocol) tokenCreationActions
         
         -- Get all tokens from the protocol (including those created during simulation)
-        allTokensResult <- H.liftEffect $ executeQuery protocol P.GetAllTokens
+        allTokensResult <- H.liftEffect $ executeQuery protocol A.GetAllTokens
         
         let allTokens = case allTokensResult of
               Right (TokenList tokens) -> tokens
@@ -1231,7 +1231,7 @@ handleAction = case _ of
     processTokenCreation protocol action = case action of
       S.CreateToken userId ticker name -> H.liftEffect $ do
         log $ "Creating token: " <> ticker <> " for user: " <> userId
-        result <- executeCommand protocol (P.CreateToken userId ticker name)
+        result <- executeCommand protocol (A.CreateToken userId ticker name)
         case result of
           Right _ -> log $ "Successfully created token: " <> ticker
           Left err -> log $ "Failed to create token: " <> show err
