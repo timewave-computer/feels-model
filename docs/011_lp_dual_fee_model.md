@@ -1,6 +1,6 @@
-## LP Fee Compensation Formula: Dual Risk Mitigation
+## LP Fee Compensation: Dual Risk Mitigation
 
-This formula addresses both **user risk** (Loss vs Rebalancing) and **system risk** (Liquidity Crisis) through a unified compensation mechanism.
+This formula addresses both user risk (Loss vs Rebalancing) and system risk (Liquidity Crisis) through a unified compensation mechanism.
 
 Let:
 
@@ -26,9 +26,7 @@ Where:
 * $\alpha$: Sensitivity parameter for liquidity stress response
 * $\text{LiquidityStress}(S) \in [0,1]$: Measures proximity to liquidity crisis
 
----
-
-## 🔍 Interpretation: Dual Risk Mitigation
+## Interpretation: Dual Risk Mitigation
 
 ### User Risk Mitigation (Loss vs Rebalancing)
 * **LPs with high LVR** receive proportionally more compensation to offset adverse selection losses
@@ -45,8 +43,6 @@ Where:
   - Rewards useful liquidity (numerator)
   - Adjusts for individual LP costs (denominator)
   - Scales with system needs (dynamic λ)
-
----
 
 ## Implementation Enhancements
 
@@ -81,11 +77,9 @@ Implement dynamic bounds that respond to system state:
 * **Maximum fee multiplier**: Caps extreme rewards to maintain sustainability
 * **LVR compensation ceiling**: Prevents runaway costs during extreme volatility
 
----
+## Self-Balancing Risk Management
 
-## Design Philosophy: Self-Balancing Risk Management
-
-This creates a **self-balancing ecosystem** that addresses the fundamental risks in AMM liquidity provision:
+This creates a self-balancing ecosystem that addresses the fundamental risks in AMM liquidity provision:
 
 ### Risk-Aware Design
 * **User Risk Management**: Compensates LPs for unavoidable adverse selection (LVR)
@@ -111,3 +105,14 @@ This creates a **self-balancing ecosystem** that addresses the fundamental risks
 * **Dynamic scaling** responds to actual system needs, not individual actions
 
 This model transforms passive liquidity provision into an adaptive, responsive system that maintains equilibrium between LP profitability and protocol health.
+
+## Exdending to Multi-Party Incentive Design
+
+This dual fee model demonstrates how to balance incentives between two key parties: LPs (users) and the System. For a more comprehensive framework that extends to multi-party incentive design, see the [Shapley Model](./003_shapley_model.md).
+
+The Shapley Model provides a theoretically grounded approach to:
+- Allocating value across multiple tiers (System, Pool, User)
+- Ensuring fair compensation based on marginal contributions
+- Creating sustainable economic equilibria in complex multi-sided markets
+
+While this dual fee model focuses on the practical LP-System balance, the Shapley framework offers a complete view of what system-level incentive design should aim to achieve when coordinating multiple stakeholder groups.

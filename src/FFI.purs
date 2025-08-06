@@ -1,7 +1,7 @@
 -- Foreign Function Interface providing JavaScript interop for the lending protocol.
 -- Bridges PureScript business logic with JavaScript runtime functionality including
 -- DOM manipulation, state management, system metrics, and browser APIs. Enables
--- the web-based interface for the "Everything is Lending" DeFi application.
+-- the web-based interface for the Feels DeFi application.
 module FFI where
 
 import Prelude

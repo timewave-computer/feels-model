@@ -1,6 +1,6 @@
 -- End-to-end simulation tests for the Feels protocol.
 -- Tests the complete simulation workflow: token creation, funding, market simulation,
--- and verification of results including NFV growth and trading activity.
+-- and verification of results including POL growth and trading activity.
 module Test.Simulation where
 
 import Prelude
@@ -21,8 +21,8 @@ import Token (TokenType(..), TokenAmount, TokenMetadata, TokenCreationParams, cr
 import LendingBook (initLendingBook, getTotalLiquidity)
 import Gateway (initGateway)
 import SyntheticSOL (initSyntheticSOL)
-import NFV (initNFV, getNFVBalance)
-import Simulation (SimulationConfig, SimulationState, SimulationResults, AccountProfile(..), MarketScenario(..), initSimulation, runSimulation, executeSimulation, getSimulationStats)
+import POL (initPOL, getPOLBalance)
+import Simulation.Sim (SimulationConfig, SimulationState, SimulationResults, AccountProfile(..), MarketScenario(..), initSimulation, runSimulation, executeSimulation, getSimulationStats)
 import Utils (formatAmount)
 import FFI (currentTime)
 
@@ -57,8 +57,8 @@ createTestTokenData numTokens =
 type TestSimulationState =
   { simulationState :: SimulationState
   , createdTokens :: Array TokenMetadata
-  , initialNFV :: Number
-  , finalNFV :: Number
+  , initialPOL :: Number
+  , finalPOL :: Number
   , totalTrades :: Int
   , totalVolume :: Number
   }
@@ -125,17 +125,17 @@ runE2ESimulationTest = do
       let config = createTestConfig
       initialState <- initSimulation config
       
-      -- Record initial NFV
-      initialNFV <- getNFVBalance initialState.gateway.nfvState
-      log $ "Initial NFV: " <> formatAmount initialNFV
+      -- Record initial POL
+      initialPOL <- getPOLBalance initialState.gateway.polState
+      log $ "Initial POL: " <> formatAmount initialPOL
       
       -- Phase 3: Run simulation
       log "Phase 3: Running market simulation..."
       finalState <- executeSimulation config initialState
       
-      -- Record final NFV
-      finalNFV <- getNFVBalance finalState.gateway.nfvState
-      log $ "Final NFV: " <> formatAmount finalNFV
+      -- Record final POL
+      finalPOL <- getPOLBalance finalState.gateway.polState
+      log $ "Final POL: " <> formatAmount finalPOL
       
       -- Phase 4: Calculate metrics
       let totalTrades = length finalState.actionHistory
@@ -146,8 +146,8 @@ runE2ESimulationTest = do
       
       pure (Right { simulationState: finalState
                   , createdTokens: createdTokens
-                  , initialNFV: initialNFV
-                  , finalNFV: finalNFV
+                  , initialPOL: initialPOL
+                  , finalPOL: finalPOL
                   , totalTrades: totalTrades
                   , totalVolume: totalVolume
                   })
@@ -176,14 +176,14 @@ verifyTradingActivity totalTrades totalVolume =
     then Success
     else Failed $ "Insufficient trading activity: " <> show totalTrades <> " trades, " <> formatAmount totalVolume <> " volume"
 
--- Verify NFV growth
-verifyNFVGrowth :: Number -> Number -> Result
-verifyNFVGrowth initialNFV finalNFV = 
-  let growth = finalNFV - initialNFV
-      growthPercentage = if initialNFV > 0.0 then (growth / initialNFV) * 100.0 else 0.0
+-- Verify POL growth
+verifyPOLGrowth :: Number -> Number -> Result
+verifyPOLGrowth initialPOL finalPOL = 
+  let growth = finalPOL - initialPOL
+      growthPercentage = if initialPOL > 0.0 then (growth / initialPOL) * 100.0 else 0.0
   in if growth > 0.0
        then Success
-       else Failed $ "NFV did not grow. Initial: " <> formatAmount initialNFV <> ", Final: " <> formatAmount finalNFV <> " (Growth: " <> formatAmount growthPercentage <> "%)"
+       else Failed $ "POL did not grow. Initial: " <> formatAmount initialPOL <> ", Final: " <> formatAmount finalPOL <> " (Growth: " <> formatAmount growthPercentage <> "%)"
 
 -- Verify simulation state consistency
 verifySimulationConsistency :: TestSimulationState -> Result
@@ -233,9 +233,9 @@ runSimulationTests = do
       let tradingTest = verifyTradingActivity testState.totalTrades testState.totalVolume
       logTestResult "Trading Activity" tradingTest
       
-      -- Test 3: NFV growth
-      let nfvTest = verifyNFVGrowth testState.initialNFV testState.finalNFV
-      logTestResult "NFV Growth" nfvTest
+      -- Test 3: POL growth
+      let polTest = verifyPOLGrowth testState.initialPOL testState.finalPOL
+      logTestResult "POL Growth" polTest
       
       -- Test 4: Simulation consistency
       let consistencyTest = verifySimulationConsistency testState
@@ -250,7 +250,7 @@ runSimulationTests = do
       log $ "Tokens Created: " <> show (length testState.createdTokens)
       log $ "Total Trades: " <> show testState.totalTrades
       log $ "Total Volume: " <> formatAmount testState.totalVolume
-      log $ "NFV Growth: " <> formatAmount (testState.finalNFV - testState.initialNFV) <> " (" <> formatAmount ((testState.finalNFV - testState.initialNFV) / testState.initialNFV * 100.0) <> "%)"
+      log $ "POL Growth: " <> formatAmount (testState.finalPOL - testState.initialPOL) <> " (" <> formatAmount ((testState.finalPOL - testState.initialPOL) / testState.initialPOL * 100.0) <> "%"
       log $ "Simulation Blocks: " <> show testState.simulationState.currentBlock
       log $ "Active Accounts: " <> show (length testState.simulationState.accounts)
 

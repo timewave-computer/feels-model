@@ -4,7 +4,6 @@
 module Execution
   ( executeLoan
   , LoanResult
-  , ExecutionError(..)
   ) where
 
 import Prelude
@@ -16,11 +15,12 @@ import Effect (Effect)
 
 import Token (TokenType(..))
 import LendingRecord (LendingRecord, LendingTerms(..), LendingStatus(..), LendingSide(..))
-import LendingBook (LendingBook, takeLoan, MatchResult)
+import LendingBook (LendingBook, takeLoan)
 import Incentives (MarketDynamics, DynamicsResult, calculateDynamics)
 
-import NFV (NFVState, contributeToNFV)
-import BalanceManager (BalanceRegistry, checkBalance, updateBalance, transferBalance)
+import POL (POLState, contributeToPOL)
+import Accounts (AccountRegistry, checkAccountBalance, updateAccount, transferBetweenAccounts)
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Types
@@ -36,22 +36,6 @@ type LoanResult =
   , dynamics :: DynamicsResult  -- Market dynamics for transparency
   }
 
--- Execution errors
-data ExecutionError
-  = ValidationError String
-  | InsufficientBalance String
-  | NoMatchingOffers
-  | MatchingError String
-  | TransferError String
-
-derive instance eqExecutionError :: Eq ExecutionError
-
-instance showExecutionError :: Show ExecutionError where
-  show (ValidationError msg) = "Validation Error: " <> msg
-  show (InsufficientBalance msg) = "Insufficient Balance: " <> msg
-  show NoMatchingOffers = "No matching offers available"
-  show (MatchingError msg) = "Matching Error: " <> msg
-  show (TransferError msg) = "Transfer Error: " <> msg
 
 --------------------------------------------------------------------------------
 -- Main Execution Function
@@ -59,10 +43,10 @@ instance showExecutionError :: Show ExecutionError where
 
 -- Execute a loan request
 executeLoan :: forall r.
-  { balances :: BalanceRegistry
+  { accounts :: AccountRegistry
   , lendingBook :: LendingBook
   , marketDynamics :: MarketDynamics
-  , nfvState :: NFVState
+  , polState :: POLState
   | r } ->
   String ->        -- Borrower
   TokenType ->     -- Asset to borrow
@@ -70,17 +54,17 @@ executeLoan :: forall r.
   TokenType ->     -- Collateral asset
   Number ->        -- Collateral amount
   LendingTerms ->  -- Terms
-  Effect (Either ExecutionError LoanResult)
+  Effect (Either ProtocolError LoanResult)
 executeLoan state borrower lendAsset amount collateralAsset collateralAmount terms = do
   -- Step 1: Validate inputs
   case validateLoanRequest borrower lendAsset amount collateralAsset collateralAmount terms of
     Left err -> pure $ Left (ValidationError err)
     Right _ -> do
       
-      -- Step 2: Check borrower has sufficient collateral
-      hasCollateral <- checkBalance state.balances borrower collateralAsset collateralAmount
+      -- Step 2: Check borrower's Feels account has sufficient collateral
+      hasCollateral <- checkAccountBalance state.accounts borrower collateralAsset collateralAmount
       if not hasCollateral
-        then pure $ Left (InsufficientBalance "Insufficient collateral balance")
+        then pure $ Left (InsufficientBalanceError "Insufficient collateral balance")
         else do
           
           -- Step 3: Calculate market dynamics (fees and returns)
@@ -101,12 +85,12 @@ executeLoan state borrower lendAsset amount collateralAsset collateralAmount ter
                 }
           
           dynamics <- calculateDynamics state.marketDynamics tempRecord
-          let userFee = dynamics.borrowerRate * amount - dynamics.nfvFlow * amount
+          let userFee = dynamics.borrowerRate * amount - dynamics.polFlow * amount
           
-          -- Step 4: Check borrower can pay fees
-          hasFees <- checkBalance state.balances borrower lendAsset userFee
+          -- Step 4: Check borrower's Feels account can pay fees
+          hasFees <- checkAccountBalance state.accounts borrower lendAsset userFee
           if not hasFees
-            then pure $ Left (InsufficientBalance "Insufficient balance for fees")
+            then pure $ Left (InsufficientBalanceError "Insufficient balance for fees")
             else do
               
               -- Step 5: Execute the loan through LendingBook
@@ -114,27 +98,27 @@ executeLoan state borrower lendAsset amount collateralAsset collateralAmount ter
                             collateralAsset collateralAmount terms
               
               case matchResult of
-                Left err -> pure $ Left (MatchingError err)
+                Left err -> pure $ Left err
                 Right match -> do
                   
-                  -- Step 6: Transfer collateral from borrower
-                  collateralTransfer <- transferBalance state.balances borrower "protocol" 
+                  -- Step 6: Transfer collateral from borrower's account to protocol
+                  collateralTransfer <- transferBetweenAccounts state.accounts borrower "protocol" 
                                        collateralAsset collateralAmount
                   case collateralTransfer of
                     Left err -> pure $ Left (TransferError err)
                     Right _ -> do
                       
-                      -- Step 7: Transfer loan amount to borrower
-                      loanTransfer <- transferBalance state.balances match.lenderRecord.owner 
+                      -- Step 7: Transfer loan amount to borrower's account
+                      loanTransfer <- transferBetweenAccounts state.accounts match.lenderRecord.owner 
                                      borrower lendAsset amount
                       case loanTransfer of
                         Left err -> pure $ Left (TransferError err)
                         Right _ -> do
                           
-                          -- Step 8: Process fees
-                          _ <- updateBalance state.balances borrower lendAsset (-userFee)
-                          _ <- contributeToNFV state.nfvState dynamics.operationType 
-                               (dynamics.nfvFlow * amount) (Just match.borrowerRecord.id)
+                          -- Step 8: Process fees from borrower's account
+                          _ <- updateAccount state.accounts borrower lendAsset (-userFee)
+                          _ <- contributeToPOL state.polState dynamics.operationType 
+                               (dynamics.polFlow * amount) (Just match.borrowerRecord.id)
                           
                           -- Step 9: Determine collateral token type
                           let collateralToken = determineCollateralToken collateralAsset terms

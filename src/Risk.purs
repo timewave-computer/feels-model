@@ -13,6 +13,7 @@ module Risk
 import Prelude
 import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), unbondingPeriodToDays)
 import Data.Int as Int
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Risk Types

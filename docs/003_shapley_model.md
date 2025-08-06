@@ -1,8 +1,8 @@
-# Three-Tier Shapley Value Fee Model
+# Shapley Value Incentive Model
 
 ## Overview
 
-This document presents a theoretically sound fee model based on Shapley values across three tiers: System, Pool, and User. While the full Shapley calculation is computationally intensive, we provide efficient approximations that capture the essential value flows.
+This document presents a theoretically sound (but impractical) fee model based on Shapley values across three tiers: System, Pool, and User. While the full Shapley calculation is computationally intensive, we should be looking for efficient approximations that capture essential value flows.
 
 ## Theoretical Foundation: Shapley Values
 
@@ -28,11 +28,9 @@ This value function captures the fundamental interdependence: no single player c
 
 ### Shapley Value Calculation
 
-The Shapley value φᵢ for player i is:
+The Shapley value $\phi_i$ for player $i$ is:
 
-```
-φᵢ = Σ over all S⊆N\{i} [|S|!(|N|-|S|-1)!/|N|!] × [v(S∪{i}) - v(S)]
-```
+$$\phi_i = \sum_{S \subseteq N \setminus \{i\}} \frac{|S|!(|N|-|S|-1)!}{|N|!} \times [v(S \cup \{i\}) - v(S)]$$
 
 This formula gives each player their average marginal contribution across all possible orderings, ensuring a fair allocation of the total value created.
 
@@ -137,16 +135,14 @@ User marginal contribution nets expected fee earnings against LVR losses and opp
 
 ## Simplified Fee Formula
 
-For practical implementation, we approximate the Shapley-based fee as:
+A Shapley-based fee can be approximated as:
 
-```
-Fee = α × SystemMarginal + β × PoolBenefit - γ × UserCost
+$$\text{Fee} = \alpha \times \text{SystemMarginal} + \beta \times \text{PoolBenefit} - \gamma \times \text{UserCost}$$
 
 Where:
-- α ∈ [0.2, 0.4]: System's value capture rate
-- β ∈ [0.1, 0.2]: Pool's benefit sharing rate  
-- γ ∈ [0.3, 0.5]: User cost compensation rate
-```
+- $\alpha \in [0.2, 0.4]$: System's value capture rate
+- $\beta \in [0.1, 0.2]$: Pool's benefit sharing rate  
+- $\gamma \in [0.3, 0.5]$: User cost compensation rate
 
 This formula balances value capture by the system with benefit sharing to pools and cost compensation to users, with parameters tuned to maintain protocol sustainability while incentivizing participation.
 
@@ -193,7 +189,7 @@ With total surplus of $30, Shapley allocation gives 0% to the system (negative c
 
 The implementation pre-computes common values like depth and volatility once per block to avoid redundant calculations. Marginal contribution calculations are cached and reused across similar actions. Parameters update at most once per epoch (every 100 blocks) to reduce computational overhead while maintaining responsiveness. Complex calculations use lookup tables for common scenarios to achieve O(1) performance.
 
-### Key Approximations
+### Approximations
 
 The model assumes marginal contributions are approximately independent, allowing separate calculation for each tier. Linear approximations work well for small changes in pool state. For large pools with many LPs, we sample representative positions rather than computing all contributions. Similar actions are grouped into buckets to reduce the number of unique calculations needed.
 
@@ -205,7 +201,7 @@ Shapley values provide unique theoretical guarantees that make them ideal for fe
 
 ### Limitations and Approximations
 
-While exact Shapley values require exponential computation, our approximations maintain the essential properties. The focus on marginal contributions ensures each tier is rewarded for its actual impact. Fair value allocation prevents any tier from being systematically disadvantaged. Careful accounting avoids double counting of benefits or costs. The design maintains incentive compatibility so each tier benefits from contributing more value.
+While exact Shapley values require exponential computation, the approximation above maintains the essential properties. The focus on marginal contributions ensures each tier is rewarded for its actual impact. Fair value allocation prevents any tier from being systematically disadvantaged. Careful accounting avoids double counting of benefits or costs. The design maintains incentive compatibility so each tier benefits from contributing more value.
 
 The approximation error is bounded by the variance in marginal contributions and decreases as more samples are taken. For typical protocol operations, the approximation achieves 95% accuracy with just O(1) calculations.
 

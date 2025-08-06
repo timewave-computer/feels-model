@@ -1,6 +1,6 @@
 -- Property-based tests validating the mathematical properties of the lending model.
 -- Uses QuickCheck to verify invariants across position types, risk calculations,
--- and system behaviors. Ensures the "Everything is Lending" paradigm maintains
+-- and system behaviors. Ensures the Feels protocol maintains
 -- consistency and correctness across all financial operations.
 module Test.Model where
 

@@ -1,6 +1,3 @@
--- Unified lending book for the "Everything is Lending" protocol.
--- Manages all lending records (both lender offers and borrower positions) in a single registry.
--- Provides matching, execution, and lifecycle management for all lending operations.
 module LendingBook
   ( LendingBook
   , MatchResult
@@ -43,6 +40,7 @@ import LendingRecord (LendingRecord, LendingSide(..), LendingTerms(..), LendingS
                       createLenderRecord, createBorrowerRecord, validateLendingRecord, 
                       isLender, isBorrower, isAvailable, canMatch, getAvailableAmount)
 import FFI (currentTime)
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Types
@@ -102,10 +100,10 @@ createLendOffer ::
   String ->        -- Owner
   TokenType ->     -- Asset to lend
   Number ->        -- Amount
-  TokenType ->     -- Required collateral
+  TokenType ->     -- Collateral required
   Number ->        -- Collateral ratio
   LendingTerms ->  -- Terms
-  Effect (Either String LendingRecord)
+  Effect (Either ProtocolError LendingRecord)
 createLendOffer book owner lendAsset amount collateralAsset ratio terms = do
   id <- getNextId book
   timestamp <- currentTime
@@ -113,7 +111,7 @@ createLendOffer book owner lendAsset amount collateralAsset ratio terms = do
   let record = createLenderRecord id owner lendAsset amount collateralAsset ratio terms timestamp
   
   case validateLendingRecord record of
-    Left err -> pure $ Left err
+    Left err -> pure $ Left (ValidationError err)
     Right _ -> do
       addRecord book record
       pure $ Right record
@@ -127,7 +125,7 @@ takeLoan ::
   TokenType ->     -- Collateral provided
   Number ->        -- Collateral amount
   LendingTerms ->  -- Terms
-  Effect (Either String MatchResult)
+  Effect (Either ProtocolError MatchResult)
 takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms = do
   -- Find matching offers
   offers <- getMatchingOffers book lendAsset collateralAsset terms amount
@@ -138,12 +136,12 @@ takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms =
   log $ "  Found " <> show (length offers) <> " matching offers"
   
   case offers of
-    [] -> pure $ Left "No matching offers available"
+    [] -> pure $ Left (MatchingError "No matching offers available")
     _ -> do
       let compareOffers a b = compare a.collateralAmount b.collateralAmount  -- Lower collateral requirement is better
           sortedOffers = sortBy compareOffers offers
       case uncons sortedOffers of
-        Nothing -> pure $ Left "No matching offers available"
+        Nothing -> pure $ Left (MatchingError "No matching offers available")
         Just { head: bestOffer, tail: _ } -> do
           -- Validate collateral ratio
           let requiredRatio = bestOffer.collateralAmount  -- For lenders, this is the ratio
@@ -154,7 +152,7 @@ takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms =
           log $ "  Borrower provides ratio: " <> show actualRatio <> " (amount: " <> show collateralAmount <> ")"
           
           if actualRatio < requiredRatio
-            then pure $ Left $ "Insufficient collateral. Required ratio: " <> show requiredRatio <> ", provided: " <> show actualRatio
+            then pure $ Left (ValidationError $ "Insufficient collateral. Required ratio: " <> show requiredRatio <> ", provided: " <> show actualRatio)
             else do
               id <- getNextId book
               timestamp <- currentTime
@@ -163,7 +161,7 @@ takeLoan book borrower lendAsset amount collateralAsset collateralAmount terms =
                                   collateralAsset collateralAmount terms timestamp
               
               case validateLendingRecord borrowerRecord of
-                Left err -> pure $ Left err
+                Left err -> pure $ Left (ValidationError err)
                 Right _ -> matchAndExecute book borrowerRecord bestOffer
 
 --------------------------------------------------------------------------------
@@ -175,7 +173,7 @@ matchAndExecute ::
   LendingBook -> 
   LendingRecord ->  -- Borrower
   LendingRecord ->  -- Lender
-  Effect (Either String MatchResult)
+  Effect (Either ProtocolError MatchResult)
 matchAndExecute book borrower lender = do
   if not (canMatch lender borrower)
     then do
@@ -183,7 +181,7 @@ matchAndExecute book borrower lender = do
       log $ "MATCH FAILED between lender #" <> show lender.id <> " and borrower #" <> show borrower.id
       log $ "  Lender: " <> show lender.lendAsset <> " -> " <> show lender.collateralAsset <> " terms: " <> show lender.terms
       log $ "  Borrower: " <> show borrower.lendAsset <> " -> " <> show borrower.collateralAsset <> " terms: " <> show borrower.terms
-      pure $ Left "Records cannot be matched"
+      pure $ Left (MatchingError "Records cannot be matched")
     else do
       timestamp <- currentTime
       let executedAmount = borrower.lendAmount
@@ -282,14 +280,14 @@ getMatchingOffers book lendAsset collateralAsset terms minAmount = do
 initiateUnbonding :: 
   LendingBook -> 
   Int ->  -- Record ID
-  Effect (Either String LendingRecord)
+  Effect (Either ProtocolError LendingRecord)
 initiateUnbonding book recordId = do
   maybeRecord <- getRecord book recordId
   case maybeRecord of
-    Nothing -> pure $ Left "Record not found"
+    Nothing -> pure $ Left (PositionNotFoundError recordId)
     Just record -> 
       if not (isBorrower record)
-        then pure $ Left "Only borrower records can unbond"
+        then pure $ Left (InvalidCommandError "Only borrower records can unbond")
         else case record.terms of
           StakingTerms period -> case record.status of
             Active -> do
@@ -299,18 +297,18 @@ initiateUnbonding book recordId = do
                   updated = record { status = Unbonding unbondingComplete }
               updateRecord book updated
               pure $ Right updated
-            _ -> pure $ Left "Can only unbond active positions"
-          _ -> pure $ Left "Only staking positions can unbond"
+            _ -> pure $ Left (InvalidCommandError "Can only unbond active positions")
+          _ -> pure $ Left (InvalidCommandError "Only staking positions can unbond")
 
 -- Complete withdrawal for matured positions
 completeWithdrawal ::
   LendingBook ->
   Int ->  -- Record ID
-  Effect (Either String LendingRecord)
+  Effect (Either ProtocolError LendingRecord)
 completeWithdrawal book recordId = do
   maybeRecord <- getRecord book recordId
   case maybeRecord of
-    Nothing -> pure $ Left "Record not found"
+    Nothing -> pure $ Left (PositionNotFoundError recordId)
     Just record -> case record.status of
       Unbonding timestamp -> do
         now <- currentTime
@@ -319,8 +317,8 @@ completeWithdrawal book recordId = do
             let updated = record { status = Closed }
             updateRecord book updated
             pure $ Right updated
-          else pure $ Left "Still unbonding"
-      _ -> pure $ Left "Record not ready for withdrawal"
+          else pure $ Left (SystemError "Still unbonding")
+      _ -> pure $ Left (InvalidCommandError "Record not ready for withdrawal")
 
 --------------------------------------------------------------------------------
 -- Query Functions
@@ -441,7 +439,7 @@ withdrawPosition :: forall r.
   , priceOracle :: TokenType -> Effect Number
   | r } ->
   Int ->
-  Effect (Either String Unit)
+  Effect (Either ProtocolError Unit)
 withdrawPosition state recordId = do
   result <- completeWithdrawal state.lendingBook recordId
   case result of

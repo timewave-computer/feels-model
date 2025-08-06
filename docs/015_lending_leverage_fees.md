@@ -24,8 +24,8 @@ This model addresses the two remaining sides of the risk triangle with dual risk
 ## 1. Lending Side (Credit Risk)
 
 ### Risks
-- **System Risk**: **Insolvency Risk** - Protocol may become insolvent from bad debt
-- **User Risk**: **Bad Debt** - Lenders may be exposed to borrower defaults
+- **System Risk**: Insolvency Risk - Protocol may become insolvent from bad debt
+- **User Risk**: Bad Debt - Lenders may be exposed to borrower defaults
 
 ### Core Metrics
 
@@ -41,18 +41,14 @@ This model addresses the two remaining sides of the risk triangle with dual risk
 
 ### Lending Fee Formula
 
-```
-LendingFee_i = λ_lending(S) × [TVL_i × RiskMultiplier_i] / Σ[TVL_j × RiskMultiplier_j]
-```
+$$\text{LendingFee}_i = \lambda_{\text{lending}}(S) \times \frac{\text{TVL}_i \times \text{RiskMultiplier}_i}{\sum_j [\text{TVL}_j \times \text{RiskMultiplier}_j]}$$
 
 Where:
-```
-RiskMultiplier_i = (1 + RiskAdjustedDuration_i) × (1 + LiquidityProvisionScore_i)
-```
+$$\text{RiskMultiplier}_i = (1 + \text{RiskAdjustedDuration}_i) \times (1 + \text{LiquidityProvisionScore}_i)$$
 
 And:
-- `λ_lending(S) = λ_base × (1 + β × InsolvencyStress(S))`
-- `InsolvencyStress(S) = max(0, (TargetSolvency - CurrentSolvency) / TargetSolvency)`
+- $\lambda_{\text{lending}}(S) = \lambda_{\text{base}} \times (1 + \beta \times \text{InsolvencyStress}(S))$
+- $\text{InsolvencyStress}(S) = \max(0, \frac{\text{TargetSolvency} - \text{CurrentSolvency}}{\text{TargetSolvency}})$
 
 ### Why These Metrics Are Manipulation-Resistant
 
@@ -72,19 +68,17 @@ And:
 
 Dynamic interest rates that respond to both risks:
 
-```
-InterestRate = BaseRate × (1 + UtilizationMultiplier) × (1 + SolvencyMultiplier)
-```
+$$\text{InterestRate} = \text{BaseRate} \times (1 + \text{UtilizationMultiplier}) \times (1 + \text{SolvencyMultiplier})$$
 
 Where:
-- `UtilizationMultiplier` = Standard utilization curve
-- `SolvencyMultiplier` = Increases rates when solvency decreases
+- $\text{UtilizationMultiplier}$ = Standard utilization curve
+- $\text{SolvencyMultiplier}$ = Increases rates when solvency decreases
 
 ## 2. Leverage Side (Price Risk)
 
 ### Risks
-- **System Risk**: **Debasement Risk** - System token may lose value from overleveraging
-- **User Risk**: **Nominal Loss** - Leveraged users face amplified losses
+- **System Risk**: Debasement Risk - System token may lose value from overleveraging
+- **User Risk**: Nominal Loss - Leveraged users face amplified losses
 
 ### Core Metrics
 
@@ -100,21 +94,17 @@ Where:
 
 ### Leverage Fee Formula
 
-```
-LeverageFee_i = λ_leverage(S) × RiskAbsorption_i / Σ(RiskAbsorption_j)
-```
+$$\text{LeverageFee}_i = \lambda_{\text{leverage}}(S) \times \frac{\text{RiskAbsorption}_i}{\sum_j \text{RiskAbsorption}_j}$$
 
 Where:
-- `λ_leverage(S) = λ_base × (1 + γ × DebasementStress(S))`
-- `DebasementStress(S) = TotalLeverageRatio × VolatilityIndex × VelocityMultiplier`
+- $\lambda_{\text{leverage}}(S) = \lambda_{\text{base}} \times (1 + \gamma \times \text{DebasementStress}(S))$
+- $\text{DebasementStress}(S) = \text{TotalLeverageRatio} \times \text{VolatilityIndex} \times \text{VelocityMultiplier}$
 
 ### Liquidation Protection
 
 Progressive fees that increase as positions approach liquidation:
 
-```
-ProtectionFee = BaseFee × exp(-k × LiquidationDistance)
-```
+$$\text{ProtectionFee} = \text{BaseFee} \times \exp(-k \times \text{LiquidationDistance})$$
 
 ## 3. Unified Risk Management
 
@@ -128,38 +118,32 @@ The three risks interact and amplify each other:
 
 ### Systemic Risk Score
 
-```
-SystemicRisk = α₁ × LiquidityStress + α₂ × InsolvencyStress + α₃ × DebasementStress + α₄ × CrossRiskAmplification
-```
+$$\text{SystemicRisk} = \alpha_1 \times \text{LiquidityStress} + \alpha_2 \times \text{InsolvencyStress} + \alpha_3 \times \text{DebasementStress} + \alpha_4 \times \text{CrossRiskAmplification}$$
 
 Where:
-- `CrossRiskAmplification = (LiquidityStress × InsolvencyStress) + (InsolvencyStress × DebasementStress) + (DebasementStress × LiquidityStress)`
+- $\text{CrossRiskAmplification} = (\text{LiquidityStress} \times \text{InsolvencyStress}) + (\text{InsolvencyStress} \times \text{DebasementStress}) + (\text{DebasementStress} \times \text{LiquidityStress})$
 
 ### Global Fee Distribution
 
 Total protocol fees are distributed across risk types based on stress levels:
 
-```
-LiquidityShare = LiquidityStress² / (LiquidityStress² + InsolvencyStress² + DebasementStress²)
-LendingShare = InsolvencyStress² / (LiquidityStress² + InsolvencyStress² + DebasementStress²)
-LeverageShare = DebasementStress² / (LiquidityStress² + InsolvencyStress² + DebasementStress²)
-```
+$$\text{LiquidityShare} = \frac{\text{LiquidityStress}^2}{\text{LiquidityStress}^2 + \text{InsolvencyStress}^2 + \text{DebasementStress}^2}$$
+
+$$\text{LendingShare} = \frac{\text{InsolvencyStress}^2}{\text{LiquidityStress}^2 + \text{InsolvencyStress}^2 + \text{DebasementStress}^2}$$
+
+$$\text{LeverageShare} = \frac{\text{DebasementStress}^2}{\text{LiquidityStress}^2 + \text{InsolvencyStress}^2 + \text{DebasementStress}^2}$$
 
 ## 4. Detailed Metric Calculations
 
 ### Lending Metrics
 
 #### Risk-Adjusted Duration
-```
-RiskAdjustedDuration_i = Duration_i × (1 - AvgHealthFactor_system)
-```
+$$\text{RiskAdjustedDuration}_i = \text{Duration}_i \times (1 - \text{AvgHealthFactor}_{\text{system}})$$
 - When system health is low (many risky loans), duration is valued higher
 - Rewards lenders who lock capital when system needs stability
 
 #### Liquidity Provision Score
-```
-LiquidityProvisionScore_i = ∫(Available_i(t) × UtilizationStress(t)) dt / Duration_i
-```
+$$\text{LiquidityProvisionScore}_i = \frac{1}{\text{Duration}_i} \int (\text{Available}_i(t) \times \text{UtilizationStress}(t)) dt$$
 - Integrates availability weighted by system stress over time
 - Higher score for being available when utilization is high
 
@@ -168,9 +152,7 @@ LiquidityProvisionScore_i = ∫(Available_i(t) × UtilizationStress(t)) dt / Dur
 Similarly, for leverage positions, we can improve the volatility absorption metric:
 
 #### Realized Risk Absorption
-```
-RiskAbsorption_i = Exposure_i × σ_realized × (1 / HealthFactor_i)
-```
+$$\text{RiskAbsorption}_i = \text{Exposure}_i \times \sigma_{\text{realized}} \times \frac{1}{\text{HealthFactor}_i}$$
 - Based on actual market volatility absorbed
 - Weighted by inverse health factor (riskier positions absorb more)
 - Can't be gamed without taking real market risk
@@ -217,8 +199,8 @@ RiskAbsorption_i = Exposure_i × σ_realized × (1 / HealthFactor_i)
 
 This dual risk model for lending and leverage completes the triangular risk framework. Each side now has mechanisms that:
 
-1. **Compensate users** for their specific risks
-2. **Protect the system** from its corresponding systemic risk
-3. **Create feedback loops** that maintain equilibrium
+1. Compensate users for their specific risks
+2. Protect the system from its corresponding systemic risk
+3. Create feedback loops that maintain equilibrium
 
 The unified model ensures that all three types of risk are managed holistically, preventing cascading failures while fairly compensating participants for the risks they absorb.

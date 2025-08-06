@@ -1,6 +1,6 @@
-# Feels: Everything is Lending
+# Everything is Lending
 
-All financial primitives in Feels Protocol are forms of collateralized lending. This document presents a simplification where exchange, lending, and leverage are all expressed as variations of a single lending primitive.
+All financial primitives can be understood as a form of collateralized lending. This document presents a simplification where exchange, lending, and leverage are all expressed as variations of a single lending primitive.
 
 ## The Universal Lending Primitive
 
@@ -30,9 +30,9 @@ data ReturnType
 **Conceptual Mapping**: A swap is two perpetual loans with no expectation of repayment.
 
 ```purescript
--- "Swap 100 SOL for 5000 TokenA" becomes:
+-- "Swap 100 BaseToken for 5000 TokenA" becomes:
 { lendAmount: 100
-, lendAsset: SOL
+, lendAsset: BaseToken
 , collateralAmount: 5000
 , collateralAsset: TokenA
 , duration: Perpetual
@@ -49,11 +49,11 @@ data ReturnType
 **Conceptual Mapping**: Traditional lending with expectation of return.
 
 ```purescript
--- "Lend 100 SOL for 30 days at 5% APR" becomes:
+-- "Lend 100 BaseToken for 30 days at 5% APR" becomes:
 { lendAmount: 100
-, lendAsset: SOL
+, lendAsset: BaseToken
 , collateralAmount: 100
-, collateralAsset: FeelsSOL  -- Receipt token
+, collateralAsset: ReceiptToken  -- Receipt token
 , duration: Fixed 30
 , returnType: FixedReturn 0.05
 }
@@ -68,11 +68,11 @@ data ReturnType
 **Conceptual Mapping**: Lending to a synthetic asset vault that issues leveraged tokens.
 
 ```purescript
--- "Get 2x leverage on 100 SOL" becomes:
+-- "Get 2x leverage on 100 BaseToken" becomes:
 { lendAmount: 100
-, lendAsset: SOL
+, lendAsset: BaseToken
 , collateralAmount: 100
-, collateralAsset: Token "2xSOL"
+, collateralAsset: Token "2xBaseToken"
 , duration: Perpetual  -- Or Fixed for term leverage
 , returnType: LeveragedReturn 2.0
 }
@@ -83,9 +83,9 @@ data ReturnType
 - No liquidation risk (you're the lender, not borrower)
 - Can "repay" by returning synthetic tokens
 
-## The Tick Model Reimagined
+## A Reformulation of the Tick Model
 
-Ticks now represent **loan offers** organized by collateralization terms:
+Ticks now represent loan offers organized by collateralization terms:
 
 ```purescript
 type UnifiedTick =
@@ -104,13 +104,13 @@ data TickType
 ### Examples:
 
 **Exchange Tick at price 50**:
-"I'll lend 1 SOL if you give me 50 TokenA as perpetual collateral"
+"I'll lend 1 BaseToken if you give me 50 TokenA as perpetual collateral"
 
 **Lending Tick at 5% for 30 days**:
-"I'll lend 1 SOL if you give me 1 FeelsSOL receipt + promise 5% return"
+"I'll lend 1 BaseToken if you give me 1 ReceiptToken receipt + promise 5% return"
 
 **Leverage Tick at 3x**:
-"I'll lend 1 SOL if you give me 1 3xSOL synthetic token as collateral"
+"I'll lend 1 BaseToken if you give me 1 3xBaseToken synthetic token as collateral"
 
 ## Mathematical Properties
 
@@ -121,8 +121,8 @@ data TickType
 Lend(Lend(Asset, Terms1), Terms2) = Lend(Asset, ComposedTerms)
 
 -- Example: Leveraged lending
-Step1: Lend(100 SOL) → Receive(100 2xSOL)
-Step2: Lend(100 2xSOL, 30 days) → Receive(100 2xSOL-Receipt)
+Step1: Lend(100 BaseToken) → Receive(100 2xBaseToken)
+Step2: Lend(100 2xBaseToken, 30 days) → Receive(100 2xBaseToken-Receipt)
 Result: Time-locked leveraged position
 ```
 
@@ -133,8 +133,8 @@ Each loan type maps cleanly to the original risk triangle:
 | Loan Type | Primary Risk | Mitigation |
 |-----------|--------------|------------|
 | Perpetual Loan (Swap) | Liquidity Risk | Deep order books via ticks |
-| Fixed-Term Loan | Credit Risk | Over-collateralization |
-| Leveraged Loan | Price Risk | No liquidation, bounded loss |
+| Term Loan | Credit Risk | Over-collateralization |
+| Leveraged Loan | Nominal Risk | No liquidation, bounded loss |
 
 ## Complex Position Construction
 
@@ -144,12 +144,12 @@ All complex positions are just combinations of loans:
 ```purescript
 positions = [
   -- First get leverage
-  { lend: 100 SOL, 
-    collateral: 100 "3xSOL", 
+  { lend: 100 BaseToken, 
+    collateral: 100 "3xBaseToken", 
     returnType: LeveragedReturn 3.0 },
     
   -- Then provide liquidity with leveraged tokens
-  { lend: 100 "3xSOL", 
+  { lend: 100 "3xBaseToken", 
     collateral: 15000 TokenA,  -- 3x the normal rate
     duration: Perpetual,
     returnType: MarketReturn }
@@ -160,13 +160,13 @@ positions = [
 ```purescript
 positions = [
   -- Lend with fixed duration
-  { lend: 100 SOL,
-    collateral: 100 FeelsSOL,
+  { lend: 100 BaseToken,
+    collateral: 100 ReceiptToken,
     duration: Fixed 60,
     returnType: FixedReturn 0.08 },
     
   -- Use receipt tokens to provide liquidity
-  { lend: 100 FeelsSOL,
+  { lend: 100 ReceiptToken,
     collateral: 5000 TokenA,
     duration: Perpetual,
     returnType: MarketReturn }

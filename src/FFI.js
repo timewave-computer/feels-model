@@ -365,7 +365,7 @@ export const checkAndInitializeChart = function() {
   };
 };
 
-// Initialize price chart with NFV overlay using Chart.js
+// Initialize price chart with POL overlay using Chart.js
 export const initializePriceChart = function() {
   return function() {
     console.log('=== CHART INITIALIZATION STARTING ===');
@@ -480,11 +480,11 @@ function renderChart(canvas, data) {
     
     const minPrice = Math.min(...priceValues);
     const maxPrice = Math.max(...priceValues);
-    const minNFV = Math.min(...nfvValues);
-    const maxNFV = Math.max(...nfvValues);
+    const minPOL = Math.min(...nfvValues);
+    const maxPOL = Math.max(...nfvValues);
     
     console.log('Price range:', minPrice, 'to', maxPrice);
-    console.log('NFV range:', minNFV, 'to', maxNFV);
+    console.log('POL range:', minPOL, 'to', maxPOL);
     
     const margin = 40;
     const chartWidth = width - 2 * margin;
@@ -498,9 +498,9 @@ function renderChart(canvas, data) {
       if (maxPrice === minPrice) return height / 2;
       return margin + (1 - (price - minPrice) / (maxPrice - minPrice)) * chartHeight;
     };
-    const scaleNFVY = (nfv) => {
-      if (maxNFV === minNFV) return height / 2;
-      return margin + (1 - (nfv - minNFV) / (maxNFV - minNFV)) * chartHeight;
+    const scalePOLY = (pol) => {
+      if (maxPOL === minPOL) return height / 2;
+      return margin + (1 - (pol - minPOL) / (maxPOL - minPOL)) * chartHeight;
     };
     
     // Draw axes
@@ -542,45 +542,45 @@ function renderChart(canvas, data) {
       console.log('No valid price points to draw');
     }
     
-    // Draw NFV line (pink)
-    console.log('Drawing NFV line...');
+    // Draw POL line (pink)
+    console.log('Drawing POL line...');
     ctx.strokeStyle = '#ff91a4';
     ctx.lineWidth = 3;
     ctx.beginPath();
     
-    let validNFVPoints = 0;
+    let validPOLPoints = 0;
     data.forEach((point, i) => {
       const x = scaleX(i);
-      const y = scaleNFVY(point.nfvValue);
-      console.log(`NFV point ${i}: x=${x}, y=${y}, nfv=${point.nfvValue}`);
+      const y = scalePOLY(point.nfvValue);
+      console.log(`POL point ${i}: x=${x}, y=${y}, pol=${point.nfvValue}`);
       
       if (isFinite(x) && isFinite(y)) {
-        if (validNFVPoints === 0) {
+        if (validPOLPoints === 0) {
           ctx.moveTo(x, y);
         } else {
           ctx.lineTo(x, y);
         }
-        validNFVPoints++;
+        validPOLPoints++;
       }
     });
     
-    if (validNFVPoints > 0) {
+    if (validPOLPoints > 0) {
       ctx.stroke();
-      console.log(`Drew NFV line with ${validNFVPoints} points`);
+      console.log(`Drew POL line with ${validPOLPoints} points`);
     } else {
-      console.log('No valid NFV points to draw');
+      console.log('No valid POL points to draw');
     }
     
     // Add labels
     ctx.fillStyle = '#e0e0e0';
     ctx.font = '14px sans-serif';
     ctx.fillText(`Price: ${(minPrice != null ? minPrice.toFixed(3) : '0.000')} - ${(maxPrice != null ? maxPrice.toFixed(3) : '0.000')}`, margin, 25);
-    ctx.fillText(`NFV: ${(minNFV != null ? minNFV.toFixed(3) : '0.000')} - ${(maxNFV != null ? maxNFV.toFixed(3) : '0.000')}`, margin + 200, 25);
+    ctx.fillText(`POL: ${(minPOL != null ? minPOL.toFixed(3) : '0.000')} - ${(maxPOL != null ? maxPOL.toFixed(3) : '0.000')}`, margin + 200, 25);
     
     // Add title
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 16px sans-serif';
-    ctx.fillText('Price & NFV Chart', margin, height - 10);
+    ctx.fillText('Price & POL Chart', margin, height - 10);
     
     console.log('Chart rendering complete');
   }, 50); // Small delay to ensure canvas is ready
@@ -662,8 +662,8 @@ function renderSingleTokenChart(ctx, data) {
     
     console.log('Price data sample:', priceData.slice(0, 3));
   
-  // NFV floor data as a line
-  const nfvData = validData.map(point => ({
+  // POL floor data as a line
+  const polData = validData.map(point => ({
     x: Number(point.block) || 0,  // Use block number for x-axis
     y: point.nfvValue != null && !isNaN(point.nfvValue) && isFinite(point.nfvValue) ? Number(point.nfvValue) : 0
   }));
@@ -674,8 +674,8 @@ function renderSingleTokenChart(ctx, data) {
     console.log('Chart constructor available:', typeof Chart);
     console.log('priceData length:', priceData.length);
     console.log('First few priceData points:', priceData.slice(0, 3));
-    console.log('nfvData length:', nfvData.length);
-    console.log('First few nfvData points:', nfvData.slice(0, 3));
+    console.log('polData length:', polData.length);
+    console.log('First few polData points:', polData.slice(0, 3));
     
     // Always use line chart - removed financial plugin dependency
     const chartType = 'line';
@@ -684,7 +684,7 @@ function renderSingleTokenChart(ctx, data) {
     
     console.log('Creating Chart instance with type:', chartType);
     console.log('Chart data points:', priceData.length);
-    console.log('NFV data points:', nfvData.length);
+    console.log('POL data points:', polData.length);
     
     chartInstance = new Chart(ctx, {
       type: chartType,
@@ -699,9 +699,9 @@ function renderSingleTokenChart(ctx, data) {
           tension: 0.1,
           fill: false
         }, {
-          label: 'NFV Floor',
+          label: 'POL Floor',
           type: 'line',
-          data: nfvData,
+          data: polData,
           borderColor: '#f59e0b',
           backgroundColor: 'rgba(245, 158, 11, 0.1)',
           borderWidth: 2,
@@ -805,7 +805,7 @@ function renderSingleTokenChart(ctx, data) {
           },
           title: {
             display: true,
-            text: 'NFV Floor',
+            text: 'POL Floor',
             color: '#f59e0b'
           }
         }
@@ -894,16 +894,16 @@ function renderMultiTokenChart(ctx, data) {
       tension: 0.1
     });
     
-    // Add NFV floor for this token
-    const nfvData = data.map(point => ({
+    // Add POL floor for this token
+    const polData = data.map(point => ({
       x: Number(point.block) || 0,  // Use block number
       y: point.tokens && point.tokens[ticker] ? point.tokens[ticker].nfvFloor : 0
     }));
     
     datasets.push({
-      label: `${ticker} NFV Floor`,
+      label: `${ticker} POL Floor`,
       type: 'line',
-      data: nfvData,
+      data: polData,
       borderColor: colors[index % colors.length],
       backgroundColor: colors[index % colors.length] + '20', // 20% opacity
       borderWidth: 1,

@@ -1,7 +1,7 @@
 -- Token system supporting the unified lending protocol's asset management.
 -- Defines core token types (JitoSOL, FeelsSOL, user tokens, position tokens) and
 -- manages token metadata, creation, and validation. All tokens in the system can serve
--- as either lending assets or collateral in the "Everything is Lending" paradigm.
+-- as either lending assets or collateral in the Feels protocol.
 -- Handles token launching mechanics and price discovery for user-created assets.
 module Token 
   ( TokenType(..)

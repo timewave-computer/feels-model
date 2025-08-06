@@ -1,4 +1,4 @@
--- Incentive mechanisms for the Everything is Lending protocol.
+-- Incentive mechanisms for the Feels protocol.
 -- Unifies fee and return calculations into a single adaptive system where
 -- borrower fees and lender returns are two sides of the same market mechanism.
 -- Uses oracle data and system metrics to dynamically adjust rates.
@@ -25,7 +25,8 @@ import Effect.Ref (Ref, new, read, write)
 import Token (TokenType(..))
 import LendingRecord (LendingRecord, LendingTerms(..), LendingSide(..), LendingStatus(..), unbondingPeriodToDays)
 import Oracle (Oracle, MarketMetrics, observeMarket)
-import NFV (NFVState)
+import POL (POLState)
+import ProtocolError (ProtocolError(..))
 
 import Data.Int as Int
 
@@ -52,7 +53,7 @@ type DynamicsResult =
   { lenderRate :: Number            -- Rate lenders receive (annualized)
   , borrowerRate :: Number          -- Rate borrowers pay (annualized)
   , effectiveSpread :: Spread       -- Actual spread after adjustments
-  , nfvFlow :: Number              -- Portion flowing to NFV
+  , polFlow :: Number              -- Portion flowing to POL
   , components :: RateComponents    -- Breakdown for transparency
   , operationType :: LendingTerms  -- Type of operation
   }
@@ -71,8 +72,8 @@ type DynamicsConfig =
       , maxSpread :: Spread        -- Maximum protocol spread
       , targetSpread :: Spread     -- Target spread in normal conditions
       }
-  , -- NFV allocation rates (portion of spread going to NFV)
-    nfvAllocation ::
+  , -- POL allocation rates (portion of spread going to POL)
+    polAllocation ::
       { swap :: Number             -- 0.0-1.0
       , staking :: Number
       , leverage :: Number
@@ -95,7 +96,7 @@ type DynamicsConfig =
 type MarketDynamics =
   { config :: Ref DynamicsConfig
   , oracle :: Oracle
-  , nfvState :: NFVState
+  , polState :: POLState
   }
 
 --------------------------------------------------------------------------------
@@ -115,10 +116,10 @@ defaultDynamicsConfig =
     , maxSpread: 0.05    -- 5% maximum
     , targetSpread: 0.01 -- 1% target
     }
-  , nfvAllocation:
-    { swap: 0.15         -- 15% of spread to NFV
-    , staking: 0.25      -- 25% of spread to NFV
-    , leverage: 0.30     -- 30% of spread to NFV
+  , polAllocation:
+    { swap: 0.15         -- 15% of spread to POL
+    , staking: 0.25      -- 25% of spread to POL
+    , leverage: 0.30     -- 30% of spread to POL
     }
   , adjustments:
     { volatilityWeight: 0.3
@@ -137,10 +138,10 @@ defaultDynamicsConfig =
 --------------------------------------------------------------------------------
 
 -- Initialize market dynamics system
-initMarketDynamics :: Oracle -> NFVState -> Effect MarketDynamics
-initMarketDynamics oracle nfvState = do
+initMarketDynamics :: Oracle -> POLState -> Effect MarketDynamics
+initMarketDynamics oracle polState = do
   config <- new defaultDynamicsConfig
-  pure { config, oracle, nfvState }
+  pure { config, oracle, polState }
 
 --------------------------------------------------------------------------------
 -- Core Calculation
@@ -176,14 +177,14 @@ calculateDynamics dynamics record = do
       boundedBorrowerRate = min config.bounds.maxBorrowerRate borrowerRate
       effectiveSpread = boundedBorrowerRate - boundedLenderRate
       
-  -- Calculate NFV flow
-  let nfvAllocationRate = getNFVAllocationRate config record.terms
-      nfvFlow = effectiveSpread * nfvAllocationRate
+  -- Calculate POL flow
+  let polAllocationRate = getPOLAllocationRate config record.terms
+      polFlow = effectiveSpread * polAllocationRate
   
   pure { lenderRate: boundedLenderRate
        , borrowerRate: boundedBorrowerRate
        , effectiveSpread
-       , nfvFlow
+       , polFlow
        , components
                , operationType: record.terms
        }
@@ -232,7 +233,7 @@ calculateRiskPremium terms = case terms of
 
 -- Calculate market adjustment based on current conditions
 calculateMarketAdjustment :: DynamicsConfig -> MarketMetrics -> LendingTerms -> Number
-calculateMarketAdjustment config metrics terms =
+calculateMarketAdjustment config metrics terms = 
   let -- Volatility adjustment
       volatilityAdj = metrics.volatility * config.adjustments.volatilityWeight
       
@@ -246,8 +247,8 @@ calculateMarketAdjustment config metrics terms =
       
       -- System health adjustment
       healthAdj = 
-        if metrics.nfvGrowthRate < 0.0
-        then 0.01  -- Higher rates if NFV shrinking
+        if metrics.polGrowthRate < 0.0
+        then 0.01  -- Higher rates if POL shrinking
         else 0.0
       
       -- Cross-risk adjustment (higher risk operations pay for system risk)
@@ -279,12 +280,12 @@ calculateDynamicSpread config metrics =
       
   in clamp config.spreads.minSpread config.spreads.maxSpread spread
 
--- Get NFV allocation rate for operation type
-getNFVAllocationRate :: DynamicsConfig -> LendingTerms -> Number
-getNFVAllocationRate config terms = case terms of
-  SwapTerms -> config.nfvAllocation.swap
-  StakingTerms _ -> config.nfvAllocation.staking
-  LeverageTerms _ -> config.nfvAllocation.leverage
+-- Get POL allocation rate for operation type
+getPOLAllocationRate :: DynamicsConfig -> LendingTerms -> Number
+getPOLAllocationRate config terms = case terms of
+  SwapTerms -> config.polAllocation.swap
+  StakingTerms _ -> config.polAllocation.staking
+  LeverageTerms _ -> config.polAllocation.leverage
 
 --------------------------------------------------------------------------------
 -- Helper Functions
@@ -344,7 +345,7 @@ simulateDynamics dynamics terms = do
 -- Total lender rate: 5.16%
 -- Protocol spread: 1.5% (volatile market)
 -- Borrower rate: 6.66%
--- NFV flow: 0.375% (25% of 1.5%)
+-- POL flow: 0.375% (25% of 1.5%)
 
 -- Example calculation for 3x leverage:
 -- Base rate: 8.4% (6% * 1.4 for 3x)
@@ -353,4 +354,4 @@ simulateDynamics dynamics terms = do
 -- Total lender rate: 13.6%
 -- Protocol spread: 2.5% (high risk)
 -- Borrower rate: 16.1%
--- NFV flow: 0.75% (30% of 2.5%)
+-- POL flow: 0.75% (30% of 2.5%)

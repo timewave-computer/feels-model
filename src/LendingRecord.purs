@@ -1,4 +1,4 @@
--- Unified lending record system for the "Everything is Lending" protocol.
+-- Unified lending record system for the Feels protocol.
 -- Represents both sides of any lending operation - lenders (offering liquidity)
 -- and borrowers (taking loans). This single type replaces the previous Position
 -- and Tick separation, providing a cleaner conceptual model where all financial

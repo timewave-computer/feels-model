@@ -1,17 +1,13 @@
--- Core state management system for the Feels Protocol.
--- Centralizes all state operations and ensures consistency across the system.
 module State
   ( AppState
   , AppRuntime
   , AppCommand(..)
   , AppQuery(..)
   , AppResult(..)
-  , AppError(..)
   , initState
   , executeCommand
   , executeQuery
-  , subscribe
-  , unsubscribe
+  , captureRebaseDifferential
   ) where
 
 import Prelude
@@ -33,11 +29,12 @@ import LendingBook (LendingBook, initLendingBook, createLendOffer, getUserRecord
 import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), createLenderRecord, createBorrowerRecord)
 import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
 import SyntheticSOL (getTotalSupply)
-import NFV (NFVState, initNFV, getNFVBalance, getNFVMetrics, contributeToTokenNFV, createNFVTicks, captureStakingRewards)
+import POL (POLState, initPOL, getPOLBalance, getPOLMetrics, contributeToTokenPOL, createPOLTicks, captureStakingRewards)
 import Oracle (Oracle, initOracle, takeMarketSnapshot)
 import Incentives (MarketDynamics, initMarketDynamics)
-import BalanceManager (BalanceRegistry)
+import Accounts (AccountRegistry)
 import FFI (currentTime, generateRecordId)
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Types
@@ -48,10 +45,10 @@ type AppState =
   { tokenRegistry :: TokenRegistry
   , lendingBook :: LendingBook
   , gateway :: GatewayState
-  , nfvState :: NFVState
+  , polState :: POLState
   , oracle :: Oracle
   , marketDynamics :: MarketDynamics
-  , balances :: BalanceRegistry
+  , accounts :: AccountRegistry
   , positionTokenMap :: Array { positionId :: Int, tokenTicker :: String }
   , currentUser :: String  -- For demo purposes, in production would be wallet-based
   , timestamp :: Number
@@ -84,7 +81,7 @@ data AppQuery
   | GetTokenByTicker String
   | GetLenderOffers
   | GetSystemStats
-  | GetNFVMetrics
+  | GetPOLMetrics
   | GetPositionTargetToken Int
 
 -- Results from operations
@@ -107,37 +104,16 @@ data AppResult
     , activePositions :: Int
     , liveTokens :: Int
     , totalLenderOffers :: Int
-    , nfvBalance :: Number
+    , polBalance :: Number
     , feelsSOLSupply :: Number
     , jitoSOLLocked :: Number
     }
-  | NFVMetricsResult 
+  | POLMetricsResult 
     { balance :: Number
     , growthRate24h :: Number
     , utilizationRate :: Number
     }
   | TargetTokenInfo (Maybe String)
-
--- Errors
-data AppError
-  = InvalidCommand String
-  | InsufficientBalance String
-  | TokenNotFound String
-  | PositionNotFound Int
-  | UserNotFound String
-  | InvalidAmount Number
-  | SystemError String
-
-derive instance eqAppError :: Eq AppError
-
-instance showAppError :: Show AppError where
-  show (InvalidCommand msg) = "Invalid command: " <> msg
-  show (InsufficientBalance msg) = "Insufficient balance: " <> msg
-  show (TokenNotFound ticker) = "Token not found: " <> ticker
-  show (PositionNotFound id) = "Position not found: " <> show id
-  show (UserNotFound user) = "User not found: " <> user
-  show (InvalidAmount amount) = "Invalid amount: " <> show amount
-  show (SystemError msg) = "System error: " <> msg
 
 --------------------------------------------------------------------------------
 -- Initialization
@@ -149,30 +125,30 @@ initState = do
   -- Initialize all subsystems
   tokenRegistry <- initTokenRegistry
   lendingBook <- initLendingBook
-  nfvState <- initNFV
-  oracle <- initOracle lendingBook nfvState
-  marketDynamics <- initMarketDynamics oracle nfvState
+  polState <- initPOL
+  oracle <- initOracle lendingBook polState
+  marketDynamics <- initMarketDynamics oracle polState
   
-  -- Initialize balances with some demo data for the user
-  balances <- new 
+  -- Initialize accounts with some demo data for the user
+  accounts <- new 
     [ { owner: "main-user", token: JitoSOL, amount: 5000.0 }
     , { owner: "main-user", token: FeelsSOL, amount: 5000.0 }
     ]
   
   -- Initialize gateway
   let priceOracle = pure 1.22  -- JitoSOL/SOL = 1.22 (current market price)
-  gateway <- initGateway priceOracle 0.001 0.002 balances nfvState
+  gateway <- initGateway priceOracle 0.001 0.002 accounts polState
   
-  -- Initialize NFV for system tokens only (JitoSOL and FeelsSOL)
+  -- Initialize POL for system tokens only (JitoSOL and FeelsSOL)
   -- These are the base tokens that exist from the start
-  contributeToTokenNFV nfvState JitoSOL 100.0    -- Initial 100 FeelsSOL NFV for JitoSOL
-  contributeToTokenNFV nfvState FeelsSOL 50.0     -- Initial 50 FeelsSOL NFV for FeelsSOL
+  contributeToTokenPOL polState JitoSOL 100.0    -- Initial 100 FeelsSOL POL for JitoSOL
+  contributeToTokenPOL polState FeelsSOL 50.0     -- Initial 50 FeelsSOL POL for FeelsSOL
   
-  -- Deploy initial NFV liquidity for system tokens
-  _ <- createNFVTicks nfvState lendingBook
+  -- Deploy initial POL liquidity for system tokens
+  _ <- createPOLTicks polState lendingBook
   
   -- Note: No demo trades - the market starts clean
-  -- User tokens will deploy their own NFV liquidity when created
+  -- User tokens will deploy their own POL liquidity when created
   
   -- Get current timestamp
   timestamp <- currentTime
@@ -182,10 +158,10 @@ initState = do
         { tokenRegistry
         , lendingBook
         , gateway
-        , nfvState
+        , polState
         , oracle
         , marketDynamics
-        , balances
+        , accounts
         , positionTokenMap: []
         , currentUser: "user1"
         , timestamp
@@ -202,7 +178,7 @@ initState = do
 -- Rebase Capture
 --------------------------------------------------------------------------------
 
--- Capture JitoSOL/FeelsSOL rebase differential for NFV
+-- Capture JitoSOL/FeelsSOL rebase differential for POL
 -- Should be called periodically (e.g. each block or time interval)
 captureRebaseDifferential :: AppRuntime -> Effect Unit
 captureRebaseDifferential runtime = do
@@ -226,9 +202,9 @@ captureRebaseDifferential runtime = do
         let priceAppreciation = currentJitoPrice - previousPrice
             differentialValue = totalSupply * priceAppreciation
         
-        -- Capture to NFV
+        -- Capture to POL
         when (differentialValue > 0.0) $ do
-          captureStakingRewards state.nfvState totalSupply currentJitoPrice
+          captureStakingRewards state.polState totalSupply currentJitoPrice
           
           -- Update state with new price
           let newState = state { lastJitoSOLPrice = currentJitoPrice }
@@ -245,31 +221,13 @@ captureRebaseDifferential runtime = do
 -- Command Processing
 --------------------------------------------------------------------------------
 
--- Execute a command that modifies state
-executeCommand :: AppRuntime -> AppCommand -> Effect (Either AppError AppResult)
-executeCommand runtime cmd = do
-  state <- read runtime.state
-  result <- processCommand state cmd
-  
-  case result of
-    Right (Tuple newState cmdResult) -> do
-      -- Update state
-      write newState runtime.state
-      
-      -- Notify listeners
-      listeners <- read runtime.listeners
-      _ <- traverse (\l -> l.callback newState) listeners
-      
-      pure $ Right cmdResult
-    Left err -> pure $ Left err
-
--- Process a command and return new state
-processCommand :: AppState -> AppCommand -> Effect (Either AppError (Tuple AppState AppResult))
-processCommand state = case _ of
+-- Define a record of command handlers
+commandHandlers :: AppState -> AppCommand -> Effect (Either ProtocolError (Tuple AppState AppResult))
+commandHandlers state = case _ of
   CreateToken creator ticker name -> do
     -- Validate inputs
     if ticker == "" || name == ""
-      then pure $ Left $ InvalidCommand "Ticker and name cannot be empty"
+      then pure $ Left $ InvalidCommandError "Ticker and name cannot be empty"
       else do
         -- Check for duplicate ticker or name
         existingTokens <- getAllTokens state.tokenRegistry
@@ -277,22 +235,22 @@ processCommand state = case _ of
             duplicateName = find (\t -> t.name == name) existingTokens
         
         case duplicateTicker of
-          Just _ -> pure $ Left $ InvalidCommand $ "Token with ticker '" <> ticker <> "' already exists"
+          Just _ -> pure $ Left $ InvalidCommandError $ "Token with ticker '" <> ticker <> "' already exists"
           Nothing -> case duplicateName of
-            Just _ -> pure $ Left $ InvalidCommand $ "Token with name '" <> name <> "' already exists" 
+            Just _ -> pure $ Left $ InvalidCommandError $ "Token with name '" <> name <> "' already exists" 
             Nothing -> do
               -- Create token
               let tokenParams = { ticker, name, creator }
               newToken <- createAndRegisterToken state.tokenRegistry tokenParams
               
-              -- Contribute initial NFV for the new token (simulating launch staking)
+              -- Contribute initial POL for the new token (simulating launch staking)
               -- This represents the initial liquidity provided during token launch
               let initialLiquidity = 100.0  -- 100 FeelsSOL initial liquidity
-              contributeToTokenNFV state.nfvState (Token ticker) initialLiquidity
+              contributeToTokenPOL state.polState (Token ticker) initialLiquidity
               
-              -- Deploy NFV liquidity for the new token
+              -- Deploy POL liquidity for the new token
               -- This creates automated market maker offers across different price ranges
-              _ <- createNFVTicks state.nfvState state.lendingBook
+              _ <- createPOLTicks state.polState state.lendingBook
               
               -- Update timestamp
               timestamp <- currentTime
@@ -303,19 +261,9 @@ processCommand state = case _ of
   CreateLendingPosition user lendAsset amount collateralAsset collateralAmount terms targetToken -> do
     -- Validate amount
     if amount <= 0.0
-      then pure $ Left $ InvalidAmount amount
+      then pure $ Left $ InvalidAmountError amount
       else do
-        -- Create lending record
-        id <- generateRecordId
         timestamp <- currentTime
-        
-        let record = case terms of
-              StakingTerms period -> 
-                createLenderRecord id user lendAsset amount collateralAsset 
-                  (collateralAmount / amount) terms timestamp
-              _ -> 
-                createBorrowerRecord id user lendAsset amount collateralAsset 
-                  collateralAmount terms timestamp
         
         -- Add to lending book
         -- createLendOffer expects a ratio, not absolute amount
@@ -324,19 +272,19 @@ processCommand state = case _ of
                     collateralAsset collateralRatio terms
         
         case result of
-          Left err -> pure $ Left $ SystemError err
+          Left err -> pure $ Left err
           Right lendingRecord -> do
-            -- Automatically collect fees and contribute to NFV
+            -- Automatically collect fees and contribute to POL
             let feeRate = case terms of
                   StakingTerms _ -> 0.0005  -- 0.05% for staking
                   LeverageTerms _ -> 0.001   -- 0.1% for leverage
                   SwapTerms -> 0.002         -- 0.2% for swaps
                 feeAmount = amount * feeRate
-                -- Contribute to the collateral asset's NFV (or lend asset if collateral is FeelsSOL)
-                tokenForNFV = if collateralAsset /= FeelsSOL then collateralAsset else lendAsset
+                -- Contribute to the collateral asset's POL (or lend asset if collateral is FeelsSOL)
+                tokenForPOL = if collateralAsset /= FeelsSOL then collateralAsset else lendAsset
             
-            -- Contribute fee to token-specific NFV
-            contributeToTokenNFV state.nfvState tokenForNFV feeAmount
+            -- Contribute fee to token-specific POL
+            contributeToTokenPOL state.polState tokenForPOL feeAmount
             
             -- Update position-token mapping if target token specified
             let newMapping = case targetToken of
@@ -353,11 +301,11 @@ processCommand state = case _ of
                     let newStakedAmount = token.stakedFeelsSOL + amount
                         shouldGoLive = newStakedAmount >= 100.0 && not token.live
                     
-                    -- If token is going live, contribute initial NFV
+                    -- If token is going live, contribute initial POL
                     when shouldGoLive $ do
-                      -- Contribute 10% of launch threshold to NFV as initial floor
-                      let initialNFV = 10.0  -- 10 FeelsSOL (10% of 100)
-                      contributeToTokenNFV state.nfvState (Token ticker) initialNFV
+                      -- Contribute 10% of launch threshold to POL as initial floor
+                      let initialPOL = 10.0  -- 10 FeelsSOL (10% of 100)
+                      contributeToTokenPOL state.polState (Token ticker) initialPOL
                     
                     -- TODO: Update token in registry with new staked amount and live status
                     pure unit
@@ -374,11 +322,11 @@ processCommand state = case _ of
   EnterGateway user jitoAmount -> do
     result <- enterSystem state.gateway user jitoAmount
     case result of
-      Left err -> pure $ Left $ SystemError err
+      Left err -> pure $ Left err
       Right txResult -> do
-        -- Automatically collect gateway entry fee and contribute to JitoSOL NFV
+        -- Automatically collect gateway entry fee and contribute to JitoSOL POL
         let feeAmount = jitoAmount * 0.001  -- 0.1% entry fee
-        contributeToTokenNFV state.nfvState JitoSOL feeAmount
+        contributeToTokenPOL state.polState JitoSOL feeAmount
         
         timestamp <- currentTime
         let newState = state { timestamp = timestamp }
@@ -388,33 +336,41 @@ processCommand state = case _ of
   ExitGateway user feelsAmount -> do
     result <- exitSystem state.gateway user feelsAmount
     case result of
-      Left err -> pure $ Left $ SystemError err
+      Left err -> pure $ Left err
       Right txResult -> do
-        -- Automatically collect gateway exit fee and contribute to JitoSOL NFV
+        -- Automatically collect gateway exit fee and contribute to JitoSOL POL
         let feeAmount = feelsAmount * 0.002  -- 0.2% exit fee
-        contributeToTokenNFV state.nfvState JitoSOL feeAmount
+        contributeToTokenPOL state.polState JitoSOL feeAmount
         
         timestamp <- currentTime
         let newState = state { timestamp = timestamp }
         pure $ Right $ Tuple newState (GatewayExited 
           { user, jitoSOLReceived: txResult.outputAmount.amount })
   
-  _ -> pure $ Left $ InvalidCommand "Command not implemented"
+  _ -> pure $ Left $ InvalidCommandError "Command not implemented"
 
---------------------------------------------------------------------------------
--- Query Processing
---------------------------------------------------------------------------------
-
--- Execute a query that reads state
-executeQuery :: AppRuntime -> AppQuery -> Effect (Either AppError AppResult)
-executeQuery runtime query = do
+-- Execute a command that modifies state
+executeCommand :: AppRuntime -> AppCommand -> Effect (Either ProtocolError AppResult)
+executeCommand runtime cmd = do
   state <- read runtime.state
-  processQuery state query
+  result <- commandHandlers state cmd
+  
+  case result of
+    Right (Tuple newState cmdResult) -> do
+      -- Update state
+      write newState runtime.state
+      
+      -- Notify listeners
+      listeners <- read runtime.listeners
+      _ <- traverse (\l -> l.callback newState) listeners
+      
+      pure $ Right cmdResult
+    Left err -> pure $ Left err
 
--- Process a query and return result
-processQuery :: AppState -> AppQuery -> Effect (Either AppError AppResult)
-processQuery state = case _ of
-  GetUserTokens user -> do
+-- Define a record of query handlers
+queryHandlers :: AppState -> AppQuery -> Effect (Either ProtocolError AppResult)
+queryHandlers state = case _ of
+  GetUserTokens _ -> do
     -- In a real implementation, we'd filter tokens by owner
     -- For now, return empty array as we don't track ownership in TokenRegistry
     pure $ Right $ TokenList []
@@ -430,9 +386,9 @@ processQuery state = case _ of
     pure $ Right $ PositionList positions
   
   GetUserBalance user tokenType -> do
-    balances <- read state.balances
-    let balance = case find (\b -> b.owner == user && b.token == tokenType) balances of
-          Just b -> b.amount
+    accounts <- read state.accounts
+    let balance = case find (\acc -> acc.owner == user && acc.token == tokenType) accounts of
+          Just acc -> acc.amount
           Nothing -> 0.0
     pure $ Right $ Balance balance
   
@@ -452,29 +408,29 @@ processQuery state = case _ of
     -- Count live tokens from token registry
     tokenList <- read state.tokenRegistry
     let liveCount = length (filter (\t -> t.live) tokenList)
-    -- Get NFV balance
-    nfvBalance <- getNFVBalance state.nfvState
+    -- Get POL balance
+    polBalance <- getPOLBalance state.polState
     -- Get total lender offers
     let totalLenderOffers = length lenderRecords
     -- Calculate FeelsSOL supply and JitoSOL locked
-    balances <- read state.balances
-    let feelsSOLSupply = sum $ map (\b -> if b.token == FeelsSOL then b.amount else 0.0) balances
-        jitoSOLLocked = sum $ map (\b -> if b.token == JitoSOL then b.amount else 0.0) balances
+    accounts <- read state.accounts
+    let feelsSOLSupply = sum $ map (\acc -> if acc.token == FeelsSOL then acc.amount else 0.0) accounts
+        jitoSOLLocked = sum $ map (\acc -> if acc.token == JitoSOL then acc.amount else 0.0) accounts
     pure $ Right $ SystemStatsResult
       { totalValueLocked: totalValueLocked  
       , totalUsers: userCount  
       , activePositions: length activeRecords
       , liveTokens: liveCount
       , totalLenderOffers: totalLenderOffers
-      , nfvBalance: nfvBalance
+      , polBalance: polBalance
       , feelsSOLSupply: feelsSOLSupply
       , jitoSOLLocked: jitoSOLLocked
       }
   
-  GetNFVMetrics -> do
-    balance <- getNFVBalance state.nfvState
-    metrics <- getNFVMetrics state.nfvState
-    pure $ Right $ NFVMetricsResult
+  GetPOLMetrics -> do
+    balance <- getPOLBalance state.polState
+    metrics <- getPOLMetrics state.polState
+    pure $ Right $ POLMetricsResult
       { balance
       , growthRate24h: metrics.growthRate24h
       , utilizationRate: metrics.utilizationRate
@@ -486,24 +442,10 @@ processQuery state = case _ of
           Nothing -> Nothing
     pure $ Right $ TargetTokenInfo targetToken
   
-  _ -> pure $ Left $ InvalidCommand "Query not implemented"
+  _ -> pure $ Left $ InvalidCommandError "Query not implemented"
 
---------------------------------------------------------------------------------
--- Event Subscription
---------------------------------------------------------------------------------
-
--- Subscribe to state changes
-subscribe :: AppRuntime -> (AppState -> Effect Unit) -> Effect Int
-subscribe runtime callback = do
-  id <- read runtime.nextListenerId
-  _ <- write (id + 1) runtime.nextListenerId
-  
-  _ <- modify_ (\listeners -> { id, callback } : listeners) runtime.listeners
-  
-  pure id
-
--- Unsubscribe from state changes
-unsubscribe :: AppRuntime -> Int -> Effect Unit
-unsubscribe runtime listenerId = do
-  _ <- modify_ (filter (\l -> l.id /= listenerId)) runtime.listeners
-  pure unit
+-- Execute a query that reads state
+executeQuery :: AppRuntime -> AppQuery -> Effect (Either ProtocolError AppResult)
+executeQuery runtime query = do
+  state <- read runtime.state
+  queryHandlers state query

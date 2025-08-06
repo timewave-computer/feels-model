@@ -1,7 +1,3 @@
--- Gateway for entering and exiting the Feels Protocol ecosystem.
--- High-level entry/exit functions that handle user balance management, fees, and NFV contributions.
--- Delegates synthetic asset creation/destruction to SyntheticSOL module.
--- This is the sole entry/exit point for users interacting with the protocol.
 module Gateway
   ( GatewayState
   , TransformResult
@@ -23,8 +19,10 @@ import Effect.Ref (Ref, read, write)
 import Token (TokenType(..), TokenAmount)
 import FFI (currentTime)
 import LendingRecord (LendingTerms(..))
-import NFV (NFVState, contributeToNFV)
+import POL (POLState, contributeToPOL)
 import SyntheticSOL (SyntheticSOLState, initSyntheticSOL, mintFeelsSOL, burnFeelsSOL, getOraclePrice)
+import Accounts (checkAccountBalance, updateAccount)
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Gateway Types
@@ -56,9 +54,9 @@ type GatewayState =
   { syntheticSOL :: SyntheticSOLState     -- Synthetic FeelsSOL management
   , entryFee :: Number                    -- Fee for entering (e.g., 0.001 = 0.1%)
   , exitFee :: Number                     -- Fee for exiting (e.g., 0.002 = 0.2%)
-  , userBalances :: Ref (Array { owner :: String, token :: TokenType, amount :: Number })
-  , nfvAllocationRate :: Number           -- Portion of fees going to NFV (e.g., 0.25 = 25%)
-  , nfvState :: NFVState                  -- NFV state for contributions
+  , userAccounts :: Ref (Array { owner :: String, token :: TokenType, amount :: Number })
+  , polAllocationRate :: Number           -- Portion of fees going to POL (e.g., 0.25 = 25%)
+  , polState :: POLState                  -- POL state for contributions
   }
 
 --------------------------------------------------------------------------------
@@ -70,17 +68,17 @@ initGateway ::
   (Effect Number) ->  -- Price oracle function
   Number ->           -- Entry fee
   Number ->           -- Exit fee
-  Ref (Array { owner :: String, token :: TokenType, amount :: Number }) ->
-  NFVState ->          -- NFV state
+  Ref (Array { owner :: String, token :: TokenType, amount :: Number }) -> -- User accounts registry
+  POLState ->          -- POL state
   Effect GatewayState
-initGateway oracle entryFee exitFee balances nfv = do
+initGateway oracle entryFee exitFee accounts pol = do
   syntheticSOLState <- initSyntheticSOL oracle
   pure { syntheticSOL: syntheticSOLState
        , entryFee: entryFee
        , exitFee: exitFee
-       , userBalances: balances
-       , nfvAllocationRate: 0.25  -- Default 25% to NFV
-       , nfvState: nfv
+       , userAccounts: accounts
+       , polAllocationRate: 0.25  -- Default 25% to POL
+       , polState: pol
        }
 
 --------------------------------------------------------------------------------
@@ -92,16 +90,16 @@ enterSystem ::
   GatewayState ->
   String ->         -- User address
   Number ->         -- Amount of JitoSOL to deposit
-  Effect (Either String TransformResult)
+  Effect (Either ProtocolError TransformResult)
 enterSystem state user jitoAmount = do
   -- Validate amount
   if jitoAmount <= 0.0
-    then pure $ Left "Amount must be positive"
+    then pure $ Left (InvalidAmountError jitoAmount)
     else do
       -- Check user has sufficient JitoSOL
-      hasBalance <- checkBalance state.userBalances user JitoSOL jitoAmount
+      hasBalance <- checkAccountBalance state.userAccounts user JitoSOL jitoAmount
       if not hasBalance
-        then pure $ Left $ "Insufficient JitoSOL balance. Need " <> show jitoAmount
+        then pure $ Left (InsufficientBalanceError $ "Insufficient JitoSOL balance. Need " <> show jitoAmount)
         else do
           -- Calculate fees
           let feeAmount = jitoAmount * state.entryFee
@@ -110,19 +108,19 @@ enterSystem state user jitoAmount = do
           -- Mint FeelsSOL using SyntheticSOL module
           mintResult <- mintFeelsSOL state.syntheticSOL netJitoAmount
           case mintResult of
-            Left err -> pure $ Left err
+            Left err -> pure $ Left (SystemError err)
             Right result -> do
-              -- Calculate NFV contribution from fees
+              -- Calculate POL contribution from fees
               oraclePrice <- getOraclePrice state.syntheticSOL
               let feeInFeelsSOL = feeAmount * oraclePrice.price
-                  nfvContribution = feeInFeelsSOL * state.nfvAllocationRate
+                  polContribution = feeInFeelsSOL * state.polAllocationRate
               
               -- Update user balances
-              _ <- updateBalance state.userBalances user JitoSOL (-jitoAmount)
-              _ <- updateBalance state.userBalances user FeelsSOL result.feelsSOLMinted
+              _ <- updateAccount state.userAccounts user JitoSOL (-jitoAmount)
+              _ <- updateAccount state.userAccounts user FeelsSOL result.feelsSOLMinted
               
-              -- Contribute to NFV
-              _ <- contributeToNFV state.nfvState SwapTerms nfvContribution Nothing
+              -- Contribute to POL
+              _ <- contributeToPOL state.polState SwapTerms polContribution Nothing
               
               -- Return result
               timestamp <- currentTime
@@ -144,37 +142,37 @@ exitSystem ::
   GatewayState ->
   String ->         -- User address
   Number ->         -- Amount of FeelsSOL to burn
-  Effect (Either String TransformResult)
+  Effect (Either ProtocolError TransformResult)
 exitSystem state user feelsAmount = do
   -- Validate amount
   if feelsAmount <= 0.0
-    then pure $ Left "Amount must be positive"
+    then pure $ Left (InvalidAmountError feelsAmount)
     else do
       -- Check user has sufficient FeelsSOL
-      hasBalance <- checkBalance state.userBalances user FeelsSOL feelsAmount
+      hasBalance <- checkAccountBalance state.userAccounts user FeelsSOL feelsAmount
       if not hasBalance
-        then pure $ Left $ "Insufficient FeelsSOL balance. Need " <> show feelsAmount
+        then pure $ Left (InsufficientBalanceError $ "Insufficient FeelsSOL balance. Need " <> show feelsAmount)
         else do
           -- Burn FeelsSOL using SyntheticSOL module
           burnResult <- burnFeelsSOL state.syntheticSOL feelsAmount
           case burnResult of
-            Left err -> pure $ Left err
+            Left err -> pure $ Left (SystemError err)
             Right result -> do
               -- Calculate fees on the JitoSOL output
               let feeAmount = result.jitoSOLReleased * state.exitFee
                   jitoSOLAmount = result.jitoSOLReleased - feeAmount
               
-              -- Calculate NFV contribution from fees
+              -- Calculate POL contribution from fees
               oraclePrice <- getOraclePrice state.syntheticSOL
               let feeInFeelsSOL = feeAmount * oraclePrice.price
-                  nfvContribution = feeInFeelsSOL * state.nfvAllocationRate
+                  polContribution = feeInFeelsSOL * state.polAllocationRate
               
               -- Update user balances
-              _ <- updateBalance state.userBalances user FeelsSOL (-feelsAmount)
-              _ <- updateBalance state.userBalances user JitoSOL jitoSOLAmount
+              _ <- updateAccount state.userAccounts user FeelsSOL (-feelsAmount)
+              _ <- updateAccount state.userAccounts user JitoSOL jitoSOLAmount
               
-              -- Contribute to NFV (exit fees also go to NFV)
-              _ <- contributeToNFV state.nfvState SwapTerms nfvContribution Nothing
+              -- Contribute to POL (exit fees also go to POL)
+              _ <- contributeToPOL state.polState SwapTerms polContribution Nothing
               
               -- Return result
               timestamp <- currentTime
@@ -204,42 +202,3 @@ getTotalLocked state = read state.syntheticSOL.totalJitoSOLBacking
 -- Get total FeelsSOL minted
 getTotalMinted :: GatewayState -> Effect Number
 getTotalMinted state = read state.syntheticSOL.totalFeelsSOLSupply
-
---------------------------------------------------------------------------------
--- Helper Functions
---------------------------------------------------------------------------------
-
--- Check if user has sufficient balance
-checkBalance :: 
-  Ref (Array { owner :: String, token :: TokenType, amount :: Number }) -> 
-  String -> TokenType -> Number -> Effect Boolean
-checkBalance balancesRef owner token requiredAmount = do
-  balances <- read balancesRef
-  case find (\b -> b.owner == owner && b.token == token) balances of
-    Just balance -> pure (balance.amount >= requiredAmount)
-    Nothing -> pure false
-
--- Update user balance
-updateBalance :: 
-  Ref (Array { owner :: String, token :: TokenType, amount :: Number }) -> 
-  String -> TokenType -> Number -> Effect Unit
-updateBalance balancesRef owner token delta = do
-  balances <- read balancesRef
-  let updated = updateBalanceArray balances owner token delta
-  write updated balancesRef
-
--- Helper to update balance array
-updateBalanceArray :: 
-  Array { owner :: String, token :: TokenType, amount :: Number } ->
-  String -> TokenType -> Number -> 
-  Array { owner :: String, token :: TokenType, amount :: Number }
-updateBalanceArray balances owner token delta =
-  case find (\b -> b.owner == owner && b.token == token) balances of
-    Just _ ->
-      map (\b -> if b.owner == owner && b.token == token 
-                 then b { amount = b.amount + delta }
-                 else b) balances
-    Nothing ->
-      if delta > 0.0
-      then { owner: owner, token: token, amount: delta } : balances
-      else balances

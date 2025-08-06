@@ -1,29 +1,26 @@
--- Network Floor Value (NFV) management for the Everything is Lending protocol.
--- NFV represents permanently locked protocol-owned FeelsSOL that acts as a
--- universal lender that grows from fees across all position types.
-module NFV
-  ( NFVState
-  , NFVMetrics
-  , NFVDistribution
-  , NFVContribution
+module POL
+  ( POLState
+  , POLMetrics
+  , POLDistribution
+  , POLContribution
   , ContributionBreakdown
   , Range
-  , TokenNFVInfo
-  , initNFV
-  , contributeToNFV
-  , contributeToTokenNFV
+  , TokenPOLInfo
+  , initPOL
+  , contributeToPOL
+  , contributeToTokenPOL
   , captureStakingRewards
-  , getNFVBalance
-  , getTokenNFVBalance
-  , getAllTokenNFVBalances
-  , getNFVMetrics
-  , createNFVTicks
-  , createNFVTicksWithDistribution
-  , isNFVPosition
-  , defaultNFVDistribution
+  , getPOLBalance
+  , getTokenPOLBalance
+  , getAllTokenPOLBalances
+  , getPOLMetrics
+  , createPOLTicks
+  , createPOLTicksWithDistribution
+  , isPOLPosition
+  , defaultPOLDistribution
   , takeSnapshot
   , getUtilizationRate
-  , getNFVValueForChart
+  , getPOLValueForChart
   ) where
 
 import Prelude
@@ -45,9 +42,10 @@ import FFI (currentTime)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Tuple (Tuple(..))
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
--- NFV Types
+-- POL Types
 --------------------------------------------------------------------------------
 
 -- Range for tick placement
@@ -56,49 +54,49 @@ type Range =
   , max :: Number  -- Maximum price/ratio multiplier
   }
 
--- NFV distribution curve parameters
-type NFVDistribution =
+-- POL distribution curve parameters
+type POLDistribution =
   { floorWeight :: Number      -- Portion allocated below spot (e.g., 0.6)
-  , nearSpotWeight :: Number   -- Portion allocated near spot (e.g., 0.3)
-  , tailWeight :: Number       -- Portion allocated above spot (e.g., 0.1)
+  , spotWeight :: Number       -- Portion allocated near spot (e.g., 0.3)
+  , discoveryWeight :: Number  -- Portion allocated above spot (e.g., 0.1)
   , floorRange :: Range        -- Price range for floor liquidity
-  , nearSpotRange :: Range     -- Price range for near-spot liquidity
-  , tailRange :: Range         -- Price range for tail liquidity
+  , spotRange :: Range         -- Price range for near-spot liquidity
+  , discoveryRange :: Range    -- Price range for discovery liquidity
   , ticksPerRange :: Int       -- Number of ticks to create per range
   }
 
--- Per-token NFV information
-type TokenNFVInfo =
-  { balance :: Number           -- NFV balance for this token pair
+-- Per-token POL information
+type TokenPOLInfo =
+  { balance :: Number           -- POL balance for this token pair
   , lastContribution :: Number  -- Timestamp of last contribution
   , totalContributions :: Number -- Total contributions to this pair
   }
 
--- NFV state tracking
-type NFVState =
-  { balance :: Ref Number              -- Total NFV balance in FeelsSOL
-  , contributions :: Ref (Array NFVContribution)  -- History of contributions
-  , metricsCache :: Ref NFVMetrics    -- Cached metrics
+-- POL state tracking
+type POLState =
+  { balance :: Ref Number              -- Total POL balance in FeelsSOL
+  , contributions :: Ref (Array POLContribution)  -- History of contributions
+  , metricsCache :: Ref POLMetrics    -- Cached metrics
   , lastUpdate :: Ref Number           -- Last metrics update timestamp
-  , distribution :: Ref NFVDistribution  -- Current distribution parameters
-  , tokenNFVBalances :: Ref (Map String TokenNFVInfo)  -- Per-token NFV balances
+  , distribution :: Ref POLDistribution  -- Current distribution parameters
+  , tokenPOLBalances :: Ref (Map String TokenPOLInfo)  -- Per-token POL balances
   }
 
 -- Individual contribution record
-type NFVContribution =
+type POLContribution =
   { amount :: Number
   , source :: LendingTerms
   , timestamp :: Number
   , positionId :: Maybe Int  -- Associated position if applicable
   }
 
--- NFV metrics for monitoring
-type NFVMetrics =
+-- POL metrics for monitoring
+type POLMetrics =
   { totalBalance :: Number
   , growthRate24h :: Number      -- 24-hour growth rate
-  , growthRate7d :: Number       -- 7-day growth rate
+  , growth7d :: Number       -- 7-day growth rate
   , contributionsByType :: ContributionBreakdown
-  , utilizationRate :: Number    -- How much NFV is actively lending
+  , utilizationRate :: Number    -- How much POL is actively lending
   , lastUpdated :: Number
   }
 
@@ -114,25 +112,25 @@ type ContributionBreakdown =
 -- Default Distribution
 --------------------------------------------------------------------------------
 
--- Default NFV distribution curve
-defaultNFVDistribution :: NFVDistribution
-defaultNFVDistribution =
+-- Default POL distribution curve
+defaultPOLDistribution :: POLDistribution
+defaultPOLDistribution = 
   { floorWeight: 0.6        -- 60% below spot
-  , nearSpotWeight: 0.3     -- 30% near spot
-  , tailWeight: 0.1         -- 10% above spot
+  , spotWeight: 0.3         -- 30% near spot
+  , discoveryWeight: 0.1    -- 10% above spot
   , floorRange: { min: 0.5, max: 0.9 }      -- 0.5x to 0.9x spot
-  , nearSpotRange: { min: 0.9, max: 1.1 }   -- 0.9x to 1.1x spot
-  , tailRange: { min: 1.1, max: 2.0 }       -- 1.1x to 2.0x spot
+  , spotRange: { min: 0.9, max: 1.1 }       -- 0.9x to 1.1x spot
+  , discoveryRange: { min: 1.1, max: 2.0 }  -- 1.1x to 2.0x spot
   , ticksPerRange: 5        -- 5 ticks per range = 15 total
   }
 
 --------------------------------------------------------------------------------
--- NFV Initialization
+-- POL Initialization
 --------------------------------------------------------------------------------
 
--- Initialize NFV system
-initNFV :: Effect NFVState
-initNFV = do
+-- Initialize POL system
+initPOL :: Effect POLState
+initPOL = do
   balance <- new 0.0
   contributions <- new []
   now <- currentTime
@@ -140,7 +138,7 @@ initNFV = do
   let initialMetrics =
         { totalBalance: 0.0
         , growthRate24h: 0.0
-        , growthRate7d: 0.0
+        , growth7d: 0.0
         , contributionsByType:
           { swap: 0.0
           , staking: 0.0
@@ -153,18 +151,18 @@ initNFV = do
   
   metricsCache <- new initialMetrics
   lastUpdate <- new now
-  distribution <- new defaultNFVDistribution
-  tokenNFVBalances <- new Map.empty
+  distribution <- new defaultPOLDistribution
+  tokenPOLBalances <- new Map.empty
   
-  pure { balance, contributions, metricsCache, lastUpdate, distribution, tokenNFVBalances }
+  pure { balance, contributions, metricsCache, lastUpdate, distribution, tokenPOLBalances }
 
 --------------------------------------------------------------------------------
--- NFV Operations
+-- POL Operations
 --------------------------------------------------------------------------------
 
--- Contribute fees to NFV
-contributeToNFV :: NFVState -> LendingTerms -> Number -> Maybe Int -> Effect Unit
-contributeToNFV state lendingTerms amount positionId = do
+-- Contribute fees to POL
+contributeToPOL :: POLState -> LendingTerms -> Number -> Maybe Int -> Effect Unit
+contributeToPOL state lendingTerms amount positionId = do
   -- Update balance
   _ <- modify_ (_ + amount) state.balance
   
@@ -185,9 +183,9 @@ contributeToNFV state lendingTerms amount positionId = do
   when (now - lastUpdate > 300000.0) $ do  -- Update every 5 minutes
     updateMetrics state
 
--- Calculate and capture JitoSOL/FeelsSOL differential as NFV
+-- Calculate and capture JitoSOL/FeelsSOL differential as POL
 -- This should be called periodically (e.g., every block) to capture staking rewards
-captureStakingRewards :: NFVState -> Number -> Number -> Effect Unit
+captureStakingRewards :: POLState -> Number -> Number -> Effect Unit
 captureStakingRewards state totalFeelsSOLSupply jitoSOLPrice = do
   -- Simulate a constant staking yield of ~5% APY, accrued per block.
   -- This is more stable than relying on price fluctuations.
@@ -199,11 +197,11 @@ captureStakingRewards state totalFeelsSOLSupply jitoSOLPrice = do
   
   -- Only capture positive differentials (JitoSOL should always appreciate)
   when (differentialValue > 0.0) $ do
-    -- Contribute to NFV
+    -- Contribute to POL
     _ <- modify_ (_ + differentialValue) state.balance
     
-    -- Also contribute to FeelsSOL token NFV specifically
-    contributeToTokenNFV state FeelsSOL differentialValue
+    -- Also contribute to FeelsSOL token POL specifically
+    contributeToTokenPOL state FeelsSOL differentialValue
     
     -- Record as a staking contribution
     now <- currentTime
@@ -217,21 +215,21 @@ captureStakingRewards state totalFeelsSOLSupply jitoSOLPrice = do
     contributions <- read state.contributions
     write (contribution : contributions) state.contributions
 
--- Get current NFV balance
-getNFVBalance :: NFVState -> Effect Number
-getNFVBalance state = read state.balance
+-- Get current POL balance
+getPOLBalance :: POLState -> Effect Number
+getPOLBalance state = read state.balance
 
--- Contribute to a specific token's NFV
-contributeToTokenNFV :: NFVState -> TokenType -> Number -> Effect Unit
-contributeToTokenNFV state tokenType amount = do
-  -- Update total NFV balance
+-- Contribute to a specific token's POL
+contributeToTokenPOL :: POLState -> TokenType -> Number -> Effect Unit
+contributeToTokenPOL state tokenType amount = do
+  -- Update total POL balance
   _ <- modify_ (_ + amount) state.balance
   
   -- Update per-token balance
   now <- currentTime
   let tokenKey = show tokenType
   
-  tokenBalances <- read state.tokenNFVBalances
+  tokenBalances <- read state.tokenPOLBalances
   let updatedInfo = case Map.lookup tokenKey tokenBalances of
         Nothing -> 
           { balance: amount
@@ -245,26 +243,26 @@ contributeToTokenNFV state tokenType amount = do
           }
   
   let updatedBalances = Map.insert tokenKey updatedInfo tokenBalances
-  write updatedBalances state.tokenNFVBalances
+  write updatedBalances state.tokenPOLBalances
 
--- Get NFV balance for a specific token
-getTokenNFVBalance :: NFVState -> TokenType -> Effect Number
-getTokenNFVBalance state tokenType = do
-  tokenBalances <- read state.tokenNFVBalances
+-- Get POL balance for a specific token
+getTokenPOLBalance :: POLState -> TokenType -> Effect Number
+getTokenPOLBalance state tokenType = do
+  tokenBalances <- read state.tokenPOLBalances
   let tokenKey = show tokenType
   pure $ case Map.lookup tokenKey tokenBalances of
     Nothing -> 0.0
     Just info -> info.balance
 
--- Get all token NFV balances
-getAllTokenNFVBalances :: NFVState -> Effect (Array (Tuple String TokenNFVInfo))
-getAllTokenNFVBalances state = do
-  tokenBalances <- read state.tokenNFVBalances
+-- Get all token POL balances
+getAllTokenPOLBalances :: POLState -> Effect (Array (Tuple String TokenPOLInfo))
+getAllTokenPOLBalances state = do
+  tokenBalances <- read state.tokenPOLBalances
   pure $ Map.toUnfoldable tokenBalances
 
--- Get NFV metrics
-getNFVMetrics :: NFVState -> Effect NFVMetrics
-getNFVMetrics state = do
+-- Get POL metrics
+getPOLMetrics :: POLState -> Effect POLMetrics
+getPOLMetrics state = do
   -- Check if metrics need updating
   now <- currentTime
   lastUpdate <- read state.lastUpdate
@@ -275,17 +273,17 @@ getNFVMetrics state = do
   read state.metricsCache
 
 --------------------------------------------------------------------------------
--- NFV Tick Creation
+-- POL Tick Creation
 --------------------------------------------------------------------------------
 
--- Create NFV lending offers using default distribution (backward compatibility)
-createNFVTicks :: NFVState -> LendingBook -> Effect (Array LendingRecord)
-createNFVTicks state lendingBook = createNFVTicksWithDistribution state lendingBook 1.0
+-- Create POL lending offers using default distribution (backward compatibility)
+createPOLTicks :: POLState -> LendingBook -> Effect (Array LendingRecord)
+createPOLTicks state lendingBook = createPOLTicksWithDistribution state lendingBook 1.0
 
--- Create NFV lending offers according to distribution curve
-createNFVTicksWithDistribution :: NFVState -> LendingBook -> Number -> Effect (Array LendingRecord)
-createNFVTicksWithDistribution state lendingBook spotPrice = do
-  balance <- getNFVBalance state
+-- Create POL lending offers according to distribution curve
+createPOLTicksWithDistribution :: POLState -> LendingBook -> Number -> Effect (Array LendingRecord)
+createPOLTicksWithDistribution state lendingBook spotPrice = do
+  balance <- getPOLBalance state
   dist <- read state.distribution
   
   if balance <= 0.0
@@ -299,25 +297,25 @@ createNFVTicksWithDistribution state lendingBook spotPrice = do
           spotPrice
           dist.ticksPerRange
           
-    nearSpotOffers <- generateRangeOffers
+    spotOffers <- generateRangeOffers
           lendingBook
-          (balance * dist.nearSpotWeight)
-          dist.nearSpotRange
+          (balance * dist.spotWeight)
+          dist.spotRange
           spotPrice
           dist.ticksPerRange
           
-    tailOffers <- generateRangeOffers
+    discoveryOffers <- generateRangeOffers
           lendingBook
-          (balance * dist.tailWeight)
-          dist.tailRange
+          (balance * dist.discoveryWeight)
+          dist.discoveryRange
           spotPrice
           dist.ticksPerRange
     
-    pure (floorOffers <> nearSpotOffers <> tailOffers)
+    pure (floorOffers <> spotOffers <> discoveryOffers)
 
 -- Generate offers for a specific range
 generateRangeOffers :: LendingBook -> Number -> Range -> Number -> Int -> Effect (Array LendingRecord)
-generateRangeOffers lendingBook totalAmount priceRange spotPrice numTicks =
+generateRangeOffers lendingBook totalAmount priceRange _ numTicks = 
   if numTicks <= 0 || totalAmount <= 0.0
   then pure []
   else do
@@ -330,12 +328,12 @@ generateRangeOffers lendingBook totalAmount priceRange spotPrice numTicks =
               collateralAmount = amountPerOffer * collateralRatio
           result <- createLendOffer
             lendingBook
-            "NFV"
+            "POL"
             FeelsSOL
             amountPerOffer
-            JitoSOL  -- NFV uses JitoSOL as collateral
+            JitoSOL  -- POL uses JitoSOL as collateral
             collateralAmount
-            SwapTerms  -- NFV provides swap liquidity
+            SwapTerms  -- POL provides swap liquidity
           case result of
             Left _ -> pure Nothing  -- Skip failed offers
             Right offer -> pure $ Just offer
@@ -343,16 +341,16 @@ generateRangeOffers lendingBook totalAmount priceRange spotPrice numTicks =
     maybeOffers <- traverse generateOffer (range 0 (numTicks - 1))
     pure $ catMaybes maybeOffers
 
--- Check if a position is NFV-owned (never matures)
-isNFVPosition :: forall r. { owner :: String | r } -> Boolean
-isNFVPosition position = position.owner == "NFV"
+-- Check if a position is POL-owned (never matures)
+isPOLPosition :: forall r. { owner :: String | r } -> Boolean
+isPOLPosition position = position.owner == "POL"
 
 --------------------------------------------------------------------------------
 -- Metrics Calculation
 --------------------------------------------------------------------------------
 
 -- Update cached metrics
-updateMetrics :: NFVState -> Effect Unit
+updateMetrics :: POLState -> Effect Unit
 updateMetrics state = do
   now <- currentTime
   balance <- read state.balance
@@ -379,9 +377,9 @@ updateMetrics state = do
   let metrics =
         { totalBalance: balance
         , growthRate24h: growthRate24h
-        , growthRate7d: growthRate7d
+        , growth7d: growthRate7d
         , contributionsByType: breakdown
-        , utilizationRate: 0.0  -- TODO: Calculate from active NFV positions
+        , utilizationRate: 0.0  -- TODO: Calculate from active POL positions
         , lastUpdated: now
         }
   
@@ -389,7 +387,7 @@ updateMetrics state = do
   write now state.lastUpdate
 
 -- Calculate contribution breakdown by type
-calculateBreakdown :: Array NFVContribution -> ContributionBreakdown
+calculateBreakdown :: Array POLContribution -> ContributionBreakdown
 calculateBreakdown contributions =
   let swapTotal = sum $ map _.amount $ filter (\c -> case c.source of
         SwapTerms -> true
@@ -410,26 +408,26 @@ calculateBreakdown contributions =
 -- Monitoring Functions
 --------------------------------------------------------------------------------
 
--- Take a simple snapshot of current NFV state
-takeSnapshot :: NFVState -> Effect String
-takeSnapshot nfvState = do
-  metrics <- getNFVMetrics nfvState
+-- Take a simple snapshot of current POL state
+takeSnapshot :: POLState -> Effect String
+takeSnapshot polState = do
+  metrics <- getPOLMetrics polState
   now <- currentTime
   
-  pure $ """NFV Snapshot (""" <> show now <> """):
+  pure $ """POL Snapshot (""" <> show now <> """):
   Balance: """ <> show metrics.totalBalance <> """
   Utilization: """ <> show (metrics.utilizationRate * 100.0) <> """%
   24h Growth: """ <> show (metrics.growthRate24h * 100.0) <> """%"""
 
 -- Get current utilization rate
-getUtilizationRate :: NFVState -> Effect Number
-getUtilizationRate nfvState = do
-  metrics <- getNFVMetrics nfvState
+getUtilizationRate :: POLState -> Effect Number
+getUtilizationRate polState = do
+  metrics <- getPOLMetrics polState
   pure metrics.utilizationRate
 
--- Get NFV value for historical tracking
-getNFVValueForChart :: NFVState -> Effect { timestamp :: Number, value :: Number }
-getNFVValueForChart nfvState = do
-  balance <- getNFVBalance nfvState
+-- Get POL value for historical tracking
+getPOLValueForChart :: POLState -> Effect { timestamp :: Number, value :: Number }
+getPOLValueForChart polState = do
+  balance <- getPOLBalance polState
   now <- currentTime
   pure { timestamp: now, value: balance }

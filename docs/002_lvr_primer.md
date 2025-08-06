@@ -1,10 +1,10 @@
-# Loss Versus Rebalancing (LVR) Summary
+# Loss Versus Rebalancing (LVR) Short Overview
 
 ## Overview
 
-Loss Versus Rebalancing (LVR, pronounced "lever") quantifies the adverse selection costs that liquidity providers (LPs) face in Automated Market Makers (AMMs). It represents the systematic losses LPs incur from trading at stale prices compared to centralized exchanges.
+This is a short primer on Loss Versus Rebalancing (LVR, pronounced "lever"), which quantifies the adverse selection costs that liquidity providers (LPs) face in Automated Market Maker protocols (AMMs). LVR represents the systematic losses LPs incur from trading at stale prices compared to centralized exchanges.
 
-## Core Concept
+## Core Idea
 
 When asset prices move on centralized exchanges (CEXs), AMM prices lag behind, creating arbitrage opportunities. Arbitrageurs exploit these stale quotes, causing LPs to systematically buy high and sell low. LVR measures this cost precisely.
 
@@ -15,27 +15,21 @@ LVR compares LP returns against a "rebalancing strategy" that:
 - Makes identical trades but executes at CEX prices (not AMM prices)
 - Represents the performance LPs would achieve with perfect price information
 
-## Mathematical Framework
+## Math
 
 ### Core Formula
-```
-LVR_t = ∫₀ᵗ ℓ(σ_s, P_s) ds
-```
+$$\text{LVR}_t = \int_0^t \ell(\sigma_s, P_s) ds$$
 
 ### Instantaneous LVR
-```
-ℓ(σ, P) = (σ²P²/2)|x*'(P)|
-```
+$$\ell(\sigma, P) = \frac{\sigma^2 P^2}{2} |{x^*}'(P)|$$
 
 Where:
-- `σ` = asset volatility
-- `P` = asset price
-- `|x*'(P)|` = marginal liquidity (slope of AMM demand curve)
+- $\sigma$ = asset volatility
+- $P$ = asset price
+- $|{x^*}'(P)|$ = marginal liquidity (slope of AMM demand curve)
 
 ### For Uniswap v2 (constant product)
-```
-LVR/V = σ²/8 per unit time
-```
+$$\frac{\text{LVR}}{V} = \frac{\sigma^2}{8} \text{ per unit time}$$
 
 ## Key Drivers
 
@@ -46,9 +40,7 @@ LVR/V = σ²/8 per unit time
 ## LP Economics
 
 ### Profitability Equation
-```
-LP P&L = Market Risk + (Trading Fees - LVR)
-```
+$$\text{LP P\&L} = \text{Market Risk} + (\text{Trading Fees} - \text{LVR})$$
 
 ### Delta-Hedged Returns
 By hedging market risk (long LP position, short rebalancing strategy):
@@ -83,6 +75,8 @@ Unlike "impermanent loss" which conflates market movements with actual losses:
 - LVR isolates true economic losses from adverse selection
 - LVR is always positive (a cost), while IL can be positive or negative
 - LVR provides a cleaner framework for analyzing LP profitability
+  
+LVR is therefore a suprior conceptual framework, however it has the trade-off of being more challenging to derive due to the inherently distributed nature of any rebalancing benchmark. Though problematic, impermanent loss can be measured in a straightforward way on-chain.
 
 ## Options Perspective
 

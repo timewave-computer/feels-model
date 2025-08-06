@@ -1,4 +1,4 @@
--- Test suite entry point for the "Everything is Lending" protocol.
+-- Test suite entry point for the Feels protocol.
 -- Coordinates execution of all test modules including property-based tests,
 -- unit tests, and integration tests that validate the unified lending paradigm.
 module Test.Main where

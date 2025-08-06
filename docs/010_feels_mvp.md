@@ -348,21 +348,12 @@ createPosition syntheticSOL centerPosition systemParams
 
 ## Benefits of Unified Design
 
-1. **Conceptual Elegance**: Single position type with three orthogonal parameters
-2. **Capital Efficiency**: One liquidity pool serves all functions (exchange, lending, leverage)
-3. **Natural Pricing**: Each parameter contributes independently to fees
-4. **True Composability**: Parameters combine mathematically without special cases
-5. **User Experience**: One interface, toggle parameters to access any function
-6. **Risk Clarity**: Each parameter maps to exactly one risk type
-7. **No Liquidations**: Leverage is bounded by collateral, positions cannot be forcibly closed
-
-## Future Enhancements
-
-1. **Multi-asset Support**: Beyond SOL/jitoSOL
-2. **Dynamic Collateral Ratios**: Based on market conditions
-3. **Governance**: Parameter adjustment via DAO
-4. **Cross-chain**: Bridge to other ecosystems
-5. **Advanced Strategies**: Automated position management
+1. **Capital Efficiency**: One liquidity pool serves all functions (exchange, lending, leverage)
+2. **Natural Pricing**: Each parameter contributes independently to fees
+3. **True Composability**: Parameters combine mathematically without special cases
+4. **User Experience**: One interface, toggle parameters to access any function
+5. **Risk Clarity**: Each parameter maps to exactly one risk type
+6. **No Liquidations**: Leverage is bounded by collateral, positions cannot be forcibly closed
 
 ## Mathematical Properties
 

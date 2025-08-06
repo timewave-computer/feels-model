@@ -1,9 +1,3 @@
--- Market oracle for the Everything is Lending protocol.
--- Observes internal Feels markets to extract pricing and market metrics
--- from actual lending activity. All price discovery happens through
--- market participants' lending and borrowing decisions.
--- The Oracle is a pure market data renderer - it reports actual trading
--- activity without any price manipulation or generation.
 module Oracle
   ( Oracle
   , OracleState
@@ -33,8 +27,9 @@ import Effect.Unsafe (unsafePerformEffect)
 import Token (TokenType(..))
 import LendingRecord (LendingRecord, LendingSide(..), LendingStatus(..), LendingTerms(..))
 import LendingBook (LendingBook, getActiveRecords, getLenderRecords)
-import NFV (NFVState, getNFVBalance, getTokenNFVBalance)
+import POL (POLState, getPOLBalance, getTokenPOLBalance)
 import FFI (currentTime, log, cos, exp) as FFI
+import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Oracle Types
@@ -49,7 +44,7 @@ type PriceObservation =
   , timestamp :: Number
   , block :: Maybe Int            -- Block number if available
   , confidence :: Number          -- Based on volume and spread
-  , nfvFloor :: Number           -- NFV floor value for this token pair
+  , polFloor :: Number           -- POL floor value for this token pair
   }
 
 -- Market metrics for adaptive calculations
@@ -57,7 +52,7 @@ type MarketMetrics =
   { utilizationRate :: Number      -- Supply/demand balance (0.0-1.0)
   , volatility :: Number           -- Price volatility from lending rates
   , liquidityDepth :: Number       -- Available liquidity in FeelsSOL
-  , nfvGrowthRate :: Number       -- NFV growth rate (24h)
+  , polGrowthRate :: Number       -- POL growth rate (24h)
   , avgLendingDuration :: Number   -- Average duration in seconds
   , marketEfficiency :: Number     -- Spread tightness indicator (0.0-1.0)
   , totalValueLocked :: Number     -- TVL in FeelsSOL terms
@@ -85,7 +80,7 @@ type OracleState =
 type Oracle =
   { state :: Ref OracleState
   , lendingBook :: LendingBook
-  , nfvState :: NFVState
+  , polState :: POLState
   }
 
 --------------------------------------------------------------------------------
@@ -93,8 +88,8 @@ type Oracle =
 --------------------------------------------------------------------------------
 
 -- Initialize oracle
-initOracle :: LendingBook -> NFVState -> Effect Oracle
-initOracle lendingBook nfvState = do
+initOracle :: LendingBook -> POLState -> Effect Oracle
+initOracle lendingBook polState = do
   now <- FFI.currentTime
   
   let initialState =
@@ -105,7 +100,7 @@ initOracle lendingBook nfvState = do
   
   state <- new initialState
   
-  pure { state, lendingBook, nfvState }
+  pure { state, lendingBook, polState }
 
 --------------------------------------------------------------------------------
 -- Market Observation
@@ -168,7 +163,7 @@ observeMarketWithBlock oracle blockNum = do
       oracleState <- read oracle.state
       -- Use the same priceRecords that were used for other assets (executed trades only)
       -- This ensures consistent price calculation methodology
-      jitoObs <- calculateImpliedPrice [] now (Just blockNum) oracle.nfvState oracleState JitoSOL
+      jitoObs <- calculateImpliedPrice [] now (Just blockNum) oracle.polState oracleState JitoSOL
       pure (jitoObs Array.: priceObs)
   
   let updatedHistory = Array.take 1000 (jitoSOLObs <> state.priceHistory)
@@ -218,9 +213,9 @@ calculateMarketMetrics oracle = do
   state <- read oracle.state
   let volatility = calculateRateVolatility state.priceHistory
   
-  -- Get NFV metrics
-  nfvBalance <- getNFVBalance oracle.nfvState
-  let nfvGrowthRate = calculateNFVGrowth state nfvBalance
+  -- Get POL metrics
+  polBalance <- getPOLBalance oracle.polState
+  let polGrowthRate = calculatePOLGrowth state polBalance
   
   -- Calculate market efficiency from spread
   let spread = if avgLendingRate > 0.0 
@@ -234,7 +229,7 @@ calculateMarketMetrics oracle = do
   pure { utilizationRate
        , volatility
        , liquidityDepth
-       , nfvGrowthRate
+       , polGrowthRate
        , avgLendingDuration: avgDuration
        , marketEfficiency
        , totalValueLocked: tvl
@@ -313,11 +308,11 @@ extractPricesFromMarket oracle maybeBlock = do
   
   -- log $ "Oracle: Total assets to price (including historical): " <> show (Array.length allAssetsToPrice)
   
-  traverse (calculateImpliedPrice priceRecords now maybeBlock oracle.nfvState oracleState) allAssetsToPrice
+  traverse (calculateImpliedPrice priceRecords now maybeBlock oracle.polState oracleState) allAssetsToPrice
 
 -- Calculate implied price for an asset from market activity
-calculateImpliedPrice :: Array LendingRecord -> Number -> Maybe Int -> NFVState -> OracleState -> TokenType -> Effect PriceObservation
-calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = do
+calculateImpliedPrice :: Array LendingRecord -> Number -> Maybe Int -> POLState -> OracleState -> TokenType -> Effect PriceObservation
+calculateImpliedPrice records timestamp maybeBlock polState oracleState asset = do
   -- Find all positions involving this asset
   let relevantRecords = Array.filter (\r -> r.lendAsset == asset || r.collateralAsset == asset) records
   
@@ -362,24 +357,24 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
             rate = case record.terms of
                      SwapTerms -> 
                        if record.lendAsset == asset && record.collateralAsset == FeelsSOL
-                       then -- Lending asset, getting FeelsSOL: rate = FeelsSOL/asset
-                            if record.lendAmount > 0.001 
+                       then -- Lending asset, getting FeelsSOL: rate = FeelsOL/asset
+                            if record.lendAmount > 0.01 
                             then actualCollateralAmount / record.lendAmount
                             else 0.0
                        else if record.lendAsset == FeelsSOL && record.collateralAsset == asset
                        then -- Lending FeelsSOL, getting asset: rate = FeelsSOL/asset (inverse)
-                            if actualCollateralAmount > 0.001
+                            if actualCollateralAmount > 0.01
                             then record.lendAmount / actualCollateralAmount
                             else 0.0
                        else 0.0  -- Skip if not a direct pair with FeelsSOL
                      _ ->
                        -- For staking/leverage, use similar logic
                        if record.lendAsset == asset && record.collateralAsset == FeelsSOL
-                       then if record.lendAmount > 0.001 
+                       then if record.lendAmount > 0.01 
                             then actualCollateralAmount / record.lendAmount
                             else 0.0
                        else if record.lendAsset == FeelsSOL && record.collateralAsset == asset
-                       then if actualCollateralAmount > 0.001
+                       then if actualCollateralAmount > 0.01
                             then record.lendAmount / actualCollateralAmount
                             else 0.0
                        else 0.0
@@ -407,7 +402,7 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
             -- Debug logging for JitoSOL rate calculation
             -- _ = if asset == JitoSOL && rate > 0.0 then
             --       unsafePerformEffect $ log $ 
-            --         "    Rate calc: " <> show record.lendAsset <> " " <> show record.lendAmount <> 
+            --         "    Rate calc: " <> show record.lendAsset <> " " <> show record.lendAmount <>
             --         " -> " <> show record.collateralAsset <> " " <> show actualCollateralAmount <>
             --         " | rate=" <> show rate <> " | weight=" <> show combinedWeight
             --     else unit
@@ -451,13 +446,13 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
   
   -- Debug logging for price calculation - only log first calculation or errors
   -- when (totalWeight > 1.0 && asset /= JitoSOL) $ do  -- Skip JitoSOL to reduce verbosity
-  --   log $ "  Price for " <> show asset <> ": " <> show impliedPrice <> 
+  --   log $ "  Price for " <> show asset <> ": " <> show impliedPrice <>
   --         " FeelsSOL (weight: " <> show totalWeight <> ", records: " <> show (Array.length relevantRecords) <> ")"
   
-  -- Get actual NFV floor for this token from NFVState
-  tokenNFV <- getTokenNFVBalance nfvState asset
+  -- Get actual POL floor for this token from POLState
+  tokenPOL <- getTokenPOLBalance polState asset
   
-  -- Calculate NFV floor based on token type and actual supply
+  -- Calculate POL floor based on token type and actual supply
   -- For demonstration, we'll use different supply assumptions for different tokens
   let tokenSupply = case asset of
         FeelsSOL -> 10000000.0    -- 10M FeelsSOL in circulation (grows with minting)
@@ -465,20 +460,20 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
         Token _ -> 1000000.0      -- 1M supply for each custom token
         _ -> 1000000.0
       
-      -- NFV floor price = NFV balance / circulating supply
+      -- POL floor price = POL balance / circulating supply
       -- This represents the minimum value per token backed by protocol-owned liquidity
-      currentNFVFloor = if tokenNFV > 0.0 && tokenSupply > 0.0
-                        then tokenNFV / tokenSupply
+      currentPOLFloor = if tokenPOL > 0.0 && tokenSupply > 0.0
+                        then tokenPOL / tokenSupply
                         else case asset of
                           FeelsSOL -> 0.001  -- Minimal floor for FeelsSOL
                           JitoSOL -> 0.001   -- Minimal floor for JitoSOL
                           Token _ -> 0.0001  -- Very small floor for new tokens
                           _ -> 0.0
       
-      -- Ensure NFV floor never decreases. The floor is the maximum of the
+      -- Ensure POL floor never decreases. The floor is the maximum of the
       -- previous floor and the current calculated floor, plus a small growth factor.
       previousFloor = case Array.find (\obs -> obs.baseAsset == asset) oracleState.priceHistory of
-        Just prevObs -> prevObs.nfvFloor
+        Just prevObs -> prevObs.polFloor
         Nothing -> 0.0
 
       -- Add a small, constant growth factor per block to simulate continuous fee accrual.
@@ -487,7 +482,7 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
         Just block -> Int.toNumber block * 0.000001
         Nothing -> 0.0
 
-      nfvFloor = max currentNFVFloor previousFloor + blockGrowth
+      polFloor = max currentPOLFloor previousFloor + blockGrowth
   
   -- Removed duplicate logging since we already log above
   -- when (totalWeight == 0.0 && asset /= JitoSOL) $ do
@@ -500,7 +495,7 @@ calculateImpliedPrice records timestamp maybeBlock nfvState oracleState asset = 
        , timestamp
        , block: maybeBlock
        , confidence
-       , nfvFloor
+       , polFloor
        }
 
 -- Get current price from market observation
@@ -599,17 +594,17 @@ nubBy eq l = case Array.uncons l of
   Nothing -> []
   Just { head: x, tail: xs } -> x Array.: nubBy eq (Array.filter (\y -> not (eq x y)) xs)
 
--- Calculate NFV growth rate
-calculateNFVGrowth :: OracleState -> Number -> Number
-calculateNFVGrowth state currentNFV =
-  let dayAgo = currentNFV - 86400000.0
+-- Calculate POL growth rate
+calculatePOLGrowth :: OracleState -> Number -> Number
+calculatePOLGrowth state currentPOL =
+  let dayAgo = currentPOL - 86400000.0
       oldSnapshots = Array.filter (\s -> s.timestamp > dayAgo && s.timestamp < dayAgo + 60000.0) state.snapshots
   in case Array.uncons oldSnapshots of
     Nothing -> 0.0
     Just { head: oldSnapshot, tail: _ } -> 
-      let oldNFV = fromMaybe 0.0 $ Array.find (\obs -> obs.baseAsset == FeelsSOL) oldSnapshot.priceObservations >>= \obs -> Just obs.volume
-      in if oldNFV > 0.0 
-         then (currentNFV - oldNFV) / oldNFV
+      let oldPOL = fromMaybe 0.0 $ Array.find (\obs -> obs.baseAsset == FeelsSOL) oldSnapshot.priceObservations >>= \obs -> Just obs.volume
+      in if oldPOL > 0.0 
+         then (currentPOL - oldPOL) / oldPOL
          else 0.0
 
 -- Calculate sum
