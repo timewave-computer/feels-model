@@ -170,12 +170,12 @@ generateTokenSwapAction config state account = do
       -- Get current market price from oracle if available, otherwise use random
       currentMarketPrice <- case state.oracle of
         oracle -> do
-          snapshot <- takeMarketSnapshot oracle
-          let tokenObs = find (\obs -> case obs.baseAsset of
+          observations <- takeMarketSnapshot oracle
+          let tokenObs = find (\obs -> case obs.tokenPair.base of
                                          Token t -> t == tokenTicker
-                                         _ -> false) snapshot.priceObservations
+                                         _ -> false) observations
           pure $ case tokenObs of
-            Just obs -> obs.impliedPrice
+            Just obs -> obs.price
             Nothing -> 1.0 + priceRand * 0.5  -- Random price 1.0-1.5
       
       -- Determine swap direction and amount based on market sentiment and profile
@@ -294,7 +294,7 @@ generateRandomAction config state = do
                   if account.feelsSOLBalance >= 100.0
                     then do
                       -- Stake exactly 100 FeelsSOL to help launch token
-                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 (StakingTerms Infinite) (Just tokenTicker)
+                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 (StakingTerms FourteenDays) (Just tokenTicker)
                     else pure $ WaitBlocks 1
                 Nothing -> pure $ WaitBlocks 1
         else pure $ WaitBlocks 1

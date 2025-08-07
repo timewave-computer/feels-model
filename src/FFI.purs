@@ -6,7 +6,6 @@ module FFI where
 
 import Prelude
 import Effect (Effect)
-import Data.Unit (Unit)
 import Data.Nullable (Nullable)
 import Web.DOM.Element (Element)
 import Foreign (Foreign)
@@ -62,3 +61,7 @@ foreign import getElementById :: String -> Effect (Nullable Element)
 foreign import setElementInnerHTML :: String -> String -> Effect Unit
 foreign import setElementAttribute :: String -> String -> String -> Effect Unit
 foreign import removeElementAttribute :: String -> String -> Effect Unit
+
+-- Math utility functions
+foreign import unsafeToInt :: Number -> Int
+foreign import unsafeToNumber :: Int -> Number

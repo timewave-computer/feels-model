@@ -301,6 +301,7 @@ export const checkAndInitializeChart = function() {
   return function() {
     console.log('=== CHECKING CHART READINESS ===');
     console.log('Document ready state:', document.readyState);
+    console.log('Called at:', new Date().toISOString());
     
     // Check if Chart.js is loaded
     if (typeof Chart === 'undefined') {
@@ -313,7 +314,7 @@ export const checkAndInitializeChart = function() {
     // Chart.js is loaded and ready - using standard line chart
     
     const canvas = document.getElementById('price-chart');
-    const dataElement = document.querySelector('.chart-data');
+    const dataElement = document.getElementById('chart-data-hidden');
     
     console.log('Canvas found:', !!canvas);
     console.log('Data element found:', !!dataElement);
@@ -370,7 +371,7 @@ export const initializePriceChart = function() {
   return function() {
     console.log('=== CHART INITIALIZATION STARTING ===');
     const canvas = document.getElementById('price-chart');
-    const dataElement = document.querySelector('.chart-data');
+    const dataElement = document.getElementById('chart-data-hidden');
     
     console.log('Canvas found:', !!canvas);
     console.log('Canvas ID:', canvas?.id);
@@ -1110,3 +1111,29 @@ if (typeof window !== 'undefined') {
     }, 1000); // Give time for remote control to initialize
   });
 }
+// Global access for debugging
+if (typeof window \!== 'undefined') {
+  window.checkAndInitializeChart = checkAndInitializeChart;
+  window.initializePriceChart = initializePriceChart;
+}
+
+//==============================================================================
+// Math Functions (from Position.js and others)
+//==============================================================================
+
+export const unsafeToInt = function(n) {
+  return Math.floor(n);
+};
+
+export const unsafeToNumber = function(i) {
+  return i;
+};
+
+// Additional math functions already defined above:
+// - log
+// - exp  
+// - sqrt
+// - sin
+// - cos
+// - log10
+EOF < /dev/null

@@ -453,6 +453,44 @@
         return result;
     });
     
+    window.remoteControl.registerAction('debugChartComplete', () => {
+        console.log('=== COMPLETE CHART DEBUG ===');
+        
+        // Check functions
+        const funcs = {
+            checkAndInitializeChart: typeof checkAndInitializeChart !== 'undefined',
+            initializePriceChart: typeof initializePriceChart !== 'undefined',
+            windowCheck: typeof window.checkAndInitializeChart !== 'undefined',
+            windowInit: typeof window.initializePriceChart !== 'undefined'
+        };
+        console.log('Functions available:', funcs);
+        
+        // Check DOM
+        const canvas = document.getElementById('price-chart');
+        const dataEl = document.getElementById('chart-data-hidden');
+        const dom = {
+            canvasFound: !!canvas,
+            dataFound: !!dataEl,
+            canvasSize: canvas ? canvas.width + 'x' + canvas.height : 'none',
+            canvasOffset: canvas ? canvas.offsetWidth + 'x' + canvas.offsetHeight : 'none',
+            dataLength: dataEl ? dataEl.textContent.length : 0,
+            dataPreview: dataEl ? dataEl.textContent.substring(0, 100) : 'none'
+        };
+        console.log('DOM elements:', dom);
+        
+        // Try to call chart init
+        if (window.checkAndInitializeChart) {
+            console.log('Calling window.checkAndInitializeChart...');
+            try {
+                window.checkAndInitializeChart()();
+            } catch (e) {
+                console.error('Error:', e);
+            }
+        }
+        
+        return { functions: funcs, dom: dom };
+    });
+    
     // Log that remote control is active
     console.log('Remote control client initialized - waiting for UI to register actions');
 })();

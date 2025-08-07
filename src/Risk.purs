@@ -47,8 +47,11 @@ instance showRiskLevel :: Show RiskLevel where
 -- Calculate risk components for a lending record
 calculateLendingRisk :: LendingRecord -> RiskComponents
 calculateLendingRisk record =
-  let termsRisk = calculateTermsRisk record.terms
-      sizeRisk = calculateSizeRisk record.lendAmount
+  -- Using the Position type now, adapt risk calculation
+  let termsRisk = if record.leverageConfig.targetLeverage > 1.0
+                  then min 0.8 (0.1 * record.leverageConfig.targetLeverage)
+                  else 0.1
+      sizeRisk = calculateSizeRisk record.amount
       -- Weight: 60% terms, 40% size
       totalRisk = termsRisk * 0.6 + sizeRisk * 0.4
   in { termsRisk, sizeRisk, totalRisk }
@@ -65,7 +68,7 @@ calculateTermsRisk terms = case terms of
   
   -- Staking risk increases with unbonding period
   StakingTerms period ->
-    let days = Int.toNumber (unbondingPeriodToDays period)
+    let days = unbondingPeriodToDays period
         -- Linear scaling: 30 days = 0.3, 60 days = 0.5, 90 days = 0.7
         baseRisk = 0.1 + (days / 150.0)
     in min 0.7 baseRisk

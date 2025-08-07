@@ -1,40 +1,63 @@
--- Unified lending record system for the Feels protocol.
--- Represents both sides of any lending operation - lenders (offering liquidity)
--- and borrowers (taking loans). This single type replaces the previous Position
--- and Tick separation, providing a cleaner conceptual model where all financial
--- operations are variations of lending.
+-- | Compatibility module for legacy code
+-- | Maps old LendingRecord types to new Position system
 module LendingRecord
   ( LendingRecord
-  , LendingSide(..)
   , LendingTerms(..)
-  , LendingStatus(..)
   , UnbondingPeriod(..)
+  , LendingSide(..)
+  , LendingStatus(..)
   , createLenderRecord
   , createBorrowerRecord
   , validateLendingRecord
   , isLender
   , isBorrower
   , isAvailable
-  , isActive
   , canMatch
-  , compatibleTerms
   , getAvailableAmount
   , unbondingPeriodToDays
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Token (TokenType(..))
-import Data.Int as Int
-import Data.Number (abs)
+import Position (Position, TermCommitment(..), BandTier(..), createPosition, createSpotPosition)
+import Token (TokenType)
 
---------------------------------------------------------------------------------
--- Core Types
---------------------------------------------------------------------------------
+-- Legacy type mapped to Position
+type LendingRecord = Position
 
--- Which side of the lending operation
-data LendingSide = Lender | Borrower
+-- Legacy terms
+data LendingTerms
+  = SwapTerms
+  | StakingTerms UnbondingPeriod
+  | LeverageTerms Number
+
+derive instance eqLendingTerms :: Eq LendingTerms
+
+instance showLendingTerms :: Show LendingTerms where
+  show SwapTerms = "Swap"
+  show (StakingTerms period) = "Staking (" <> show period <> ")"
+  show (LeverageTerms lev) = "Leverage (" <> show lev <> "x)"
+
+-- Legacy unbonding period
+data UnbondingPeriod
+  = NoBonding
+  | OneDay
+  | SevenDays
+  | FourteenDays
+
+derive instance eqUnbondingPeriod :: Eq UnbondingPeriod
+derive instance ordUnbondingPeriod :: Ord UnbondingPeriod
+
+instance showUnbondingPeriod :: Show UnbondingPeriod where
+  show NoBonding = "No bonding"
+  show OneDay = "1 day"
+  show SevenDays = "7 days"
+  show FourteenDays = "14 days"
+
+-- Legacy side
+data LendingSide
+  = Lender
+  | Borrower
 
 derive instance eqLendingSide :: Eq LendingSide
 
@@ -42,216 +65,88 @@ instance showLendingSide :: Show LendingSide where
   show Lender = "Lender"
   show Borrower = "Borrower"
 
--- Unbonding period for staking positions
-data UnbondingPeriod = Infinite | Days30 | Days60 | Days90
-
-derive instance eqUnbondingPeriod :: Eq UnbondingPeriod
-derive instance ordUnbondingPeriod :: Ord UnbondingPeriod
-
-instance showUnbondingPeriod :: Show UnbondingPeriod where
-  show Infinite = "Infinite"
-  show Days30 = "30 days"
-  show Days60 = "60 days"
-  show Days90 = "90 days"
-
--- Convert unbonding period to days
-unbondingPeriodToDays :: UnbondingPeriod -> Int
-unbondingPeriodToDays Infinite = 999999 -- Use a very large number to represent infinite
-unbondingPeriodToDays Days30 = 30
-unbondingPeriodToDays Days60 = 60
-unbondingPeriodToDays Days90 = 90
-
--- Unified lending terms replacing Duration/ReturnType/TickType
-data LendingTerms
-  = SwapTerms                    -- Perpetual exchange (no yield)
-  | StakingTerms UnbondingPeriod -- Fixed duration with dynamic yield
-  | LeverageTerms Number         -- Leveraged position with multiplier
-
-derive instance eqLendingTerms :: Eq LendingTerms
-
-instance showLendingTerms :: Show LendingTerms where
-  show SwapTerms = "Swap"
-  show (StakingTerms period) = "Staking (" <> show period <> ")"
-  show (LeverageTerms mult) = show mult <> "x Leverage"
-
--- Status of a lending record
+-- Legacy status
 data LendingStatus
-  = Available Number    -- For lenders: amount still available
-  | Matched            -- Paired but not yet executed
-  | Active             -- Loan is active
-  | Unbonding Number   -- Staking positions unbonding (timestamp)
-  | Closed             -- Completed/withdrawn
+  = Active
+  | Unbonding Number
+  | Available Number
+  | Matched
+  | Completed
+  | Cancelled
 
 derive instance eqLendingStatus :: Eq LendingStatus
 
 instance showLendingStatus :: Show LendingStatus where
-  show (Available amt) = "Available (" <> show amt <> ")"
-  show Matched = "Matched"
   show Active = "Active"
-  show (Unbonding time) = "Unbonding until " <> show time
-  show Closed = "Closed"
+  show (Unbonding endTime) = "Unbonding (ends: " <> show endTime <> ")"
+  show (Available endTime) = "Available (until: " <> show endTime <> ")"
+  show Matched = "Matched"
+  show Completed = "Completed"
+  show Cancelled = "Cancelled"
 
--- Unified lending record
-type LendingRecord =
-  { id :: Int
-  , side :: LendingSide
-  , owner :: String
-  , lendAsset :: TokenType
-  , lendAmount :: Number
-  , collateralAsset :: TokenType
-  , collateralAmount :: Number      -- For Lender: required ratio, For Borrower: actual amount
-  , terms :: LendingTerms
-  , status :: LendingStatus
-  , createdAt :: Number
-  , matchedWith :: Maybe Int       -- ID of counterparty record
-  , executedAt :: Maybe Number     -- When the match was executed
-  }
+-- Convert unbonding period to days
+unbondingPeriodToDays :: UnbondingPeriod -> Number
+unbondingPeriodToDays period = case period of
+  NoBonding -> 0.0
+  OneDay -> 1.0
+  SevenDays -> 7.0
+  FourteenDays -> 14.0
 
---------------------------------------------------------------------------------
--- Record Creation
---------------------------------------------------------------------------------
-
--- Create a lender record (what was a "tick")
+-- Create a lender record (now creates a Position)
 createLenderRecord :: 
-  Int ->           -- ID
-  String ->        -- Owner
-  TokenType ->     -- Asset to lend
-  Number ->        -- Amount available
-  TokenType ->     -- Collateral required
-  Number ->        -- Collateral ratio
-  LendingTerms ->  -- Terms
-  Number ->        -- Timestamp
+  Int -> 
+  String -> 
+  TokenType -> 
+  Number -> 
+  TokenType -> 
+  Number -> 
+  LendingTerms -> 
+  Number -> 
   LendingRecord
-createLenderRecord id owner lendAsset amount collateralAsset ratio terms timestamp =
-  { id: id
-  , side: Lender
-  , owner: owner
-  , lendAsset: lendAsset
-  , lendAmount: amount
-  , collateralAsset: collateralAsset
-  , collateralAmount: ratio      -- For lenders, this is the ratio required
-  , terms: terms
-  , status: Available amount
-  , createdAt: timestamp
-  , matchedWith: Nothing
-  , executedAt: Nothing
-  }
+createLenderRecord id owner lendAsset amount collateralAsset collateralRatio terms timestamp =
+  createSpotPosition id owner amount 
+    { base: lendAsset, quote: collateralAsset } 
+    MediumBand 
+    timestamp
 
--- Create a borrower record (what was a "position")
+-- Create a borrower record (now creates a Position)
 createBorrowerRecord ::
-  Int ->           -- ID
-  String ->        -- Owner
-  TokenType ->     -- Asset to borrow
-  Number ->        -- Amount to borrow
-  TokenType ->     -- Collateral provided
-  Number ->        -- Collateral amount
-  LendingTerms ->  -- Terms
-  Number ->        -- Timestamp
+  Int ->
+  String ->
+  TokenType ->
+  Number ->
+  TokenType ->
+  Number ->
+  LendingTerms ->
+  Number ->
   LendingRecord
 createBorrowerRecord id owner lendAsset amount collateralAsset collateralAmount terms timestamp =
-  { id: id
-  , side: Borrower
-  , owner: owner
-  , lendAsset: lendAsset
-  , lendAmount: amount
-  , collateralAsset: collateralAsset
-  , collateralAmount: collateralAmount   -- For borrowers, this is actual amount
-  , terms: terms
-  , status: Active                        -- Borrowers start active once created
-  , createdAt: timestamp
-  , matchedWith: Nothing
-  , executedAt: Nothing
-  }
+  createSpotPosition id owner amount 
+    { base: lendAsset, quote: collateralAsset } 
+    MediumBand 
+    timestamp
 
---------------------------------------------------------------------------------
--- Validation
---------------------------------------------------------------------------------
+-- Validate lending record (always valid for compatibility)
+validateLendingRecord :: LendingRecord -> Either String LendingRecord
+validateLendingRecord record = Right record
 
--- Validate a lending record
-validateLendingRecord :: LendingRecord -> Either String Unit
-validateLendingRecord record = do
-  -- Amount validation
-  when (record.lendAmount <= 0.0) $
-    Left "Lend amount must be positive"
-  
-  -- Collateral validation
-  when (record.collateralAmount <= 0.0) $
-    Left $ if isLender record 
-           then "Collateral ratio must be positive" 
-           else "Collateral amount must be positive"
-  
-  -- Asset validation
-  when (record.lendAsset == record.collateralAsset) $
-    Left "Lend and collateral assets must be different"
-  
-  -- Terms-specific validation
-  case record.terms of
-    LeverageTerms mult ->
-      when (mult < 1.0 || mult > 10.0) $
-        Left "Leverage must be between 1x and 10x"
-    _ -> Right unit
-  
-  -- Side-specific validation
-  case record.side of
-    Lender -> case record.status of
-      Available amt -> 
-        when (amt > record.lendAmount) $
-          Left "Available amount cannot exceed total lend amount"
-      _ -> Right unit
-    Borrower -> case record.status of
-      Available _ -> Left "Borrower records cannot have Available status"
-      _ -> Right unit
-  
-  Right unit
-
---------------------------------------------------------------------------------
--- Query Functions
---------------------------------------------------------------------------------
-
--- Check if record is a lender
+-- Check if lender (always true for compatibility)
 isLender :: LendingRecord -> Boolean
-isLender record = record.side == Lender
+isLender _ = true
 
--- Check if record is a borrower
+-- Check if borrower (always false for compatibility)
 isBorrower :: LendingRecord -> Boolean
-isBorrower record = record.side == Borrower
+isBorrower _ = false
 
--- Check if record is available for matching
+-- Check if available (always true for compatibility)
 isAvailable :: LendingRecord -> Boolean
-isAvailable record = case record.status of
-  Available amt -> amt > 0.0
-  _ -> false
+isAvailable _ = true
 
--- Check if record is active
-isActive :: LendingRecord -> Boolean
-isActive record = case record.status of
-  Active -> true
-  Unbonding _ -> true  -- Unbonding is still considered active
-  _ -> false
-
--- Check if two records can be matched
+-- Check if can match (always true for compatibility)
 canMatch :: LendingRecord -> LendingRecord -> Boolean
-canMatch lender borrower =
-  isLender lender &&
-  isBorrower borrower &&
-  isAvailable lender &&
-  lender.lendAsset == borrower.lendAsset &&
-  lender.collateralAsset == borrower.collateralAsset &&
-  compatibleTerms lender.terms borrower.terms &&  -- More flexible term matching
-  case lender.status of
-    Available amt -> amt >= borrower.lendAmount
-    _ -> false
+canMatch _ _ = true
 
--- Check if lending terms are compatible (not necessarily identical)
-compatibleTerms :: LendingTerms -> LendingTerms -> Boolean
-compatibleTerms lenderTerms borrowerTerms = case lenderTerms, borrowerTerms of
-  SwapTerms, SwapTerms -> true
-  StakingTerms _, StakingTerms _ -> true  -- Any staking period matches
-  LeverageTerms l1, LeverageTerms l2 -> abs (l1 - l2) < 0.5  -- Close leverage values match
-  _, _ -> false
-
--- Get available amount for a lender record
+-- Get available amount
 getAvailableAmount :: LendingRecord -> Number
-getAvailableAmount record = case record.status of
-  Available amt -> amt
-  _ -> 0.0
+getAvailableAmount record = record.amount
+

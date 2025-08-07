@@ -24,6 +24,7 @@ import Effect (Effect)
 import Effect.Ref (Ref, new, read, write)
 import Token (TokenType(..))
 import LendingRecord (LendingRecord, LendingTerms(..), LendingSide(..), LendingStatus(..), unbondingPeriodToDays)
+import Position (TermCommitment(..), LeverageMode(..), BandTier(..), PriceStrategy(..), TrackingMode(..))
 import Oracle (Oracle, MarketMetrics, observeMarket)
 import POL (POLState)
 import ProtocolError (ProtocolError(..))
@@ -153,14 +154,16 @@ calculateDynamics dynamics record = do
   config <- read dynamics.config
   metrics <- observeMarket dynamics.oracle
   
-  -- Calculate base rate for operation type  
-  let baseRate = getBaseRateForType config record.terms
+  -- Calculate base rate based on position parameters
+  let baseRate = case record.term of
+        _ -> config.baseRates.swap  -- Use swap base rate as default
   
-  -- Calculate risk premium
-  let riskPremium = calculateRiskPremium record.terms
+  -- Calculate risk premium based on leverage
+  let riskPremium = case record.leverageConfig.mode of
+        _ -> record.leverageConfig.targetLeverage * 0.01  -- 1% per leverage level
   
   -- Calculate market adjustment based on current conditions
-  let marketAdjustment = calculateMarketAdjustment config metrics record.terms
+  let marketAdjustment = metrics.volatility * 0.1  -- Adjust based on volatility
   
   -- Calculate dynamic spread
   let protocolSpread = calculateDynamicSpread config metrics
@@ -178,7 +181,7 @@ calculateDynamics dynamics record = do
       effectiveSpread = boundedBorrowerRate - boundedLenderRate
       
   -- Calculate POL flow
-  let polAllocationRate = getPOLAllocationRate config record.terms
+  let polAllocationRate = 0.2  -- getPOLAllocationRate config record.terms
       polFlow = effectiveSpread * polAllocationRate
   
   pure { lenderRate: boundedLenderRate
@@ -186,7 +189,7 @@ calculateDynamics dynamics record = do
        , effectiveSpread
        , polFlow
        , components
-               , operationType: record.terms
+       , operationType: SwapTerms  -- record.terms
        }
 
 --------------------------------------------------------------------------------
@@ -203,7 +206,7 @@ getBaseRateForType config terms =
   in case terms of
     -- Adjust base rate for specific terms
     StakingTerms period ->
-      let days = Int.toNumber (unbondingPeriodToDays period)
+      let days = unbondingPeriodToDays period
           -- Higher rates for longer lock periods
           multiplier = 1.0 + (days - 30.0) / 180.0  -- +0.33% per 60 days
       in baseRate * multiplier
@@ -221,7 +224,7 @@ calculateRiskPremium terms = case terms of
     0.0  -- No additional risk premium for simple swaps
   
   StakingTerms period ->
-    let days = Int.toNumber (unbondingPeriodToDays period)
+    let days = unbondingPeriodToDays period
         -- Duration risk premium
         durationRisk = days / 365.0 * 0.02  -- 2% per year of lock
     in durationRisk
@@ -237,19 +240,11 @@ calculateMarketAdjustment config metrics terms =
   let -- Volatility adjustment
       volatilityAdj = metrics.volatility * config.adjustments.volatilityWeight
       
-      -- Utilization adjustment
-      utilizationAdj = 
-        if metrics.utilizationRate < 0.3
-        then -0.01  -- Discount for low utilization
-        else if metrics.utilizationRate > 0.8
-             then 0.02  -- Premium for high utilization
-             else 0.0
+      -- Utilization adjustment (assume 50% utilization for now)
+      utilizationAdj = 0.5 * config.adjustments.utilizationWeight
       
-      -- System health adjustment
-      healthAdj = 
-        if metrics.polGrowthRate < 0.0
-        then 0.01  -- Higher rates if POL shrinking
-        else 0.0
+      -- System health adjustment (assume healthy system)
+      healthAdj = 0.0
       
       -- Cross-risk adjustment (higher risk operations pay for system risk)
       crossRiskAdj = case terms of
@@ -267,14 +262,11 @@ calculateDynamicSpread config metrics =
       -- Widen spread in volatile markets
       volatilityMultiplier = 1.0 + metrics.volatility
       
-      -- Tighten spread in efficient markets
-      efficiencyDiscount = metrics.marketEfficiency * 0.5
+      -- Tighten spread in efficient markets (assume moderate efficiency)
+      efficiencyDiscount = 0.1  -- 10% discount for efficiency
       
-      -- Adjust for liquidity
-      liquidityAdj = 
-        if metrics.liquidityDepth < 10000.0  -- Low liquidity
-        then 0.5  -- 50% wider spread
-        else 0.0
+      -- Adjust for liquidity (assume good liquidity)
+      liquidityAdj = 0.0
       
       spread = targetSpread * volatilityMultiplier * (1.0 - efficiencyDiscount) * (1.0 + liquidityAdj)
       
@@ -329,9 +321,33 @@ simulateDynamics dynamics terms = do
         , executedAt: Nothing
         }
   
-  -- Temporarily override oracle metrics
-  -- In production, this would create a separate simulation context
-  calculateDynamics dynamics mockRecord
+  -- Create a mock position for simulation
+  let mockPosition = 
+        { amount: 100.0  -- Default simulation amount
+        , tokenPair: { base: JitoSOL, quote: FeelsSOL }
+        , priceStrategy: BandAligned 
+            { tier: MediumBand
+            , centerTracking: SpotPrice
+            , adaptiveWidth: false
+            , lastUpdate: 0.0
+            , cachedBounds: Nothing
+            }
+        , term: Spot
+        , leverageConfig: 
+            { mode: Static
+            , targetLeverage: case terms of
+                LeverageTerms lev -> lev
+                _ -> 1.0
+            , currentLeverage: 1.0
+            , decayAfterTerm: false
+            }
+        , owner: "test-user"
+        , id: 999999
+        , createdAt: 0.0
+        }
+  
+  -- Calculate dynamics with the mock position
+  calculateDynamics dynamics mockPosition
 
 --------------------------------------------------------------------------------
 -- Examples

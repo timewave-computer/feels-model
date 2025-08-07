@@ -12,8 +12,8 @@ module API
   ) where
 
 import Prelude
-import Data.Either (Either(..), hush)
-import Data.Maybe (Maybe(..))
+import Data.Either (Either(..))
+import Data.Maybe (Maybe)
 import Effect (Effect)
 
 -- Import core state management
@@ -23,7 +23,7 @@ import State (AppState, AppRuntime)
 -- Import types needed for API
 import Token (TokenType, TokenMetadata)
 import LendingRecord (LendingRecord, LendingTerms)
-import ProtocolError (ProtocolError(..))
+import ProtocolError (ProtocolError)
 
 --------------------------------------------------------------------------------
 -- API Types

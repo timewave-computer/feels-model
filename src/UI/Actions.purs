@@ -26,7 +26,7 @@ import API as A
 import API (APIResult(..), initAPI, executeCommand, executeQuery)
 import Token (TokenType(..), TokenMetadata)
 import LendingRecord (LendingTerms(..), UnbondingPeriod(..))
-import FFI (setTimeout)
+import FFI (setTimeout, checkAndInitializeChart)
 import Simulation.Sim (initSimulationWithLendingBook, executeSimulation, calculateResults)
 
 --------------------------------------------------------------------------------
@@ -108,12 +108,8 @@ handleAction = case _ of
     H.liftEffect $ log $ "Price history length: " <> show (length currentState.priceHistory)
     -- Add a delay before calling the chart initialization
     H.liftEffect $ log "UI: About to schedule checkAndInitializeChart"
-    H.liftEffect $ void $ setTimeout (H.liftEffect checkAndInitializeChart) 250
+    H.liftEffect $ void $ setTimeout checkAndInitializeChart 250
     H.liftEffect $ log "UI: Scheduled checkAndInitializeChart for 250ms delay"
-    where
-      checkAndInitializeChart = do
-        log "checkAndInitializeChart called from Actions module"
-        pure unit
 
   -- Position Management Actions
   UpdateInputAmount amount -> do
@@ -193,7 +189,7 @@ handleCreatePosition = do
       let terms = 
             if state.leverage > 1.0 
               then LeverageTerms state.leverage
-              else if state.unbondingPeriod == Infinite
+              else if state.unbondingPeriod == NoBonding
                 then SwapTerms
                 else StakingTerms state.unbondingPeriod
           

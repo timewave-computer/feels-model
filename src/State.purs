@@ -25,14 +25,16 @@ import Control.Monad (when)
 
 -- Import existing types
 import Token (TokenType(..), TokenMetadata, TokenRegistry, createAndRegisterToken, getTokenFromRegistry, initTokenRegistry, getAllTokens)
-import LendingBook (LendingBook, initLendingBook, createLendOffer, getUserRecords, getBorrowerRecords, getLenderRecords, getActiveRecords, takeLoan)
+import LendingBook (LendingBook, initLendingBook, getUserPositions, getActivePositions)
+import LendingBook as LB
+import Position (TermCommitment(..), LeverageMode(..), BandTier(..), PriceStrategy(..), TrackingMode(..), createPosition)
 import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), createLenderRecord, createBorrowerRecord)
 import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
 import SyntheticSOL (getTotalSupply)
-import POL (POLState, initPOL, getPOLBalance, getPOLMetrics, contributeToTokenPOL, createPOLTicks, captureStakingRewards)
+import POL (POLState, initPOL, getPOLBalance, getPOLMetrics, getUtilizationRate, contributeToTokenPOL, createPOLTicks, captureStakingRewards)
 import Oracle (Oracle, initOracle, takeMarketSnapshot)
 import Incentives (MarketDynamics, initMarketDynamics)
-import Accounts (AccountRegistry)
+import Accounts (AccountRegistry, initAccountRegistry, getFeelsAccountBalance, getAllFeelsAccountBalances, getTotalTokenBalance)
 import FFI (currentTime, generateRecordId)
 import ProtocolError (ProtocolError(..))
 
@@ -126,14 +128,11 @@ initState = do
   tokenRegistry <- initTokenRegistry
   lendingBook <- initLendingBook
   polState <- initPOL
-  oracle <- initOracle lendingBook polState
+  oracle <- initOracle
   marketDynamics <- initMarketDynamics oracle polState
   
   -- Initialize accounts with some demo data for the user
-  accounts <- new 
-    [ { owner: "main-user", token: JitoSOL, amount: 5000.0 }
-    , { owner: "main-user", token: FeelsSOL, amount: 5000.0 }
-    ]
+  accounts <- initAccountRegistry
   
   -- Initialize gateway
   let priceOracle = pure 1.22  -- JitoSOL/SOL = 1.22 (current market price)
@@ -179,18 +178,18 @@ initState = do
 --------------------------------------------------------------------------------
 
 -- Capture JitoSOL/FeelsSOL rebase differential for POL
--- Should be called periodically (e.g. each block or time interval)
+-- Called by the Clock's GatewayRebase event
 captureRebaseDifferential :: AppRuntime -> Effect Unit
 captureRebaseDifferential runtime = do
   state <- read runtime.state
   
   -- Get current JitoSOL price from oracle
-  snapshot <- takeMarketSnapshot state.oracle
-  let jitoObs = find (\obs -> obs.baseAsset == JitoSOL) snapshot.priceObservations
+  priceObservations <- takeMarketSnapshot state.oracle
+  let jitoObs = find (\obs -> obs.tokenPair.base == JitoSOL) priceObservations
   
   case jitoObs of
     Just obs -> do
-      let currentJitoPrice = obs.impliedPrice
+      let currentJitoPrice = obs.price
           previousPrice = state.lastJitoSOLPrice
           
       -- Only capture if price has increased (staking rewards)
@@ -265,26 +264,44 @@ commandHandlers state = case _ of
       else do
         timestamp <- currentTime
         
-        -- Add to lending book
-        -- createLendOffer expects a ratio, not absolute amount
-        let collateralRatio = collateralAmount / amount
-        result <- createLendOffer state.lendingBook user lendAsset amount 
-                    collateralAsset collateralRatio terms
+        -- Get next position ID
+        nextId <- LB.getNextId state.lendingBook
         
-        case result of
-          Left err -> pure $ Left err
-          Right lendingRecord -> do
-            -- Automatically collect fees and contribute to POL
-            let feeRate = case terms of
-                  StakingTerms _ -> 0.0005  -- 0.05% for staking
-                  LeverageTerms _ -> 0.001   -- 0.1% for leverage
-                  SwapTerms -> 0.002         -- 0.2% for swaps
-                feeAmount = amount * feeRate
-                -- Contribute to the collateral asset's POL (or lend asset if collateral is FeelsSOL)
-                tokenForPOL = if collateralAsset /= FeelsSOL then collateralAsset else lendAsset
-            
-            -- Contribute fee to token-specific POL
-            contributeToTokenPOL state.polState tokenForPOL feeAmount
+        -- Create a position in the new system
+        let position = createPosition 
+              nextId
+              user
+              amount
+              { base: lendAsset, quote: collateralAsset }
+              (BandAligned 
+                { tier: MediumBand
+                , centerTracking: SpotPrice
+                , adaptiveWidth: false
+                , lastUpdate: timestamp
+                , cachedBounds: Nothing
+                })
+              (case terms of
+                SwapTerms -> Spot
+                StakingTerms period -> Daily 30.0  -- Map to daily term
+                LeverageTerms _ -> Spot)
+              { mode: case terms of
+                  LeverageTerms lev -> Static
+                  _ -> Static
+              , targetLeverage: case terms of
+                  LeverageTerms lev -> lev
+                  _ -> 1.0
+              , currentLeverage: 1.0
+              , decayAfterTerm: false
+              }
+              timestamp
+        -- Add position to lending book
+        LB.addPosition position state.lendingBook
+        
+        -- Use the position as the lending record (Position = LendingRecord)
+        let lendingRecord = position
+        do
+            -- Fee calculation moved to PositionFees module
+            -- Legacy fee logic removed - using new three-factor model
             
             -- Update position-token mapping if target token specified
             let newMapping = case targetToken of
@@ -307,7 +324,8 @@ commandHandlers state = case _ of
                       let initialPOL = 10.0  -- 10 FeelsSOL (10% of 100)
                       contributeToTokenPOL state.polState (Token ticker) initialPOL
                     
-                    -- TODO: Update token in registry with new staked amount and live status
+                    -- Token registry updates would happen through a separate mechanism
+                    -- For now, we've contributed to POL which is the key action
                     pure unit
                   Nothing -> pure unit
               _, _ -> pure unit
@@ -381,27 +399,25 @@ queryHandlers state = case _ of
     pure $ Right $ TokenList allTokens
   
   GetUserPositions user -> do
-    -- Get all user records (both lender and borrower positions)
-    positions <- getUserRecords state.lendingBook user
+    -- Get positions from the new lending book (returns Position type = LendingRecord)
+    positions <- getUserPositions user state.lendingBook
     pure $ Right $ PositionList positions
   
   GetUserBalance user tokenType -> do
-    accounts <- read state.accounts
-    let balance = case find (\acc -> acc.owner == user && acc.token == tokenType) accounts of
-          Just acc -> acc.amount
-          Nothing -> 0.0
+    balance <- getFeelsAccountBalance state.accounts user tokenType
     pure $ Right $ Balance balance
   
   GetLenderOffers -> do
-    offers <- getLenderRecords state.lendingBook
+    -- Get all active positions (which function as offers in the new system)
+    offers <- getActivePositions state.lendingBook
     pure $ Right $ LenderOfferList offers
   
   GetSystemStats -> do
-    activeRecords <- getActiveRecords state.lendingBook
-    lenderRecords <- getLenderRecords state.lendingBook
-    let allRecords = activeRecords <> lenderRecords
-    -- Calculate total value locked from all lending amounts
-    let totalValueLocked = sum (map (\r -> r.lendAmount) allRecords)
+    activeRecords <- getActivePositions state.lendingBook
+    -- All positions serve as both lending and borrowing records in the new system
+    let allRecords = activeRecords
+    -- Calculate total value locked (sum of all position amounts)
+    let totalValueLocked = sum (map (\r -> r.amount) allRecords)
     -- Count unique users from all records
     let uniqueUsers = nub (map (\r -> r.owner) allRecords)
     let userCount = if length uniqueUsers == 0 then 1 else length uniqueUsers
@@ -410,12 +426,11 @@ queryHandlers state = case _ of
     let liveCount = length (filter (\t -> t.live) tokenList)
     -- Get POL balance
     polBalance <- getPOLBalance state.polState
-    -- Get total lender offers
-    let totalLenderOffers = length lenderRecords
+    -- Get total lender offers (all active positions can be offers)
+    let totalLenderOffers = length activeRecords
     -- Calculate FeelsSOL supply and JitoSOL locked
-    accounts <- read state.accounts
-    let feelsSOLSupply = sum $ map (\acc -> if acc.token == FeelsSOL then acc.amount else 0.0) accounts
-        jitoSOLLocked = sum $ map (\acc -> if acc.token == JitoSOL then acc.amount else 0.0) accounts
+    feelsSOLSupply <- getTotalTokenBalance state.accounts FeelsSOL
+    jitoSOLLocked <- getTotalTokenBalance state.accounts JitoSOL
     pure $ Right $ SystemStatsResult
       { totalValueLocked: totalValueLocked  
       , totalUsers: userCount  
@@ -430,10 +445,11 @@ queryHandlers state = case _ of
   GetPOLMetrics -> do
     balance <- getPOLBalance state.polState
     metrics <- getPOLMetrics state.polState
+    utilizationRate <- getUtilizationRate state.polState
     pure $ Right $ POLMetricsResult
       { balance
       , growthRate24h: metrics.growthRate24h
-      , utilizationRate: metrics.utilizationRate
+      , utilizationRate
       }
   
   GetPositionTargetToken positionId -> do

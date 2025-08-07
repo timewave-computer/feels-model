@@ -8,6 +8,7 @@ module UI.Integration
   ) where
 
 import Prelude
+import Data.String as String
 import Data.Array ((:), length, find, head, null, filter, sortBy, drop, take, groupBy, zip)
 import Data.Functor (map)
 import Data.Traversable (traverse, traverse_)
@@ -81,12 +82,31 @@ initializeRemoteActions = do
   registerRemoteAction "getChartData" \_ -> do
     log "Remote action: getChartData triggered"
     -- Get chart data from DOM
-    chartDataEl <- getElementById "chart-data"
+    chartDataEl <- getElementById "chart-data-hidden"
     case toMaybe chartDataEl of
       Just el -> do
         chartData <- getValue el
         log $ "Chart data: " <> chartData
       Nothing -> log "Chart data element not found"
+    pure unit
+  
+  registerRemoteAction "debugChartElements" \_ -> do
+    log "Remote action: debugChartElements triggered"
+    -- Check canvas
+    canvas <- getElementById "price-chart"
+    case toMaybe canvas of
+      Just _ -> log "Canvas element found"
+      Nothing -> log "Canvas element NOT found"
+    -- Check data element
+    dataEl <- getElementById "chart-data-hidden"
+    case toMaybe dataEl of
+      Just el -> do
+        content <- getValue el
+        log $ "Data element found, length: " <> show (String.length content)
+        log $ "Data preview: " <> String.take 100 content
+      Nothing -> log "Data element NOT found"
+    -- Also trigger UI action to check state
+    void $ triggerUIAction "debugChartData"
     pure unit
   
   registerRemoteAction "testTokenValidation" \_ -> do
@@ -117,11 +137,10 @@ refreshProtocolData protocol currentUser = do
   case offersResult of
     Right (LenderOfferList offers) -> do
       log $ "Found " <> show (length offers) <> " lender offers"
-      -- Log details about each offer for debugging
+      -- Log position details (Position type = LendingRecord)
       traverse_ (\offer -> 
-        log $ "  Offer #" <> show offer.id <> ": " <> 
-              show offer.lendAmount <> " " <> show offer.lendAsset <> 
-              " (status: " <> show offer.status <> ")"
+        log $ "  Position #" <> show offer.id <> ": " <> 
+              show offer.amount <> " " <> show offer.tokenPair.base
       ) offers
     Left err -> 
       log $ "Failed to get lender offers: " <> show err
@@ -167,20 +186,20 @@ processSimulationResults protocol finalState results = do
   
   -- Get the oracle's actual price history from protocol state
   protocolState <- read protocol.state
-  oracleState <- read protocolState.oracle.state
+  oracleState <- read protocolState.oracle
   let oraclePriceHistory = oracleState.priceHistory
   
   log $ "Oracle has " <> show (length oraclePriceHistory) <> " price observations"
   
   -- Convert oracle price history to chart format
   -- Sort observations by block number (not timestamp) to ensure proper ordering
-  let sortedHistory = sortBy (\a b -> compare (fromMaybe 0 a.block) (fromMaybe 0 b.block)) oraclePriceHistory
+  let sortedHistory = sortBy (\a b -> compare a.timestamp b.timestamp) oraclePriceHistory
       
-      -- Debug: Log block numbers to see if we have all blocks
-      blockNumbers = map (fromMaybe (-1)) $ map _.block sortedHistory
+      -- Debug: Log timestamps instead of blocks
+      timestamps = map _.timestamp sortedHistory
   
-  log $ "Sorted history blocks: " <> show (take 20 blockNumbers) <> 
-        " ... " <> show (drop (length blockNumbers - 5) blockNumbers)
+  log $ "Sorted history timestamps: " <> show (take 20 timestamps) <> 
+        " ... " <> show (drop (length timestamps - 5) timestamps)
   
   -- Check for gaps in block numbers
   let findFirstGap nums = case nums of
@@ -193,66 +212,38 @@ processSimulationResults protocol finalState results = do
                Just (Tuple a b) -> Just ("Gap from block " <> show a <> " to " <> show b)
                Nothing -> Nothing
   
-  case findFirstGap blockNumbers of
+  case Nothing of  -- No block numbers in oracle observations
     Just gap -> log $ "WARNING: Found gap in block sequence: " <> gap
     Nothing -> pure unit
       
-  -- Group observations by block number instead of timestamp
-  -- This ensures we get one chart point per block
-  let groupByBlock obs = fromMaybe 0 obs.block
-      grouped = groupBy (\a b -> groupByBlock a == groupByBlock b) sortedHistory
-      
-      -- Convert each group of observations to a chart point
-      -- First filter to ensure we have valid groups, then map
-      validGroups = filter (\neGroup -> 
-        case head (NEA.toArray neGroup) of
-          Just obs -> obs.timestamp > 0.0
-          Nothing -> false
-      ) grouped
-      
-      convertedPriceHistory = map (\neGroup ->
-        let group = NEA.toArray neGroup
-            timestamp = case head group of
-              Just obs -> obs.timestamp
-              Nothing -> 0.0  -- This shouldn't happen due to filter above
+  -- Convert sorted observations directly to chart format
+  let convertedPriceHistory = map (\obs ->
+        let jitoPrice = if obs.tokenPair.base == JitoSOL 
+                        then obs.price
+                        else 1.22  -- Default JitoSOL price
             
-            -- Get block number from first observation
-            blockNum = case head group of
-              Just obs -> fromMaybe 0 obs.block  -- Default to 0 if no block
-              Nothing -> 0
+            -- For now, just include the current observation's token if it's live
+            tokenPrices = case obs.tokenPair.base of
+              Token ticker -> 
+                case find (\t -> t.ticker == ticker) liveTokens of
+                  Just token -> 
+                    [{ ticker: ticker
+                     , price: obs.price
+                     , polFloor: obs.price * 0.98  -- POL tracks slightly below price
+                     , live: token.live
+                     }]
+                  Nothing -> []
+              _ -> []
             
-            -- Find JitoSOL price in this group
-            jitoSOLObs = find (\obs -> obs.baseAsset == JitoSOL) group
-            jitoPrice = case jitoSOLObs of
-              Just obs -> obs.impliedPrice
-              Nothing -> 1.22  -- Default JitoSOL price
-            
-            -- Get prices for all live tokens
-            tokenPrices = map (\token ->
-              let tokenObs = find (\obs ->
-                    case obs.baseAsset of
-                      Token t -> t == token.ticker
-                      _ -> false
-                  ) group
-              in { ticker: token.ticker
-                 , price: case tokenObs of
-                     Just obs -> obs.impliedPrice
-                     Nothing -> 0.0
-                 , polFloor: case tokenObs of
-                     Just obs -> obs.polFloor
-                     Nothing -> 0.0
-                 , live: token.live
-                 }
-            ) liveTokens
-        in { timestamp: timestamp
-           , block: blockNum
+        in { timestamp: obs.timestamp
+           , block: 0  -- Oracle doesn't track blocks
            , price: jitoPrice
            , polValue: jitoPrice * 0.98  -- POL tracks slightly below price
            , tokens: tokenPrices
            }
-      ) validGroups
+      ) sortedHistory
   
-  log $ "Converted " <> show (length validGroups) <> " valid price groups to chart format (from " <> show (length grouped) <> " total)"
+  log $ "Converted " <> show (length convertedPriceHistory) <> " price observations to chart format"
   
   -- Since the simulation used the protocol's actual lending book (shared by reference),
   -- the protocol's lending book is already updated. No need to write back the state.
@@ -274,7 +265,7 @@ processSimulationResults protocol finalState results = do
             -- Immediately stake 100 FeelsSOL to make the token go live
             stakeResult <- executeCommand protocol 
               (A.CreateLendingPosition userId FeelsSOL 100.0 (Token ticker) 100.0 
-                (StakingTerms Infinite) (Just ticker))
+                (StakingTerms NoBonding) (Just ticker))
             case stakeResult of
               Right _ -> do
                 log $ "Successfully staked 100 FeelsSOL for " <> ticker <> " to make it live"

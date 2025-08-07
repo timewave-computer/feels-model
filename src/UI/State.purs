@@ -113,7 +113,7 @@ initialUIState =
   , inputAmount: 100.0
   , selectedAsset: FeelsSOL
   , collateralAsset: JitoSOL
-  , unbondingPeriod: Infinite
+  , unbondingPeriod: NoBonding
   , leverage: 2.0
   , showGateway: true
   , jitoSOLAmount: 100.0

@@ -21,7 +21,7 @@ import FFI (currentTime)
 import LendingRecord (LendingTerms(..))
 import POL (POLState, contributeToPOL)
 import SyntheticSOL (SyntheticSOLState, initSyntheticSOL, mintFeelsSOL, burnFeelsSOL, getOraclePrice)
-import Accounts (checkAccountBalance, updateAccount)
+import Accounts (AccountRegistry, depositFromChain, withdrawToChain, getChainAccountBalance, updateChainAccountBalance, getFeelsAccountBalance)
 import ProtocolError (ProtocolError(..))
 
 --------------------------------------------------------------------------------
@@ -54,7 +54,7 @@ type GatewayState =
   { syntheticSOL :: SyntheticSOLState     -- Synthetic FeelsSOL management
   , entryFee :: Number                    -- Fee for entering (e.g., 0.001 = 0.1%)
   , exitFee :: Number                     -- Fee for exiting (e.g., 0.002 = 0.2%)
-  , userAccounts :: Ref (Array { owner :: String, token :: TokenType, amount :: Number })
+  , accountRegistry :: AccountRegistry    -- Registry for both account types
   , polAllocationRate :: Number           -- Portion of fees going to POL (e.g., 0.25 = 25%)
   , polState :: POLState                  -- POL state for contributions
   }
@@ -65,18 +65,18 @@ type GatewayState =
 
 -- Initialize the gateway with oracle and fee parameters
 initGateway :: 
-  (Effect Number) ->  -- Price oracle function
-  Number ->           -- Entry fee
-  Number ->           -- Exit fee
-  Ref (Array { owner :: String, token :: TokenType, amount :: Number }) -> -- User accounts registry
-  POLState ->          -- POL state
+  (Effect Number) ->    -- Price oracle function
+  Number ->             -- Entry fee
+  Number ->             -- Exit fee
+  AccountRegistry ->    -- Account registry
+  POLState ->           -- POL state
   Effect GatewayState
-initGateway oracle entryFee exitFee accounts pol = do
+initGateway oracle entryFee exitFee accountRegistry pol = do
   syntheticSOLState <- initSyntheticSOL oracle
   pure { syntheticSOL: syntheticSOLState
        , entryFee: entryFee
        , exitFee: exitFee
-       , userAccounts: accounts
+       , accountRegistry: accountRegistry
        , polAllocationRate: 0.25  -- Default 25% to POL
        , polState: pol
        }
@@ -96,10 +96,10 @@ enterSystem state user jitoAmount = do
   if jitoAmount <= 0.0
     then pure $ Left (InvalidAmountError jitoAmount)
     else do
-      -- Check user has sufficient JitoSOL
-      hasBalance <- checkAccountBalance state.userAccounts user JitoSOL jitoAmount
-      if not hasBalance
-        then pure $ Left (InsufficientBalanceError $ "Insufficient JitoSOL balance. Need " <> show jitoAmount)
+      -- Check user has sufficient JitoSOL in ChainAccount
+      jitoBalance <- getChainAccountBalance state.accountRegistry user
+      if jitoBalance < jitoAmount
+        then pure $ Left (InsufficientBalanceError $ "Insufficient JitoSOL balance. Have " <> show jitoBalance <> ", need " <> show jitoAmount)
         else do
           -- Calculate fees
           let feeAmount = jitoAmount * state.entryFee
@@ -115,23 +115,25 @@ enterSystem state user jitoAmount = do
               let feeInFeelsSOL = feeAmount * oraclePrice.price
                   polContribution = feeInFeelsSOL * state.polAllocationRate
               
-              -- Update user balances
-              _ <- updateAccount state.userAccounts user JitoSOL (-jitoAmount)
-              _ <- updateAccount state.userAccounts user FeelsSOL result.feelsSOLMinted
+              -- Process the gateway deposit
+              depositResult <- depositFromChain state.accountRegistry user jitoAmount
               
               -- Contribute to POL
               _ <- contributeToPOL state.polState SwapTerms polContribution Nothing
               
-              -- Return result
-              timestamp <- currentTime
-              pure $ Right
-                { direction: Enter
-                , inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
-                , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
-                , exchangeRate: result.exchangeRate
-                , fee: feeAmount
-                , timestamp: timestamp
-                }
+              case depositResult of
+                Left err -> pure $ Left (SystemError err)
+                Right _ -> do
+                  -- Return result
+                  timestamp <- currentTime
+                  pure $ Right
+                    { direction: Enter
+                    , inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
+                    , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
+                    , exchangeRate: result.exchangeRate
+                    , fee: feeAmount
+                    , timestamp: timestamp
+                    }
 
 --------------------------------------------------------------------------------
 -- System Exit (FeelsSOL -> JitoSOL)
@@ -148,10 +150,10 @@ exitSystem state user feelsAmount = do
   if feelsAmount <= 0.0
     then pure $ Left (InvalidAmountError feelsAmount)
     else do
-      -- Check user has sufficient FeelsSOL
-      hasBalance <- checkAccountBalance state.userAccounts user FeelsSOL feelsAmount
-      if not hasBalance
-        then pure $ Left (InsufficientBalanceError $ "Insufficient FeelsSOL balance. Need " <> show feelsAmount)
+      -- Check user has sufficient FeelsSOL in FeelsAccount
+      feelsBalance <- getFeelsAccountBalance state.accountRegistry user FeelsSOL
+      if feelsBalance < feelsAmount
+        then pure $ Left (InsufficientBalanceError $ "Insufficient FeelsSOL balance. Have " <> show feelsBalance <> ", need " <> show feelsAmount)
         else do
           -- Burn FeelsSOL using SyntheticSOL module
           burnResult <- burnFeelsSOL state.syntheticSOL feelsAmount
@@ -167,23 +169,25 @@ exitSystem state user feelsAmount = do
               let feeInFeelsSOL = feeAmount * oraclePrice.price
                   polContribution = feeInFeelsSOL * state.polAllocationRate
               
-              -- Update user balances
-              _ <- updateAccount state.userAccounts user FeelsSOL (-feelsAmount)
-              _ <- updateAccount state.userAccounts user JitoSOL jitoSOLAmount
+              -- Process the gateway withdrawal
+              withdrawResult <- withdrawToChain state.accountRegistry user feelsAmount
               
-              -- Contribute to POL (exit fees also go to POL)
+              -- Contribute to POL
               _ <- contributeToPOL state.polState SwapTerms polContribution Nothing
               
-              -- Return result
-              timestamp <- currentTime
-              pure $ Right
-                { direction: Exit
-                , inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
-                , outputAmount: { tokenType: JitoSOL, amount: jitoSOLAmount }
-                , exchangeRate: result.exchangeRate
-                , fee: feeAmount
-                , timestamp: timestamp
-                }
+              case withdrawResult of
+                Left err -> pure $ Left (SystemError err)
+                Right _ -> do
+                  -- Return result
+                  timestamp <- currentTime
+                  pure $ Right
+                    { direction: Exit
+                    , inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
+                    , outputAmount: { tokenType: JitoSOL, amount: jitoSOLAmount }
+                    , exchangeRate: result.exchangeRate
+                    , fee: feeAmount
+                    , timestamp: timestamp
+                    }
 
 --------------------------------------------------------------------------------
 -- Gateway Information

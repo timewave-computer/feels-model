@@ -49,9 +49,7 @@ testRedenominationAssociativity input x y =
 
 -- Helper to extract leverage from lending record
 getLeverageFromRecord :: LendingRecord -> Number
-getLeverageFromRecord record = case record.terms of
-  LeverageTerms mult -> mult
-  _ -> 1.0
+getLeverageFromRecord record = record.leverageConfig.targetLeverage
 
 -- Identity property tests
 -- Tests that Redenom(Token, 1x) = Token (no change)

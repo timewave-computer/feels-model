@@ -30,6 +30,7 @@ import Halogen.HTML.Properties as HP
 import UI.State (UIState, Action(..), parseTokenType)
 import Token (TokenType(..), TokenMetadata)
 import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), LendingSide(..), getAvailableAmount)
+import Position (TermCommitment(..))
 import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
 import Utils (formatAmount, formatPercentage)
 
@@ -317,10 +318,10 @@ renderCreatePositionPanel state =
                 [ HP.id "unbonding-period"
                 , HP.name "unbonding-period"
                 , HE.onValueChange \v -> SetUnbondingPeriod $ case v of
-                    "infinite" -> Infinite
-                    "30" -> Days30
-                    "60" -> Days60
-                    _ -> Days90
+                    "infinite" -> NoBonding
+                    "1" -> OneDay
+                    "7" -> SevenDays
+                    _ -> FourteenDays
                 , HP.class_ (HH.ClassName "form__select")
                 ]
                 [ HH.option [ HP.value "infinite", HP.selected true ] [ HH.text "Infinite (Swap)" ]
@@ -387,49 +388,40 @@ renderLoanBookPanel offers =
             [ HH.text $ formatAddress offer.owner ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__asset") ]
-            [ HH.text $ show offer.lendAsset ]
+            [ HH.text $ show offer.tokenPair.base ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__amount") ]
-            [ HH.text $ formatAmount (getAvailableAmount offer) <> " / " <> formatAmount offer.lendAmount ]
+            [ HH.text $ formatAmount offer.amount <> " " <> show offer.tokenPair.base ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__collateral") ]
             [ HH.text $ formatCollateral offer ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__terms") ]
-            [ HH.text $ formatTerms offer.terms ]
+            [ HH.text $ formatPositionTerms offer ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__status") ]
             [ renderOfferStatus offer ]
         ]
 
-    formatTerms = case _ of
-      SwapTerms -> "Swap"
-      StakingTerms period -> "Staking (" <> show period <> ")"
-      LeverageTerms lev -> "Leverage (" <> formatAmount lev <> "x)"
+    formatPositionTerms position = 
+      case position.term of
+        Spot -> "Spot"
+        Hourly hrs -> "Hourly (exp: " <> show hrs <> ")"
+        Daily days -> "Daily (exp: " <> show days <> ")"
+        Weekly weeks -> "Weekly (exp: " <> show weeks <> ")"
 
-    formatRate = case _ of
-      SwapTerms -> "Market"
-      StakingTerms _ -> "5% APY"
-      LeverageTerms _ -> "Variable"
-    
     formatAddress addr = 
       if String.length addr > 12
         then String.take 6 addr <> "..." <> String.drop (String.length addr - 4) addr
         else addr
     
     formatCollateral offer = 
-      show offer.collateralAsset <> " " <> 
-      case offer.side of
-        Lender -> formatAmount (offer.collateralAmount * 100.0) <> "%"  -- Show as ratio percentage
-        _ -> formatAmount offer.collateralAmount
-    
-    formatAge createdAt = 
-      -- For now, just show "New" - in a real app would calculate time difference
-      "New"
+      -- Show the quote asset as collateral
+      show offer.tokenPair.quote
     
     renderOfferStatus offer =
-      let available = getAvailableAmount offer
-          total = offer.lendAmount
+      let available = offer.amount  -- In new system, full amount is available until matched
+          total = offer.amount
           percentFilled = if total > 0.0 
                            then (total - available) / total * 100.0
                            else 0.0
@@ -467,26 +459,51 @@ renderPositionsPanel positions =
         [ HP.class_ (HH.ClassName "list-item") ]
         [ HH.div
             [ HP.class_ (HH.ClassName "list-item__header") ]
-            [ HH.text $ "Position #" <> show pos.id <> " (" <> show pos.side <> ")"
+            [ HH.text $ "Position #" <> show pos.id
             , HH.span
-                [ HP.class_ (HH.ClassName $ "status " <> statusClass pos.status) ]
-                [ HH.text $ show pos.status ]
+                [ HP.class_ (HH.ClassName "status status-active") ]
+                [ HH.text "Active" ]
             ]
         , HH.div
             [ HP.class_ (HH.ClassName "list-item__content") ]
-            [ HH.div_ [ HH.text $ formatAmount pos.lendAmount <> " " <> show pos.lendAsset ]
-            , HH.div_ [ HH.text $ "Collateral: " <> formatAmount pos.collateralAmount <> " " <> show pos.collateralAsset ]
-            , HH.div_ [ HH.text $ "Terms: " <> formatTerms pos.terms ]
+            [ HH.div_ [ HH.text $ formatAmount pos.amount <> " " <> show pos.tokenPair.base ]
+            , HH.div_ [ HH.text $ "Quote: " <> show pos.tokenPair.quote ]
+            , HH.div_ [ HH.text $ "Term: " <> formatPositionTerms pos ]
             ]
         ]
-    
-    formatTerms = case _ of
-      SwapTerms -> "Swap"
-      StakingTerms period -> "Staking (" <> show period <> ")"
-      LeverageTerms lev -> "Leverage (" <> formatAmount lev <> "x)"
 
-    statusClass status = case status of
-      _ -> "status-active"  -- Simplified for now
+    formatPositionTerms position = 
+      case position.term of
+        Spot -> "Spot"
+        Hourly hrs -> "Hourly (exp: " <> show hrs <> ")"
+        Daily days -> "Daily (exp: " <> show days <> ")"
+        Weekly weeks -> "Weekly (exp: " <> show weeks <> ")"
+  -- where
+  --   renderPosition pos =
+  --     HH.div
+  --       [ HP.class_ (HH.ClassName "list-item") ]
+  --       [ HH.div
+  --           [ HP.class_ (HH.ClassName "list-item__header") ]
+  --           [ HH.text $ "Position #" <> show pos.id <> " (" <> show pos.side <> ")"
+  --           , HH.span
+  --               [ HP.class_ (HH.ClassName $ "status " <> statusClass pos.status) ]
+  --               [ HH.text $ show pos.status ]
+  --           ]
+  --       , HH.div
+  --           [ HP.class_ (HH.ClassName "list-item__content") ]
+  --           [ HH.div_ [ HH.text $ formatAmount pos.lendAmount <> " " <> show pos.lendAsset ]
+  --           , HH.div_ [ HH.text $ "Collateral: " <> formatAmount pos.collateralAmount <> " " <> show pos.collateralAsset ]
+  --           , HH.div_ [ HH.text $ "Terms: " <> formatTerms pos.terms ]
+  --           ]
+  --       ]
+    
+    -- formatTerms = case _ of
+    --   SwapTerms -> "Swap"
+    --   StakingTerms period -> "Staking (" <> show period <> ")"
+    --   LeverageTerms lev -> "Leverage (" <> formatAmount lev <> "x)"
+
+    -- statusClass status = case status of
+    --   _ -> "status-active"  -- Simplified for now
 
 --------------------------------------------------------------------------------
 -- Price Chart Panel Components
@@ -526,7 +543,8 @@ renderPriceChartPanel state =
                   ]
               -- Hidden chart data for JavaScript
               , HH.div
-                  [ HP.class_ (HH.ClassName "chart-data")
+                  [ HP.id "chart-data-hidden"
+                  , HP.class_ (HH.ClassName "chart-data")
                   , HP.style "display: none;"
                   ]
                   [ HH.text $ "[" <> (joinWith "," $ map formatChartPoint state.priceHistory) <> "]" ]

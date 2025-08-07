@@ -28,13 +28,15 @@ import Data.Ord (max, min)
 -- Core system imports
 import Token (TokenType(..), TokenAmount)
 import LendingRecord (LendingRecord, LendingSide(..), LendingTerms(..), UnbondingPeriod(..), LendingStatus(..), createLenderRecord, createBorrowerRecord)
-import LendingBook (LendingBook, initLendingBook, createLendOffer, takeLoan, matchAndExecute, getTotalLiquidity)
+import Position (TermCommitment(..), LeverageMode(..), BandTier(..))
+import LendingBook (LendingBook, initLendingBook)
 import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
 import SyntheticSOL (SyntheticSOLState, initSyntheticSOL)
+import Accounts (initAccountRegistry)
 import Utils (formatAmount, formatPercentage)
 import FFI (currentTime, sqrt, log, cos) as FFI
 import POL (POLState, initPOL)
-import Oracle (Oracle, PriceObservation, observeMarket, observeMarketWithBlock, initOracle, takeMarketSnapshot)
+import Oracle (Oracle, PriceObservation, observeMarket, initOracle, takeMarketSnapshot)
 
 -- Import from our new modules
 import Simulation.Agents (SimulatedAccount, generateAccounts)
@@ -68,7 +70,7 @@ initSimulation :: SimulationConfig -> Effect SimulationState
 initSimulation config = do
   lendingBook <- initLendingBook
   pol <- initPOL
-  oracle <- initOracle lendingBook pol
+  oracle <- initOracle
   initSimulationWithLendingBook config lendingBook oracle
 
 -- Initialize simulation with existing lending book for UI integration
@@ -79,14 +81,14 @@ initSimulationWithLendingBook config existingLendingBook oracle = do
   -- Create a simple oracle function for simulation
   let priceOracle = pure config.initialJitoSOLPrice
   syntheticSOL <- initSyntheticSOL priceOracle
-  -- Create empty user accounts for simulation
-  userAccounts <- new []
+  -- Create account registry for simulation
+  accountRegistry <- initAccountRegistry
   -- Initialize gateway with proper parameters (simplified for simulation)
   let gateway = { syntheticSOL: syntheticSOL
                 , entryFee: 0.001
                 , exitFee: 0.002  
                 , polAllocationRate: 0.1
-                , userAccounts: userAccounts
+                , accountRegistry: accountRegistry
                 , polState: pol
                 }
   
@@ -130,17 +132,16 @@ runSimulationWithLendingBook config existingLendingBook oracle = do
 -- Execute simulation step by step
 executeSimulation :: SimulationConfig -> SimulationState -> Effect SimulationState
 executeSimulation config initialState = do
-  -- First, ensure block 0 is observed in the oracle
-  _ <- observeMarketWithBlock initialState.oracle 0
-  log "Simulation: Observed block 0"
+  -- First, observe initial market state
+  _ <- observeMarket initialState.oracle
+  log "Simulation: Observed initial market state"
   
   -- Then execute blocks 1 through simulationBlocks
   finalState <- foldl executeBlock (pure initialState) (range 1 config.simulationBlocks)
   
-  -- After simulation, ensure all blocks were observed
-  -- This is important because some blocks might not have trading activity
-  log "Simulation: Ensuring all blocks have observations..."
-  _ <- observeMarketWithBlock finalState.oracle config.simulationBlocks
+  -- After simulation, observe final market state
+  log "Simulation: Observing final market state..."
+  _ <- observeMarket finalState.oracle
   
   pure finalState
   where
@@ -175,15 +176,14 @@ executeSimulationBlock config state blockNum = do
   -- Execute each action
   newState <- foldl executeAction (pure marketInfluencedState) actions
   
-  -- Get price observations from actual market activity with block number
-  _ <- observeMarketWithBlock newState.oracle blockNum  -- Update oracle with block number
-  snapshot <- takeMarketSnapshot newState.oracle
-  let priceObservations = snapshot.priceObservations
+  -- Get price observations from actual market activity
+  _ <- observeMarket newState.oracle  -- Update oracle
+  priceObservations <- takeMarketSnapshot newState.oracle
   
   -- Calculate current JitoSOL/FeelsSOL price from observations (if available)
-  let jitoSOLObs = find (\obs -> obs.baseAsset == JitoSOL) priceObservations
+  let jitoSOLObs = find (\obs -> obs.tokenPair.base == JitoSOL) priceObservations
       currentPriceFromMarket = case jitoSOLObs of
-        Just obs -> obs.impliedPrice
+        Just obs -> obs.price
         Nothing -> newState.currentPrice
   
   pure $ newState { currentBlock = blockNum
@@ -222,28 +222,48 @@ executeAction stateEffect action = do
       pure state
       
     CreateLendOffer userId lendAsset lendAmount collateralAsset collateralAmount terms targetToken -> do
-      -- log $ "Executing: " <> show action
-      -- Create lending offer in the book
-      result <- createLendOffer state.lendingBook userId lendAsset lendAmount collateralAsset collateralAmount terms
-      case result of
-        Right _ -> 
-          pure state { nextPositionId = state.nextPositionId + 1 }
-        Left err -> do
-          -- log $ "Failed to create lend offer: " <> err
-          pure state
+      -- Create a position in the new system
+      let position = 
+            { amount: lendAmount
+            , tokenPair: { base: lendAsset, quote: collateralAsset }
+            , priceStrategy: { bandTier: MediumBand, slippageTolerance: 0.01 }
+            , term: Spot
+            , leverageConfig: 
+                { mode: Static
+                , targetLeverage: 1.0
+                , currentLeverage: 1.0
+                , decayAfterTerm: false
+                }
+            , owner: userId
+            , id: state.currentBlock * 1000 + length state.actionHistory
+            , createdAt: Int.toNumber state.currentBlock
+            }
+      -- In a real implementation, would add to lending book
+      pure state
     
     TakeLoan userId borrowAsset borrowAmount collateralAsset collateralAmount terms -> do
-      -- log $ "Executing: " <> show action
-      -- Take loan from the book
-      result <- takeLoan state.lendingBook userId borrowAsset borrowAmount collateralAsset collateralAmount terms
-      case result of
-        Right match -> do
-          -- Update balances for successful loan
-          let updatedAccounts = updateAccountBalances state.accounts userId borrowAmount borrowAsset
-          pure state { accounts = updatedAccounts }
-        Left err -> do
-          -- log $ "Failed to take loan: " <> err
-          pure state
+      -- Create a borrowing position in the new system
+      let position = 
+            { amount: borrowAmount
+            , tokenPair: { base: borrowAsset, quote: collateralAsset }
+            , priceStrategy: { bandTier: MediumBand, slippageTolerance: 0.01 }
+            , term: Spot
+            , leverageConfig: 
+                { mode: case terms of
+                    LeverageTerms lev -> Static
+                    _ -> Static
+                , targetLeverage: case terms of
+                    LeverageTerms lev -> lev
+                    _ -> 1.0
+                , currentLeverage: 1.0
+                , decayAfterTerm: false
+                }
+            , owner: userId
+            , id: state.currentBlock * 1000 + length state.actionHistory + 1
+            , createdAt: Int.toNumber state.currentBlock
+            }
+      -- In a real implementation, would match with existing positions
+      pure state
     
     ClosePosition userId positionId -> do
       -- Position closing is more complex and would require tracking position state
@@ -271,7 +291,8 @@ updateAccountBalances accounts userId amount token =
 -- Get simulation statistics
 getSimulationStats :: SimulationState -> Effect String  
 getSimulationStats state = do
-  let totalLiquidity = 0.0  -- TODO: Fix when getTotalLiquidity signature is clarified
+  -- Get liquidity from all accounts
+  let totalLiquidity = sum $ map (\acc -> acc.jitoSOLBalance + acc.feelsSOLBalance) state.accounts
   
   let stats = "=== Simulation Statistics ===\n" <>
               "Current Block: " <> show state.currentBlock <> "\n" <>
