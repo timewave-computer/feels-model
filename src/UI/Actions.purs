@@ -6,7 +6,7 @@ module UI.Actions
   ) where
 
 import Prelude
-import Data.Array ((:), length, find, null)
+import Data.Array ((:), find, null, length)
 import Data.Traversable (traverse_)
 import Data.String.Common (trim)
 import Data.String as String
@@ -22,12 +22,12 @@ import UI.State (UIState, Action(..))
 import UI.Integration (initializeRemoteActions, refreshProtocolData, processSimulationResults)
 
 -- Import API and data types
-import API as A
-import API (APIResult(..), initAPI, executeCommand, executeQuery)
+import State.State as A
+import State.State (AppResult(..), initState, executeCommand, executeQuery)
 import Token (TokenType(..), TokenMetadata)
-import LendingRecord (LendingTerms(..), UnbondingPeriod(..))
+import Position (spotTerm, hourlyTerm, dailyTerm, weeklyTerm)
 import FFI (setTimeout, checkAndInitializeChart)
-import Simulation.Sim (initSimulationWithLendingBook, executeSimulation, calculateResults)
+import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
 
 --------------------------------------------------------------------------------
 -- Main Action Handler
@@ -37,7 +37,7 @@ handleAction :: forall o m. MonadAff m => Action -> H.HalogenM UIState Action ()
 handleAction = case _ of
   Initialize -> do
     -- Initialize protocol
-    protocol <- H.liftEffect initAPI
+    protocol <- H.liftEffect initState
     
     -- Subscribe to protocol state changes (disabled - subscribe function not implemented)
     -- _ <- H.liftEffect $ subscribe protocol \_ -> do
@@ -121,11 +121,9 @@ handleAction = case _ of
   SelectCollateralAsset asset -> do
     H.modify_ _ { collateralAsset = asset }
   
-  SetUnbondingPeriod period -> do
-    H.modify_ _ { unbondingPeriod = period }
+  SetTermType termType -> do
+    H.modify_ _ { selectedTermType = termType }
 
-  SetLeverage lev -> do
-    H.modify_ _ { leverage = lev }
 
   CreatePosition -> do
     handleCreatePosition
@@ -175,6 +173,25 @@ handleAction = case _ of
   RunSimulation -> do
     handleRunSimulation
 
+  -- Launch System Actions
+  SelectLaunch launchId -> do
+    H.modify_ $ _ { selectedLaunchId = Just launchId }
+
+  UpdateLaunchBidAmount amount -> do
+    H.modify_ $ _ { launchBidAmount = amount }
+
+  UpdateLaunchPriorityFee percent -> do
+    H.modify_ $ _ { launchPriorityFeePercent = percent }
+
+  SubmitLaunchBid -> do
+    H.liftEffect $ log "Launch bid submission not yet implemented"
+
+  RefreshLaunches -> do
+    H.liftEffect $ log "Launch refresh not yet implemented"
+
+  ProcessLaunchBatch launchId -> do
+    H.liftEffect $ log $ "Processing batch for launch: " <> launchId
+
 --------------------------------------------------------------------------------
 -- Position Management Handlers
 --------------------------------------------------------------------------------
@@ -185,25 +202,26 @@ handleCreatePosition = do
   case state.api of
     Nothing -> pure unit
     Just protocol -> do
-      -- Determine terms based on which fields are filled
-      let terms = 
-            if state.leverage > 1.0 
-              then LeverageTerms state.leverage
-              else if state.unbondingPeriod == NoBonding
-                then SwapTerms
-                else StakingTerms state.unbondingPeriod
+      -- Get current block from protocol state for term creation
+      protocolState <- H.liftEffect $ read protocol.state
+      let currentBlock = protocolState.currentBlock
+          term = case state.selectedTermType of
+            "hourly" -> hourlyTerm currentBlock
+            "daily" -> dailyTerm currentBlock
+            "weekly" -> weeklyTerm currentBlock
+            _ -> spotTerm
           
           collateralAmount = state.inputAmount * 1.5  -- Simplified
       
       -- Execute create position command
       result <- H.liftEffect $ executeCommand protocol
-        (A.CreateLendingPosition 
+        (A.CreatePosition 
           state.currentUser
           state.selectedAsset
           state.inputAmount
           state.collateralAsset
           collateralAmount
-          terms
+          term
           Nothing)
       
       case result of
@@ -312,10 +330,10 @@ handleRunSimulation = do
       -- Extract the protocol's lending book instead of creating a new one
       protocolState <- H.liftEffect $ read protocol.state
       
-      -- Initialize simulation with the protocol's actual lending book and oracle
-      simState <- H.liftEffect $ initSimulationWithLendingBook 
+      -- Initialize simulation with the protocol's actual pool registry and oracle
+      simState <- H.liftEffect $ initSimulationWithPoolRegistry 
         state.simulationConfig 
-        protocolState.lendingBook
+        protocolState.poolRegistry
         protocolState.oracle
       
       -- Seed initial JitoSOL/FeelsSOL liquidity at correct price
@@ -323,9 +341,9 @@ handleRunSimulation = do
       _ <- H.liftEffect $ do
         -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
         -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
-        _ <- executeCommand protocol (A.CreateLendingPosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 SwapTerms Nothing)
+        _ <- executeCommand protocol (A.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotTerm Nothing)
         -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
-        _ <- executeCommand protocol (A.CreateLendingPosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 SwapTerms Nothing)
+        _ <- executeCommand protocol (A.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotTerm Nothing)
         pure unit
       
       -- Run simulation

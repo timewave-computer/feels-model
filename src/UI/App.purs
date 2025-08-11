@@ -21,7 +21,7 @@ import Data.Maybe (Maybe(..))
 -- Import UI modules
 import UI.State (UIState, Action(..), initialUIState)
 import UI.Actions (handleAction)
-import UI.Components (renderSystemPanel, renderGatewayPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel, renderPriceChartPanel, renderSimulationPanel)
+import UI.Components (renderSystemPanel, renderGatewayPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel)
 
 --------------------------------------------------------------------------------
 -- Main Component Definition
@@ -58,8 +58,7 @@ render state =
         [ -- Left column
           HH.div
             [ HP.class_ (HH.ClassName "left-column") ]
-            [ renderSimulationPanel state
-            , renderWalletPanel state
+            [ renderWalletPanel state
             , renderGatewayPanel state
             , renderTokenCreatorPanel state
             , renderUserTokensPanel state.userTokens
@@ -70,8 +69,7 @@ render state =
         , -- Right column
           HH.div
             [ HP.class_ (HH.ClassName "right-column") ]
-            [ renderPriceChartPanel state
-            , renderLoanBookPanel state.lenderOffers
+            [ renderLoanBookPanel state.lenderOffers
             ]
         ]
     ]

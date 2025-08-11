@@ -16,6 +16,7 @@ import Data.Int as Int
 import Data.Number (pow)
 import Data.Foldable (sum)
 import Data.Array (length)
+import Data.Array as Array
 import Data.Functor (map)
 
 --------------------------------------------------------------------------------
@@ -54,7 +55,7 @@ formatAmount amount =
 
 -- Calculate average of an array of numbers
 average :: Array Number -> Number
-average xs = if length xs == 0 then 0.0 else sum xs / Int.toNumber (length xs)
+average xs = if Array.length xs == 0 then 0.0 else sum xs / Int.toNumber (Array.length xs)
 
 -- Calculate standard deviation of an array of numbers
 standardDeviation :: Array Number -> Number

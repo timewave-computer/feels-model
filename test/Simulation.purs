@@ -5,24 +5,18 @@ module Test.Simulation where
 
 import Prelude
 
-import Data.Array (length, filter, head, take, range)
-import Data.Either (Either(..), isRight)
-import Data.Maybe (Maybe(..), isJust, fromMaybe)
+import Data.Array (length, filter, range)
+import Data.Either (Either(..))
 import Data.Int as Int
-import Data.Number (abs)
 import Data.Traversable (traverse, sequence)
 import Effect (Effect)
 import Effect.Console (log)
-import Effect.Ref (new, read, modify_)
 import Test.QuickCheck (Result(..), quickCheck)
 
 -- Core system imports
-import Token (TokenType(..), TokenAmount, TokenMetadata, TokenCreationParams, createToken)
-import LendingBook (initLendingBook, getTotalLiquidity)
-import Gateway (initGateway)
-import SyntheticSOL (initSyntheticSOL)
-import POL (initPOL, getPOLBalance)
-import Simulation.Sim (SimulationConfig, SimulationState, SimulationResults, AccountProfile(..), MarketScenario(..), initSimulation, runSimulation, executeSimulation, getSimulationStats)
+import Token (TokenCreationParams, TokenMetadata, createToken)
+import POL (getTotalPOL)
+import Simulation.Sim (AccountProfile(..), MarketScenario(..), SimulationConfig, SimulationState, initSimulation, runSimulation, executeSimulation)
 import Utils (formatAmount)
 import FFI (currentTime)
 
@@ -40,8 +34,7 @@ createTestConfig =
   , priceVolatility: 0.1
   , accountProfiles: [Conservative, Moderate, Aggressive, Whale, Retail]
   , actionFrequency: 2.0
-  , leveragePreference: 0.3
-  , stakingPreference: 0.4
+  , juniorTranchePreference: 0.3
   }
 
 -- Create test token creation parameters for simulation
@@ -126,7 +119,7 @@ runE2ESimulationTest = do
       initialState <- initSimulation config
       
       -- Record initial POL
-      initialPOL <- getPOLBalance initialState.gateway.polState
+      initialPOL <- getTotalPOL initialState.gateway.polState
       log $ "Initial POL: " <> formatAmount initialPOL
       
       -- Phase 3: Run simulation
@@ -134,7 +127,7 @@ runE2ESimulationTest = do
       finalState <- executeSimulation config initialState
       
       -- Record final POL
-      finalPOL <- getPOLBalance finalState.gateway.polState
+      finalPOL <- getTotalPOL finalState.gateway.polState
       log $ "Final POL: " <> formatAmount finalPOL
       
       -- Phase 4: Calculate metrics
@@ -153,7 +146,7 @@ runE2ESimulationTest = do
                   })
 
 -- Calculate total trading volume from action history
-calculateTotalVolume :: Array _ -> Number
+calculateTotalVolume :: forall a. Array a -> Number
 calculateTotalVolume actions = 
   -- TODO: Implement proper volume calculation based on action types
   Int.toNumber (length actions) * 100.0  -- Placeholder calculation

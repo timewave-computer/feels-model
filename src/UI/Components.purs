@@ -9,14 +9,11 @@ module UI.Components
   , renderCreatePositionPanel
   , renderLoanBookPanel
   , renderPositionsPanel
-  , renderPriceChartPanel
-  , renderSimulationPanel
   ) where
 
 import Prelude
-import Data.Array ((:), length, find, last, head, zip, range, reverse, filter, groupBy, take, null, sortBy, drop)
-import Data.Functor (map)
-import Data.String.Common (trim, joinWith)
+import Data.Array (length, null)
+import Data.String.Common (trim)
 import Data.String as String
 import Data.Number as Number
 import Data.Int as Int
@@ -28,11 +25,9 @@ import Halogen.HTML.Properties as HP
 
 -- Import UI state and actions from State module
 import UI.State (UIState, Action(..), parseTokenType)
-import Token (TokenType(..), TokenMetadata)
-import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), LendingSide(..), getAvailableAmount)
-import Position (TermCommitment(..))
-import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
-import Utils (formatAmount, formatPercentage)
+import Token (TokenMetadata)
+import Position (Position, TermCommitment(..))
+import Utils (formatAmount)
 
 --------------------------------------------------------------------------------
 -- System Panel Components
@@ -165,7 +160,7 @@ renderTokenCreatorPanel state =
             , HP.placeholder "e.g., ALPHA"
             , HP.class_ (HH.ClassName "form__input")
             , HP.value state.tokenTicker
-            , HE.onValueChange UpdateTokenTicker
+            , HE.onValueChange \v -> UpdateTokenTicker (trim v)
             ]
         , HH.label [ HP.for "token-name" ] [ HH.text "Token Name:" ]
         , HH.input
@@ -175,7 +170,7 @@ renderTokenCreatorPanel state =
             , HP.placeholder "e.g., Alpha Protocol Token"
             , HP.class_ (HH.ClassName "form__input")
             , HP.value state.tokenName
-            , HE.onValueChange UpdateTokenName
+            , HE.onValueChange \v -> UpdateTokenName (trim v)
             ]
         , renderValidationWarnings state.tokenValidationErrors
         , HH.button
@@ -187,7 +182,7 @@ renderTokenCreatorPanel state =
         ]
     , HH.p
         [ HP.class_ (HH.ClassName "info-text") ]
-        [ HH.text "Tokens launch when 100 FeelsSOL is staked" ]
+        [ HH.text "Tokens launch through the batch auction system" ]
     ]
   where
     renderValidationWarnings :: forall n. Array String -> H.ComponentHTML Action () n
@@ -237,7 +232,7 @@ renderUserTokensPanel tokens =
                 [ HH.text "Live" ]
               else HH.span 
                 [ HP.class_ (HH.ClassName "status-pending") ] 
-                [ HH.text $ formatAmount token.stakedFeelsSOL <> "/100 FeelsSOL" ]
+                [ HH.text "Pending" ]
             ]
         ]
 
@@ -297,8 +292,6 @@ renderCreatePositionPanel state =
             ]
         , -- Staking options
           renderLendOptions state
-        , -- Leverage options
-          renderLeverageOptions state
         , -- Create button
           HH.button
             [ HE.onClick \_ -> CreatePosition
@@ -308,7 +301,7 @@ renderCreatePositionPanel state =
         ]
     ]
   where
-    renderLendOptions state' =
+    renderLendOptions _state' =
       HH.div_
         [ -- Unbonding period
           HH.div
@@ -317,35 +310,14 @@ renderCreatePositionPanel state =
             , HH.select
                 [ HP.id "unbonding-period"
                 , HP.name "unbonding-period"
-                , HE.onValueChange \v -> SetUnbondingPeriod $ case v of
-                    "infinite" -> NoBonding
-                    "1" -> OneDay
-                    "7" -> SevenDays
-                    _ -> FourteenDays
+                , HE.onValueChange SetTermType
                 , HP.class_ (HH.ClassName "form__select")
                 ]
-                [ HH.option [ HP.value "infinite", HP.selected true ] [ HH.text "Infinite (Swap)" ]
-                , HH.option [ HP.value "30" ] [ HH.text "30 Days" ]
-                , HH.option [ HP.value "60" ] [ HH.text "60 Days" ]
-                , HH.option [ HP.value "90" ] [ HH.text "90 Days" ]
+                [ HH.option [ HP.value "spot", HP.selected true ] [ HH.text "Spot (No Lock)" ]
+                , HH.option [ HP.value "hourly" ] [ HH.text "Hourly" ]
+                , HH.option [ HP.value "daily" ] [ HH.text "Daily" ]
+                , HH.option [ HP.value "weekly" ] [ HH.text "Weekly" ]
                 ]
-            ]
-        ]
-
-    renderLeverageOptions _ =
-      HH.div
-        [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "leverage" ] [ HH.text "Leverage:" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.id "leverage"
-            , HP.name "leverage"
-            , HP.value (formatAmount state.leverage)
-            , HE.onValueChange \v -> SetLeverage (fromMaybe 2.0 (Number.fromString v))
-            , HP.min 1.0
-            , HP.max 10.0
-            , HP.attr (HH.AttrName "step") "0.5"
-            , HP.class_ (HH.ClassName "form__input")
             ]
         ]
 
@@ -353,8 +325,8 @@ renderCreatePositionPanel state =
 -- Lending Book Panel Components
 --------------------------------------------------------------------------------
 
--- Loan book panel
-renderLoanBookPanel :: forall m. Array LendingRecord -> H.ComponentHTML Action () m
+-- Loan book panel (shows available positions/offers)
+renderLoanBookPanel :: forall m. Array Position -> H.ComponentHTML Action () m
 renderLoanBookPanel offers =
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
@@ -388,13 +360,13 @@ renderLoanBookPanel offers =
             [ HH.text $ formatAddress offer.owner ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__asset") ]
-            [ HH.text $ show offer.tokenPair.base ]
+            [ HH.text $ show offer.tranche <> " tranche" ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__amount") ]
-            [ HH.text $ formatAmount offer.amount <> " " <> show offer.tokenPair.base ]
+            [ HH.text $ formatAmount offer.amount <> " shares" ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__collateral") ]
-            [ HH.text $ formatCollateral offer ]
+            [ HH.text $ "Locked: " <> formatAmount offer.lockedAmount ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__terms") ]
             [ HH.text $ formatPositionTerms offer ]
@@ -415,12 +387,12 @@ renderLoanBookPanel offers =
         then String.take 6 addr <> "..." <> String.drop (String.length addr - 4) addr
         else addr
     
-    formatCollateral offer = 
-      -- Show the quote asset as collateral
-      show offer.tokenPair.quote
+    _formatCollateral offer = 
+      -- Show the locked amount for position
+      formatAmount offer.lockedAmount
     
     renderOfferStatus offer =
-      let available = offer.amount  -- In new system, full amount is available until matched
+      let available = offer.amount - offer.lockedAmount
           total = offer.amount
           percentFilled = if total > 0.0 
                            then (total - available) / total * 100.0
@@ -442,7 +414,7 @@ renderLoanBookPanel offers =
 --------------------------------------------------------------------------------
 
 -- Positions panel
-renderPositionsPanel :: forall m. Array LendingRecord -> H.ComponentHTML Action () m
+renderPositionsPanel :: forall m. Array Position -> H.ComponentHTML Action () m
 renderPositionsPanel positions =
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
@@ -466,9 +438,9 @@ renderPositionsPanel positions =
             ]
         , HH.div
             [ HP.class_ (HH.ClassName "list-item__content") ]
-            [ HH.div_ [ HH.text $ formatAmount pos.amount <> " " <> show pos.tokenPair.base ]
-            , HH.div_ [ HH.text $ "Quote: " <> show pos.tokenPair.quote ]
+            [ HH.div_ [ HH.text $ formatAmount pos.amount <> " " <> show pos.tranche ]
             , HH.div_ [ HH.text $ "Term: " <> formatPositionTerms pos ]
+            , HH.div_ [ HH.text $ "Shares: " <> formatAmount pos.shares ]
             ]
         ]
 
@@ -478,6 +450,8 @@ renderPositionsPanel positions =
         Hourly hrs -> "Hourly (exp: " <> show hrs <> ")"
         Daily days -> "Daily (exp: " <> show days <> ")"
         Weekly weeks -> "Weekly (exp: " <> show weeks <> ")"
+    
+    -- Legacy function no longer needed
   -- where
   --   renderPosition pos =
   --     HH.div
@@ -500,7 +474,6 @@ renderPositionsPanel positions =
     -- formatTerms = case _ of
     --   SwapTerms -> "Swap"
     --   StakingTerms period -> "Staking (" <> show period <> ")"
-    --   LeverageTerms lev -> "Leverage (" <> formatAmount lev <> "x)"
 
     -- statusClass status = case status of
     --   _ -> "status-active"  -- Simplified for now
@@ -509,145 +482,3 @@ renderPositionsPanel positions =
 -- Price Chart Panel Components
 --------------------------------------------------------------------------------
 
--- Helper function to format chart data points as JSON
-formatChartPoint :: { timestamp :: Number, block :: Int, price :: Number, polValue :: Number, tokens :: Array { ticker :: String, price :: Number, polFloor :: Number, live :: Boolean } } -> String
-formatChartPoint point = 
-  "{\"timestamp\":" <> show point.timestamp <> 
-  ",\"block\":" <> show point.block <> 
-  ",\"price\":" <> show point.price <> 
-  ",\"polValue\":" <> show point.polValue <> 
-  ",\"tokens\":{" <> 
-  (joinWith "," $ map (\t -> "\"" <> t.ticker <> "\":{\"ticker\":\"" <> t.ticker <> "\",\"price\":" <> show t.price <> ",\"polFloor\":" <> show t.polFloor <> ",\"live\":" <> show t.live <> "}") point.tokens) <>
-  "}}"
-
--- Price chart panel
-renderPriceChartPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderPriceChartPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Price History" ]
-    , case length state.priceHistory of
-        0 -> HH.div
-               [ HP.class_ (HH.ClassName "no-price-data") ]
-               [ HH.text "No price data available - run simulation to generate history" ]
-        _ -> HH.div_
-              [ -- Chart canvas
-                HH.div
-                  [ HP.class_ (HH.ClassName "chart-container") ]
-                  [ HH.element (HH.ElemName "canvas")
-                      [ HP.id "price-chart"
-                      , HP.attr (HH.AttrName "width") "600"
-                      , HP.attr (HH.AttrName "height") "300"
-                      ]
-                      []
-                  ]
-              -- Hidden chart data for JavaScript
-              , HH.div
-                  [ HP.id "chart-data-hidden"
-                  , HP.class_ (HH.ClassName "chart-data")
-                  , HP.style "display: none;"
-                  ]
-                  [ HH.text $ "[" <> (joinWith "," $ map formatChartPoint state.priceHistory) <> "]" ]
-              ]
-    ]
-
---------------------------------------------------------------------------------
--- Simulation Panel Components
---------------------------------------------------------------------------------
-
--- Simulation panel
-renderSimulationPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderSimulationPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Market Simulation" ]
-    , -- Simulation config
-      HH.div
-        [ HP.class_ (HH.ClassName "position-form") ]
-        [ HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "market-scenario" ] [ HH.text "Market Scenario:" ]
-            , HH.select
-                [ HP.id "market-scenario"
-                , HP.name "market-scenario"
-                , HE.onValueChange \v -> UpdateSimulationConfig $ _ { scenario = parseScenario v }
-                , HP.class_ (HH.ClassName "form__select")
-                ]
-                [ HH.option [ HP.value "bull" ] [ HH.text "Bull Market" ]
-                , HH.option [ HP.value "bear" ] [ HH.text "Bear Market" ]
-                , HH.option [ HP.value "volatile" ] [ HH.text "High Volatility" ]
-                , HH.option [ HP.value "stable" ] [ HH.text "Stable" ]
-                ]
-            ]
-        , HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "user-count" ] [ HH.text "User Count:" ]
-            , HH.input
-                [ HP.type_ HP.InputNumber
-                , HP.id "user-count"
-                , HP.name "user-count"
-                , HP.value (show state.simulationConfig.numAccounts)
-                , HE.onValueChange \v -> UpdateSimulationConfig $ 
-                    _ { numAccounts = fromMaybe 5 (Int.fromString v) }
-                , HP.min 1.0
-                , HP.max 20.0  -- Reduced from 100
-                , HP.class_ (HH.ClassName "form__input")
-                ]
-            ]
-        , HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "blocks" ] [ HH.text "Blocks to Simulate:" ]
-            , HH.input
-                [ HP.type_ HP.InputNumber
-                , HP.id "blocks"
-                , HP.name "blocks"
-                , HP.value (show state.simulationConfig.simulationBlocks)
-                , HE.onValueChange \v -> UpdateSimulationConfig $ 
-                    _ { simulationBlocks = fromMaybe 100 (Int.fromString v) }
-                , HP.min 5.0
-                , HP.max 200.0  -- Allow up to 200 blocks
-                , HP.class_ (HH.ClassName "form__input")
-                ]
-            ]
-        ]
-    , -- Run simulation button
-      HH.button
-        [ HE.onClick \_ -> RunSimulation
-        , HP.class_ (HH.ClassName "btn btn--primary btn--large")
-        , HP.id "run-simulation-btn"
-        , HP.disabled state.simulationRunning
-        ]
-        [ HH.text $ if state.simulationRunning then "Running..." else "Run Simulation" ]
-    , -- Results
-      case state.simulationResults of
-        Nothing -> HH.text ""
-        Just results -> renderSimulationResults results
-    ]
-  where
-    parseScenario = case _ of
-      "bear" -> BearMarket
-      "volatile" -> VolatileMarket  
-      "stable" -> SidewaysMarket
-      _ -> BullMarket
-
-    renderSimulationResults results =
-      HH.div
-        [ HP.class_ (HH.ClassName "simulation-results") ]
-        [ HH.h3_ [ HH.text "Simulation Results" ]
-        , HH.div
-            [ HP.class_ (HH.ClassName "results-grid") ]
-            [ renderResult "Protocol TVL" $ formatAmount results.protocolTVL
-            , renderResult "Total Volume" $ formatAmount results.totalVolume
-            , renderResult "Price Change" $ formatPercentage results.priceChange
-            , renderResult "Volatility" $ formatPercentage results.volatility
-            , renderResult "Active Users" $ show results.totalUsers
-            , renderResult "Total Fees" $ formatAmount results.totalFees
-            ]
-        ]
-
-    renderResult label value =
-      HH.div
-        [ HP.class_ (HH.ClassName "list-item__content") ]
-        [ HH.div [ HP.class_ (HH.ClassName "label") ] [ HH.text label ]
-        , HH.div [ HP.class_ (HH.ClassName "value") ] [ HH.text value ]
-        ]

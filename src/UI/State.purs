@@ -2,18 +2,18 @@
 -- Manages all UI state types, initial state, and state coordination
 module UI.State
   ( UIState
+  , LaunchInfo
   , Action(..)
   , initialUIState
   , defaultSimulationConfig
   , parseTokenType
   ) where
 
-import Prelude
 import Data.Maybe (Maybe(..))
 
-import API (APIRuntime)
+import State.State (AppRuntime)
 import Token (TokenType(..), TokenMetadata)
-import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..))
+import Position (Position)
 import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
 
 --------------------------------------------------------------------------------
@@ -21,14 +21,13 @@ import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), 
 --------------------------------------------------------------------------------
 
 type UIState =
-  { api :: Maybe APIRuntime
+  { api :: Maybe AppRuntime
   , currentUser :: String
   -- Position Creation
   , inputAmount :: Number
   , selectedAsset :: TokenType
   , collateralAsset :: TokenType
-  , unbondingPeriod :: UnbondingPeriod
-  , leverage :: Number
+  , selectedTermType :: String  -- "spot", "hourly", "daily", "weekly"
   -- Gateway
   , showGateway :: Boolean
   , jitoSOLAmount :: Number
@@ -55,8 +54,8 @@ type UIState =
       }
   -- Cached data from protocol
   , userTokens :: Array TokenMetadata
-  , userPositions :: Array LendingRecord
-  , lenderOffers :: Array LendingRecord
+  , userPositions :: Array Position
+  , lenderOffers :: Array Position
   , protocolStats :: Maybe 
       { totalValueLocked :: Number
       , totalUsers :: Int
@@ -73,6 +72,20 @@ type UIState =
   , tokenTicker :: String
   , tokenName :: String
   , tokenValidationErrors :: Array String
+  -- Launch System
+  , selectedLaunchId :: Maybe String
+  , launchBidAmount :: Number
+  , launchPriorityFeePercent :: Number
+  , activeLaunches :: Array LaunchInfo
+  }
+
+-- Launch info type
+type LaunchInfo =
+  { launchId :: String
+  , tokenTicker :: String
+  , currentPhase :: String
+  , currentPrice :: Number
+  , totalDistributed :: Number
   }
 
 -- Component Actions
@@ -84,8 +97,7 @@ data Action
   | UpdateInputAmount Number
   | SelectAsset TokenType
   | SelectCollateralAsset TokenType
-  | SetUnbondingPeriod UnbondingPeriod
-  | SetLeverage Number
+  | SetTermType String
   | CreatePosition
   -- Token Creation
   | CreateTokenUI
@@ -97,6 +109,13 @@ data Action
   | UpdateFeelsSOLAmount Number
   | EnterGateway
   | ExitGateway
+  -- Launch System
+  | SelectLaunch String
+  | UpdateLaunchBidAmount Number
+  | UpdateLaunchPriorityFee Number
+  | SubmitLaunchBid
+  | RefreshLaunches
+  | ProcessLaunchBatch String
   -- Simulation
   | UpdateSimulationConfig (SimulationConfig -> SimulationConfig)
   | RunSimulation
@@ -113,8 +132,7 @@ initialUIState =
   , inputAmount: 100.0
   , selectedAsset: FeelsSOL
   , collateralAsset: JitoSOL
-  , unbondingPeriod: NoBonding
-  , leverage: 2.0
+  , selectedTermType: "spot"
   , showGateway: true
   , jitoSOLAmount: 100.0
   , feelsSOLAmount: 100.0
@@ -133,6 +151,11 @@ initialUIState =
   , tokenTicker: ""
   , tokenName: ""
   , tokenValidationErrors: []
+  -- Launch System
+  , selectedLaunchId: Nothing
+  , launchBidAmount: 100.0
+  , launchPriorityFeePercent: 10.0
+  , activeLaunches: []
   }
 
 -- Default simulation config
@@ -145,8 +168,7 @@ defaultSimulationConfig =
   , priceVolatility: 0.02
   , accountProfiles: [Whale, Aggressive, Conservative]
   , actionFrequency: 1.0  -- Reduced from 2.0
-  , leveragePreference: 0.3
-  , stakingPreference: 0.5
+  , juniorTranchePreference: 0.3
   }
 
 --------------------------------------------------------------------------------

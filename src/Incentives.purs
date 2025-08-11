@@ -1,96 +1,49 @@
--- Incentive mechanisms for the Feels protocol.
--- Unifies fee and return calculations into a single adaptive system where
--- borrower fees and lender returns are two sides of the same market mechanism.
--- Uses oracle data and system metrics to dynamically adjust rates.
+-- | Incentives Module - Fee mechanism for pool-based system
+-- |
+-- | In the pool-centric system, incentives are handled through
+-- | tranche returns and pool fees, not lending rates.
 module Incentives
   ( MarketDynamics
   , DynamicsConfig
-  , DynamicsResult
-  , BaseRate
-  , Spread
   , RateComponents
+  , DynamicsResult
   , initMarketDynamics
   , calculateDynamics
-  , getBaseRate
-  , getSpread
-  , updateConfiguration
-  , simulateDynamics
-
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..))
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write)
-import Token (TokenType(..))
-import LendingRecord (LendingRecord, LendingTerms(..), LendingSide(..), LendingStatus(..), unbondingPeriodToDays)
-import Position (TermCommitment(..), LeverageMode(..), BandTier(..), PriceStrategy(..), TrackingMode(..))
-import Oracle (Oracle, MarketMetrics, observeMarket)
+import Effect.Ref (Ref, new, read)
+import Oracle (Oracle, takeMarketSnapshot)
 import POL (POLState)
-import ProtocolError (ProtocolError(..))
-
-import Data.Int as Int
+import Position (TermCommitment, spotTerm)
 
 --------------------------------------------------------------------------------
--- Market Dynamics Types
+-- Types
 --------------------------------------------------------------------------------
 
--- Base lending rate (what lenders receive)
-type BaseRate = Number
-
--- Spread between borrower and lender rates (protocol revenue)
-type Spread = Number
-
--- Components of rate calculation
+-- Components of rate calculation (kept for compatibility)
 type RateComponents =
-  { baseRate :: BaseRate            -- Fundamental lending rate
-  , riskPremium :: Number           -- Additional rate for risk
-  , marketAdjustment :: Number      -- Dynamic market-based adjustment
-  , protocolSpread :: Spread        -- Protocol revenue spread
+  { baseRate :: Number
+  , riskPremium :: Number
+  , marketAdjustment :: Number
+  , protocolSpread :: Number
   }
 
--- Result of dynamics calculation
+-- Result of dynamics calculation (kept for compatibility)
 type DynamicsResult =
-  { lenderRate :: Number            -- Rate lenders receive (annualized)
-  , borrowerRate :: Number          -- Rate borrowers pay (annualized)
-  , effectiveSpread :: Spread       -- Actual spread after adjustments
-  , polFlow :: Number              -- Portion flowing to POL
-  , components :: RateComponents    -- Breakdown for transparency
-  , operationType :: LendingTerms  -- Type of operation
+  { lenderRate :: Number
+  , borrowerRate :: Number
+  , effectiveSpread :: Number
+  , polFlow :: Number
+  , components :: RateComponents
+  , operationType :: TermCommitment
   }
 
--- Configuration for market dynamics
+-- Simplified config
 type DynamicsConfig =
-  { -- Base rates by operation type
-    baseRates ::
-      { swap :: BaseRate           -- Base rate for swaps
-      , staking :: BaseRate        -- Base rate for staking
-      , leverage :: BaseRate       -- Base rate for leverage
-      }
-  , -- Spread configuration
-    spreads ::
-      { minSpread :: Spread        -- Minimum protocol spread
-      , maxSpread :: Spread        -- Maximum protocol spread
-      , targetSpread :: Spread     -- Target spread in normal conditions
-      }
-  , -- POL allocation rates (portion of spread going to POL)
-    polAllocation ::
-      { swap :: Number             -- 0.0-1.0
-      , staking :: Number
-      , leverage :: Number
-      }
-  , -- Adjustment factors
-    adjustments ::
-      { volatilityWeight :: Number    -- How much volatility affects rates
-      , utilizationWeight :: Number   -- How much utilization affects rates
-      , healthWeight :: Number        -- How much system health affects rates
-      , crossRiskFactor :: Number     -- Risk multiplication across types
-      }
-  , -- Bounds
-    bounds ::
-      { minLenderRate :: Number       -- Minimum rate for lenders
-      , maxBorrowerRate :: Number     -- Maximum rate for borrowers
-      }
+  { baseRate :: Number
+  , spread :: Number
   }
 
 -- Market dynamics state
@@ -101,273 +54,36 @@ type MarketDynamics =
   }
 
 --------------------------------------------------------------------------------
--- Default Configuration
+-- Functions
 --------------------------------------------------------------------------------
 
--- Conservative default configuration
-defaultDynamicsConfig :: DynamicsConfig
-defaultDynamicsConfig =
-  { baseRates:
-    { swap: 0.02         -- 2% base for swaps
-    , staking: 0.04      -- 4% base for staking
-    , leverage: 0.06     -- 6% base for leverage
-    }
-  , spreads:
-    { minSpread: 0.001   -- 0.1% minimum
-    , maxSpread: 0.05    -- 5% maximum
-    , targetSpread: 0.01 -- 1% target
-    }
-  , polAllocation:
-    { swap: 0.15         -- 15% of spread to POL
-    , staking: 0.25      -- 25% of spread to POL
-    , leverage: 0.30     -- 30% of spread to POL
-    }
-  , adjustments:
-    { volatilityWeight: 0.3
-    , utilizationWeight: 0.4
-    , healthWeight: 0.2
-    , crossRiskFactor: 0.1
-    }
-  , bounds:
-    { minLenderRate: 0.001      -- 0.1% minimum
-    , maxBorrowerRate: 0.50     -- 50% maximum
-    }
-  }
-
---------------------------------------------------------------------------------
--- Initialization
---------------------------------------------------------------------------------
-
--- Initialize market dynamics system
+-- | Initialize with default config
 initMarketDynamics :: Oracle -> POLState -> Effect MarketDynamics
 initMarketDynamics oracle polState = do
-  config <- new defaultDynamicsConfig
+  config <- new { baseRate: 0.05, spread: 0.01 }
   pure { config, oracle, polState }
 
---------------------------------------------------------------------------------
--- Core Calculation
---------------------------------------------------------------------------------
-
--- Calculate market dynamics for a lending record
-calculateDynamics :: MarketDynamics -> LendingRecord -> Effect DynamicsResult
-calculateDynamics dynamics record = do
+-- | Calculate dynamics (simplified for new system)
+calculateDynamics :: forall r1 r2. MarketDynamics -> { leverageConfig :: { targetLeverage :: Number | r1 } | r2 } -> Effect DynamicsResult
+calculateDynamics dynamics _ = do
   config <- read dynamics.config
-  metrics <- observeMarket dynamics.oracle
+  metrics <- takeMarketSnapshot dynamics.oracle
   
-  -- Calculate base rate based on position parameters
-  let baseRate = case record.term of
-        _ -> config.baseRates.swap  -- Use swap base rate as default
-  
-  -- Calculate risk premium based on leverage
-  let riskPremium = case record.leverageConfig.mode of
-        _ -> record.leverageConfig.targetLeverage * 0.01  -- 1% per leverage level
-  
-  -- Calculate market adjustment based on current conditions
-  let marketAdjustment = metrics.volatility * 0.1  -- Adjust based on volatility
-  
-  -- Calculate dynamic spread
-  let protocolSpread = calculateDynamicSpread config metrics
-  
-  -- Build components
-  let components = { baseRate, riskPremium, marketAdjustment, protocolSpread }
-  
-  -- Calculate final rates
-  let lenderRate = baseRate + riskPremium + marketAdjustment
-      borrowerRate = lenderRate + protocolSpread
-      
-  -- Apply bounds
-  let boundedLenderRate = max config.bounds.minLenderRate lenderRate
-      boundedBorrowerRate = min config.bounds.maxBorrowerRate borrowerRate
-      effectiveSpread = boundedBorrowerRate - boundedLenderRate
-      
-  -- Calculate POL flow
-  let polAllocationRate = 0.2  -- getPOLAllocationRate config record.terms
-      polFlow = effectiveSpread * polAllocationRate
-  
-  pure { lenderRate: boundedLenderRate
-       , borrowerRate: boundedBorrowerRate
-       , effectiveSpread
-       , polFlow
-       , components
-       , operationType: SwapTerms  -- record.terms
-       }
-
---------------------------------------------------------------------------------
--- Rate Calculations
---------------------------------------------------------------------------------
-
--- Get base rate for operation type and terms
-getBaseRateForType :: DynamicsConfig -> LendingTerms -> BaseRate
-getBaseRateForType config terms = 
-  let baseRate = case terms of
-        SwapTerms -> config.baseRates.swap
-        StakingTerms _ -> config.baseRates.staking
-        LeverageTerms _ -> config.baseRates.leverage
-  in case terms of
-    -- Adjust base rate for specific terms
-    StakingTerms period ->
-      let days = unbondingPeriodToDays period
-          -- Higher rates for longer lock periods
-          multiplier = 1.0 + (days - 30.0) / 180.0  -- +0.33% per 60 days
-      in baseRate * multiplier
-    
-    LeverageTerms multiple ->
-      -- Higher base rate for higher leverage
-      baseRate * (1.0 + (multiple - 1.0) * 0.2)  -- +20% per leverage unit
-    
-    _ -> baseRate
-
--- Calculate risk premium based on lending terms
-calculateRiskPremium :: LendingTerms -> Number
-calculateRiskPremium terms = case terms of
-  SwapTerms -> 
-    0.0  -- No additional risk premium for simple swaps
-  
-  StakingTerms period ->
-    let days = unbondingPeriodToDays period
-        -- Duration risk premium
-        durationRisk = days / 365.0 * 0.02  -- 2% per year of lock
-    in durationRisk
-  
-  LeverageTerms multiple ->
-    -- Exponential risk for leverage
-    let leverageRisk = (multiple - 1.0) * (multiple - 1.0) * 0.01  -- Quadratic
-    in min 0.1 leverageRisk  -- Cap at 10%
-
--- Calculate market adjustment based on current conditions
-calculateMarketAdjustment :: DynamicsConfig -> MarketMetrics -> LendingTerms -> Number
-calculateMarketAdjustment config metrics terms = 
-  let -- Volatility adjustment
-      volatilityAdj = metrics.volatility * config.adjustments.volatilityWeight
-      
-      -- Utilization adjustment (assume 50% utilization for now)
-      utilizationAdj = 0.5 * config.adjustments.utilizationWeight
-      
-      -- System health adjustment (assume healthy system)
-      healthAdj = 0.0
-      
-      -- Cross-risk adjustment (higher risk operations pay for system risk)
-      crossRiskAdj = case terms of
-        SwapTerms -> 0.0
-        StakingTerms _ -> metrics.volatility * config.adjustments.crossRiskFactor * 0.5
-        LeverageTerms _ -> metrics.volatility * config.adjustments.crossRiskFactor
-      
-  in (volatilityAdj + utilizationAdj + healthAdj + crossRiskAdj) * config.adjustments.utilizationWeight
-
--- Calculate dynamic spread based on market conditions
-calculateDynamicSpread :: DynamicsConfig -> MarketMetrics -> Spread
-calculateDynamicSpread config metrics =
-  let targetSpread = config.spreads.targetSpread
-      
-      -- Widen spread in volatile markets
-      volatilityMultiplier = 1.0 + metrics.volatility
-      
-      -- Tighten spread in efficient markets (assume moderate efficiency)
-      efficiencyDiscount = 0.1  -- 10% discount for efficiency
-      
-      -- Adjust for liquidity (assume good liquidity)
-      liquidityAdj = 0.0
-      
-      spread = targetSpread * volatilityMultiplier * (1.0 - efficiencyDiscount) * (1.0 + liquidityAdj)
-      
-  in clamp config.spreads.minSpread config.spreads.maxSpread spread
-
--- Get POL allocation rate for operation type
-getPOLAllocationRate :: DynamicsConfig -> LendingTerms -> Number
-getPOLAllocationRate config terms = case terms of
-  SwapTerms -> config.polAllocation.swap
-  StakingTerms _ -> config.polAllocation.staking
-  LeverageTerms _ -> config.polAllocation.leverage
-
---------------------------------------------------------------------------------
--- Helper Functions
---------------------------------------------------------------------------------
-
--- Get current base rate
-getBaseRate :: MarketDynamics -> LendingTerms -> Effect BaseRate
-getBaseRate dynamics terms = do
-  config <- read dynamics.config
-  pure $ case terms of
-    SwapTerms -> config.baseRates.swap
-    StakingTerms _ -> config.baseRates.staking
-    LeverageTerms _ -> config.baseRates.leverage
-
--- Get current spread configuration
-getSpread :: MarketDynamics -> Effect { min :: Spread, max :: Spread, target :: Spread }
-getSpread dynamics = do
-  config <- read dynamics.config
-  pure { min: config.spreads.minSpread, max: config.spreads.maxSpread, target: config.spreads.targetSpread }
-
--- Update configuration
-updateConfiguration :: MarketDynamics -> DynamicsConfig -> Effect Unit
-updateConfiguration dynamics newConfig = write newConfig dynamics.config
-
--- Simulate dynamics for different market conditions
-simulateDynamics :: MarketDynamics -> LendingTerms -> Effect DynamicsResult
-simulateDynamics dynamics terms = do
-  -- Create a mock record for simulation
-  let mockRecord =
-        { id: 0
-        , side: Borrower
-        , owner: "simulation"
-        , lendAsset: FeelsSOL
-        , lendAmount: 1000.0
-        , collateralAsset: JitoSOL
-        , collateralAmount: 1000.0
-        , terms: terms
-        , status: Active
-        , createdAt: 0.0
-        , matchedWith: Nothing
-        , executedAt: Nothing
+  let components = 
+        { baseRate: config.baseRate
+        , riskPremium: 0.0
+        , marketAdjustment: metrics.volatility * 0.1
+        , protocolSpread: config.spread
         }
+      
+      lenderRate = config.baseRate
+      borrowerRate = lenderRate + config.spread
   
-  -- Create a mock position for simulation
-  let mockPosition = 
-        { amount: 100.0  -- Default simulation amount
-        , tokenPair: { base: JitoSOL, quote: FeelsSOL }
-        , priceStrategy: BandAligned 
-            { tier: MediumBand
-            , centerTracking: SpotPrice
-            , adaptiveWidth: false
-            , lastUpdate: 0.0
-            , cachedBounds: Nothing
-            }
-        , term: Spot
-        , leverageConfig: 
-            { mode: Static
-            , targetLeverage: case terms of
-                LeverageTerms lev -> lev
-                _ -> 1.0
-            , currentLeverage: 1.0
-            , decayAfterTerm: false
-            }
-        , owner: "test-user"
-        , id: 999999
-        , createdAt: 0.0
-        }
-  
-  -- Calculate dynamics with the mock position
-  calculateDynamics dynamics mockPosition
-
---------------------------------------------------------------------------------
--- Examples
---------------------------------------------------------------------------------
-
--- Example calculation for 60-day stake:
--- Base rate: 4% (staking)
--- Duration adjustment: +0.33% (60 days)
--- Risk premium: 0.33% (60/365 * 2%)
--- Market adjustment: +0.5% (moderate volatility)
--- Total lender rate: 5.16%
--- Protocol spread: 1.5% (volatile market)
--- Borrower rate: 6.66%
--- POL flow: 0.375% (25% of 1.5%)
-
--- Example calculation for 3x leverage:
--- Base rate: 8.4% (6% * 1.4 for 3x)
--- Risk premium: 4% (quadratic risk)
--- Market adjustment: +1.2% (high volatility * cross-risk)
--- Total lender rate: 13.6%
--- Protocol spread: 2.5% (high risk)
--- Borrower rate: 16.1%
--- POL flow: 0.75% (30% of 2.5%)
+  pure 
+    { lenderRate
+    , borrowerRate
+    , effectiveSpread: config.spread
+    , polFlow: config.spread * 0.2
+    , components
+    , operationType: spotTerm
+    }

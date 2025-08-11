@@ -9,42 +9,33 @@ module UI.Integration
 
 import Prelude
 import Data.String as String
-import Data.Array ((:), length, find, head, null, filter, sortBy, drop, take, groupBy, zip)
-import Data.Functor (map)
+import Data.Array (drop, filter, head, length, sortBy, take, zip)
 import Data.Traversable (traverse, traverse_)
-import Data.Array.NonEmpty as NEA
-import Data.String.Common (trim, joinWith)
-import Data.String as String
-import Data.Number as Number
-import Data.Int as Int
-import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Either (Either(..), fromLeft)
+import Data.Maybe (Maybe(..))
+import Data.Either (Either(..))
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Console (log)
-import Effect.Ref (new, read, write)
-import Data.Functor (void)
+import Effect.Ref (new, read)
 
 -- Import API and data types
-import API as A
-import API (APIRuntime, APIResult(..), initAPI, executeCommand, executeQuery)
-import Token (TokenType(..), TokenMetadata)
-import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..), LendingSide(..), getAvailableAmount)
-import FFI (setTimeout, getElementById, getValue, triggerUIAction, registerRemoteAction, checkAndInitializeChart)
+import State.State as A
+import State.State (AppRuntime, AppResult(..), initState, executeCommand, executeQuery)
+import FFI (setTimeout, getElementById, getValue, triggerUIAction, registerRemoteAction)
 import Data.Nullable (toMaybe)
-import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..), TradingAction(..), initSimulationWithLendingBook, executeSimulation, calculateResults)
+import Simulation.Sim (SimulationResults)
 import Simulation.Sim as S
-import Oracle (PriceObservation)
+import Utils (formatAmount)
 
 --------------------------------------------------------------------------------
 -- API Initialization
 --------------------------------------------------------------------------------
 
 -- Initialize the API runtime
-initializeAPI :: Effect APIRuntime
+initializeAPI :: Effect AppRuntime
 initializeAPI = do
   log "Initializing protocol API..."
-  initAPI
+  initState
 
 --------------------------------------------------------------------------------
 -- Remote Action Integration (WebSocket)
@@ -54,14 +45,14 @@ initializeAPI = do
 initializeRemoteActions :: Effect Unit
 initializeRemoteActions = do
   -- Store a reference for triggering Halogen actions from outside
-  ref <- new Nothing
+  _ref <- new Nothing
   
-  registerRemoteAction "runSimulation" \params -> do
+  registerRemoteAction "runSimulation" \_params -> do
     log "Remote action: runSimulation triggered via WebSocket"
     -- Click the simulation button directly
     button <- getElementById "run-simulation-btn"
     case toMaybe button of
-      Just btn -> do
+      Just _btn -> do
         log "Found simulation button, clicking..."
         -- Dispatch click event
         void $ setTimeout (do
@@ -119,7 +110,7 @@ initializeRemoteActions = do
 --------------------------------------------------------------------------------
 
 -- Refresh all protocol data for a user
-refreshProtocolData :: APIRuntime -> String -> Effect Unit
+refreshProtocolData :: AppRuntime -> String -> Effect Unit
 refreshProtocolData protocol currentUser = do
   log "Refreshing protocol data..."
   
@@ -137,10 +128,10 @@ refreshProtocolData protocol currentUser = do
   case offersResult of
     Right (LenderOfferList offers) -> do
       log $ "Found " <> show (length offers) <> " lender offers"
-      -- Log position details (Position type = LendingRecord)
+      -- Log position details (Position type)
       traverse_ (\offer -> 
         log $ "  Position #" <> show offer.id <> ": " <> 
-              show offer.amount <> " " <> show offer.tokenPair.base
+              formatAmount offer.amount <> " shares, " <> show offer.tranche <> " tranche"
       ) offers
     Left err -> 
       log $ "Failed to get lender offers: " <> show err
@@ -160,8 +151,8 @@ refreshProtocolData protocol currentUser = do
 --------------------------------------------------------------------------------
 
 -- Process simulation results and return price history for charts
-processSimulationResults :: APIRuntime -> S.SimulationState -> SimulationResults -> Effect (Array { timestamp :: Number, block :: Int, price :: Number, polValue :: Number, tokens :: Array { ticker :: String, price :: Number, polFloor :: Number, live :: Boolean } })
-processSimulationResults protocol finalState results = do
+processSimulationResults :: AppRuntime -> S.SimulationState -> SimulationResults -> Effect (Array { timestamp :: Number, block :: Int, price :: Number, polValue :: Number, tokens :: Array { ticker :: String, price :: Number, polFloor :: Number, live :: Boolean } })
+processSimulationResults protocol finalState _results = do
   -- Process token creation actions from the simulation
   let tokenCreationActions = filter isCreateTokenAction finalState.actionHistory
   log $ "Processing " <> show (length tokenCreationActions) <> " token creation actions"
@@ -202,7 +193,7 @@ processSimulationResults protocol finalState results = do
         " ... " <> show (drop (length timestamps - 5) timestamps)
   
   -- Check for gaps in block numbers
-  let findFirstGap nums = case nums of
+  let _findFirstGap nums = case nums of
         [] -> Nothing
         [_] -> Nothing
         _ -> 
@@ -218,22 +209,15 @@ processSimulationResults protocol finalState results = do
       
   -- Convert sorted observations directly to chart format
   let convertedPriceHistory = map (\obs ->
-        let jitoPrice = if obs.tokenPair.base == JitoSOL 
-                        then obs.price
-                        else 1.22  -- Default JitoSOL price
+        let jitoPrice = obs.price  -- Oracle tracks JitoSOL/FeelsSOL price
             
-            -- For now, just include the current observation's token if it's live
-            tokenPrices = case obs.tokenPair.base of
-              Token ticker -> 
-                case find (\t -> t.ticker == ticker) liveTokens of
-                  Just token -> 
-                    [{ ticker: ticker
-                     , price: obs.price
-                     , polFloor: obs.price * 0.98  -- POL tracks slightly below price
-                     , live: token.live
-                     }]
-                  Nothing -> []
-              _ -> []
+            -- For MVP, just show live tokens with placeholder prices
+            tokenPrices = map (\token -> 
+              { ticker: token.ticker
+              , price: 1.0  -- Placeholder price
+              , polFloor: 0.98  -- POL tracks slightly below price
+              , live: token.live
+              }) liveTokens
             
         in { timestamp: obs.timestamp
            , block: 0  -- Oracle doesn't track blocks
@@ -255,34 +239,16 @@ processSimulationResults protocol finalState results = do
       S.CreateToken _ _ _ -> true
       _ -> false
     
-    processTokenCreation protocol action = case action of
+    processTokenCreation _protocol action = case action of
       S.CreateToken userId ticker name -> do
         log $ "Creating token: " <> ticker <> " for user: " <> userId
         result <- executeCommand protocol (A.CreateToken userId ticker name)
         case result of
           Right _ -> do
             log $ "Successfully created token: " <> ticker
-            -- Immediately stake 100 FeelsSOL to make the token go live
-            stakeResult <- executeCommand protocol 
-              (A.CreateLendingPosition userId FeelsSOL 100.0 (Token ticker) 100.0 
-                (StakingTerms NoBonding) (Just ticker))
-            case stakeResult of
-              Right _ -> do
-                log $ "Successfully staked 100 FeelsSOL for " <> ticker <> " to make it live"
-                -- Add initial liquidity for token trading
-                -- Token -> FeelsSOL: 100 tokens for 100 FeelsSOL (1:1 ratio)
-                liquidity1 <- executeCommand protocol 
-                  (A.CreateLendingPosition userId (Token ticker) 100.0 FeelsSOL 100.0 SwapTerms Nothing)
-                case liquidity1 of
-                  Right _ -> log $ "Added initial " <> ticker <> " -> FeelsSOL liquidity"
-                  Left err -> log $ "Failed to add token liquidity: " <> show err
-                -- FeelsSOL -> Token: 100 FeelsSOL for 100 tokens (1:1 ratio)
-                liquidity2 <- executeCommand protocol 
-                  (A.CreateLendingPosition userId FeelsSOL 100.0 (Token ticker) 100.0 SwapTerms Nothing)
-                case liquidity2 of
-                  Right _ -> log $ "Added initial FeelsSOL -> " <> ticker <> " liquidity"
-                  Left err -> log $ "Failed to add FeelsSOL liquidity: " <> show err
-              Left err -> log $ "Failed to stake for token launch: " <> show err
+            -- Tokens are now launched through the batch auction system
+            -- No need for legacy staking mechanism
+            log $ "Token created - ready for batch auction launch"
           Left err -> log $ "Failed to create token: " <> show err
       _ -> pure unit
 
@@ -290,8 +256,3 @@ processSimulationResults protocol finalState results = do
 -- Chart Integration
 --------------------------------------------------------------------------------
 
--- Initialize chart rendering after a delay
-initializeChart :: Effect Unit
-initializeChart = do
-  log "Initializing price chart..."
-  void $ setTimeout checkAndInitializeChart 250

@@ -1112,7 +1112,7 @@ if (typeof window !== 'undefined') {
   });
 }
 // Global access for debugging
-if (typeof window \!== 'undefined') {
+if (typeof window !== 'undefined') {
   window.checkAndInitializeChart = checkAndInitializeChart;
   window.initializePriceChart = initializePriceChart;
 }
@@ -1136,4 +1136,3 @@ export const unsafeToNumber = function(i) {
 // - sin
 // - cos
 // - log10
-EOF < /dev/null

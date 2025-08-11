@@ -1,7 +1,7 @@
 -- Account management for the Feels Protocol.
 -- Manages two types of accounts:
 -- 1. ChainAccount: Holds JitoSOL on behalf of users (external to protocol)
--- 2. FeelsAccount: Holds FeelsSOL, Feels tokens, and positions within the protocol
+-- 2. FeelsAccount: Holds FeelsSOL and Feels tokens within the protocol
 --
 -- Flow: User deposits JitoSOL from ChainAccount → Gateway converts to FeelsSOL → FeelsAccount
 -- Exit: FeelsAccount → Gateway converts to JitoSOL → ChainAccount
@@ -29,10 +29,9 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Either (Either(..))
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Array ((:), find, filter)
 import Data.Array as Array
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write, modify_)
+import Effect.Ref (Ref, new, read, modify_)
 import Token (TokenType(..))
 import Data.Foldable (sum)
 import Data.Tuple (Tuple(..))
@@ -51,10 +50,9 @@ type TokenBalance =
 type FeelsAccount =
   { owner :: String
   , balances :: Map TokenType Number  -- All token balances
-  , positions :: Array Int            -- Position IDs owned by this account
   }
 
--- ChainAccount holds JitoSOL outside the protocol
+-- ChainAccount holds JitoSOL outside the protocol (simulates an EOA or external program account)
 type ChainAccount =
   { owner :: String
   , jitoSOLBalance :: Number
@@ -91,7 +89,6 @@ getOrCreateFeelsAccount registry owner = do
       let newAccount = 
             { owner: owner
             , balances: Map.empty
-            , positions: []
             }
       modify_ (Map.insert owner newAccount) registry.feelsAccounts
       pure newAccount
@@ -139,7 +136,7 @@ transferBetweenFeelsAccounts registry fromUser toUser token amount = do
 getAllFeelsAccountBalances :: AccountRegistry -> String -> Effect (Array TokenBalance)
 getAllFeelsAccountBalances registry owner = do
   account <- getOrCreateFeelsAccount registry owner
-  pure $ map (\(Tuple token amount) -> { token, amount }) (Map.toUnfoldable account.balances)
+  pure $ map (\(Tuple token amount) -> { token: token, amount: amount }) (Map.toUnfoldable account.balances)
 
 -- Get total balance of a token across all FeelsAccounts
 getTotalTokenBalance :: AccountRegistry -> TokenType -> Effect Number
@@ -220,25 +217,12 @@ withdrawToChain registry owner amount = do
           updateChainAccountBalance registry owner amount
 
 --------------------------------------------------------------------------------
--- Position Management (for FeelsAccount)
+-- Position Management (for FeelsAccount) - Commented out as unused
 --------------------------------------------------------------------------------
 
--- Add a position ID to a FeelsAccount
-addPositionToAccount :: AccountRegistry -> String -> Int -> Effect Unit
-addPositionToAccount registry owner positionId = do
-  account <- getOrCreateFeelsAccount registry owner
-  let updatedAccount = account { positions = positionId : account.positions }
-  modify_ (Map.insert owner updatedAccount) registry.feelsAccounts
+-- Functions for position management are available but not currently exported
+-- Uncomment and export these functions when needed:
 
--- Remove a position ID from a FeelsAccount
-removePositionFromAccount :: AccountRegistry -> String -> Int -> Effect Unit
-removePositionFromAccount registry owner positionId = do
-  account <- getOrCreateFeelsAccount registry owner
-  let updatedAccount = account { positions = filter (_ /= positionId) account.positions }
-  modify_ (Map.insert owner updatedAccount) registry.feelsAccounts
-
--- Get all position IDs for a FeelsAccount
-getAccountPositions :: AccountRegistry -> String -> Effect (Array Int)
-getAccountPositions registry owner = do
-  account <- getOrCreateFeelsAccount registry owner
-  pure account.positions
+-- addPositionToAccount :: AccountRegistry -> String -> Int -> Effect Unit
+-- removePositionFromAccount :: AccountRegistry -> String -> Int -> Effect Unit  
+-- getAccountPositions :: AccountRegistry -> String -> Effect (Array Int)

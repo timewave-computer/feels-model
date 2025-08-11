@@ -7,24 +7,19 @@ module Simulation.Actions
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Either (Either(..))
-import Data.Array ((:), length, filter, take, drop, range, head, tail, find)
-import Data.Foldable (sum, foldl)
-import Data.Functor (map)
-import Data.Traversable (traverse, sequence)
+import Data.Maybe (Maybe(..))
+import Data.Array ((:), head, drop, range, length, filter)
+import Data.Foldable (foldl)
+import Data.Traversable (sequence)
 import Data.Int as Int
-import Data.Number ((%))
 import Effect (Effect)
 import Effect.Random (random, randomInt)
-import Effect.Console (log)
-import Data.Ord (max)
 import Data.String as String
 import Data.Enum (toEnum)
 
 -- Core system imports
 import Token (TokenType(..))
-import LendingRecord (LendingTerms(..), UnbondingPeriod(..))
+import Position (TermCommitment(..), weeklyTerm)
 import Utils (formatAmount)
 
 -- Import from our new modules
@@ -51,8 +46,8 @@ data TradingAction
   = EnterProtocol String Number TokenType        -- User, Amount, Asset
   | ExitProtocol String Number TokenType         -- User, Amount, Asset
   | CreateToken String String String              -- User, Ticker, Name
-  | CreateLendOffer String TokenType Number TokenType Number LendingTerms (Maybe String)  -- User, LendAsset, Amount, CollateralAsset, Ratio, Terms, TargetToken
-  | TakeLoan String TokenType Number TokenType Number LendingTerms         -- User, BorrowAsset, Amount, CollateralAsset, Amount, Terms
+  | CreateLendOffer String TokenType Number TokenType Number TermCommitment (Maybe String)  -- User, LendAsset, Amount, CollateralAsset, Ratio, Term, TargetToken
+  | TakeLoan String TokenType Number TokenType Number TermCommitment         -- User, BorrowAsset, Amount, CollateralAsset, Amount, Term
   | ClosePosition String Int                      -- User, PositionID
   | WaitBlocks Int                               -- Simulate passage of time
 
@@ -62,13 +57,13 @@ instance showTradingAction :: Show TradingAction where
   show (EnterProtocol user amount asset) = user <> " enters " <> formatAmount amount <> " " <> show asset
   show (ExitProtocol user amount asset) = user <> " exits " <> formatAmount amount <> " " <> show asset
   show (CreateToken user ticker name) = user <> " creates token " <> ticker <> " (" <> name <> ")"
-  show (CreateLendOffer user lendAsset amount collAsset ratio terms targetToken) = 
+  show (CreateLendOffer user lendAsset amount collAsset ratio term targetToken) = 
     user <> " offers " <> formatAmount amount <> " " <> show lendAsset <> 
-    " @ " <> formatAmount ratio <> " " <> show collAsset <> " (" <> show terms <> ")" <>
+    " @ " <> formatAmount ratio <> " " <> show collAsset <> " (" <> show term <> ")" <>
     case targetToken of
       Just ticker -> " staking for " <> ticker
       Nothing -> ""
-  show (TakeLoan user borrowAsset amount collAsset collAmount terms) = user <> " borrows " <> formatAmount amount <> " " <> show borrowAsset <> " with " <> formatAmount collAmount <> " " <> show collAsset <> " (" <> show terms <> ")"
+  show (TakeLoan user borrowAsset amount collAsset collAmount term) = user <> " borrows " <> formatAmount amount <> " " <> show borrowAsset <> " with " <> formatAmount collAmount <> " " <> show collAsset <> " (" <> show term <> ")"
   show (ClosePosition user posId) = user <> " closes position #" <> show posId
   show (WaitBlocks blocks) = "Wait " <> show blocks <> " blocks"
 
@@ -108,7 +103,7 @@ generateTradingSequence config state = do
   actions <- sequence $ map (\i -> 
     if i == 1 && shouldCreateToken
       then generateTokenCreationAction config state  -- Conditionally create tokens
-      else if hasTokens && i <= (numActions * 4 / 5)  -- 80% of actions are token trades when tokens exist
+      else if hasTokens && Int.toNumber i <= (Int.toNumber numActions * 4.0 / 5.0)  -- 80% of actions are token trades when tokens exist
         then do
           -- Generate swap actions for active trading and fee generation
           let eligibleAccounts = filter (\acc -> acc.feelsSOLBalance > 10.0) state.accounts
@@ -117,7 +112,7 @@ generateTradingSequence config state = do
           case head (drop accountIndex eligibleAccounts) of
             Just acc -> generateTokenSwapAction config state acc
             Nothing -> generatePositionCreationAction config state
-      else if i <= (numActions * 3 / 4)
+      else if Int.toNumber i <= (Int.toNumber numActions * 3.0 / 4.0)
         then generatePositionCreationAction config state  -- Some position creation
         else generateRandomAction config state
     ) (range 1 numActions)
@@ -164,19 +159,15 @@ generateTokenSwapAction config state account = do
     Nothing -> pure $ WaitBlocks 1  -- No tokens yet, wait
     Just tokenTicker -> do
       -- Apply market scenario to token prices
-      marketMovement <- generateMarketScenario config state.currentBlock
+      _ <- generateMarketScenario config state.currentBlock
       priceRand <- random
       
       -- Get current market price from oracle if available, otherwise use random
       currentMarketPrice <- case state.oracle of
         oracle -> do
-          observations <- takeMarketSnapshot oracle
-          let tokenObs = find (\obs -> case obs.tokenPair.base of
-                                         Token t -> t == tokenTicker
-                                         _ -> false) observations
-          pure $ case tokenObs of
-            Just obs -> obs.price
-            Nothing -> 1.0 + priceRand * 0.5  -- Random price 1.0-1.5
+          snapshot <- takeMarketSnapshot oracle
+          -- Use spot price from snapshot
+          pure snapshot.spot
       
       -- Determine swap direction and amount based on market sentiment and profile
       swapRoll <- random
@@ -205,7 +196,7 @@ generateTokenSwapAction config state account = do
               -- Token to FeelsSOL ratio (market price with some spread)
               priceWithSpread = currentMarketPrice * (1.05 + priceRand * 0.1)  -- 1.05x-1.15x market price
           
-          pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread SwapTerms Nothing
+          pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread Spot Nothing
         else if account.feelsSOLBalance >= 20.0
           then do
             -- Sell FeelsSOL for token
@@ -221,7 +212,7 @@ generateTokenSwapAction config state account = do
                 -- FeelsSOL to Token ratio (market price with spread)
                 priceWithSpread = currentMarketPrice * (0.95 - priceRand * 0.1)  -- 0.85x-0.95x market price
             
-            pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread SwapTerms Nothing
+            pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread Spot Nothing
           else pure $ WaitBlocks 1
 
 -- Generate position creation action
@@ -294,7 +285,7 @@ generateRandomAction config state = do
                   if account.feelsSOLBalance >= 100.0
                     then do
                       -- Stake exactly 100 FeelsSOL to help launch token
-                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 (StakingTerms FourteenDays) (Just tokenTicker)
+                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 (weeklyTerm state.currentBlock) (Just tokenTicker)
                     else pure $ WaitBlocks 1
                 Nothing -> pure $ WaitBlocks 1
         else pure $ WaitBlocks 1

@@ -46,8 +46,7 @@ type SimulationConfig =
   , priceVolatility :: Number             -- Price change volatility (0.0-1.0)
   , accountProfiles :: Array AccountProfile  -- Mix of account types
   , actionFrequency :: Number             -- Actions per block (0.0-10.0)
-  , leveragePreference :: Number          -- Preference for leveraged positions (0.0-1.0)
-  , stakingPreference :: Number           -- Preference for staking positions (0.0-1.0)
+  , juniorTranchePreference :: Number     -- Preference for junior tranche positions (0.0-1.0)
   }
 
 --------------------------------------------------------------------------------

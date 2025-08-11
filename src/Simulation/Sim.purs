@@ -18,7 +18,7 @@ import Simulation.Market (MarketScenario(..), SimulationConfig, generateMarketSc
 import Simulation.Actions (TradingAction(..), generateTradingSequence, getRecentlyCreatedTokens)
 
 -- Re-export from Engine module
-import Simulation.Engine (SimulationState, initSimulation, initSimulationWithLendingBook, executeSimulation, runSimulation, runSimulationWithLendingBook, getSimulationStats)
+import Simulation.Engine (SimulationState, initSimulation, initSimulationWithPoolRegistry, executeSimulation, runSimulation, runSimulationWithPoolRegistry, getSimulationStats)
 
 -- Re-export from Analysis module
 import Simulation.Analysis (SimulationResults, calculateResults)

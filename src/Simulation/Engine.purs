@@ -3,45 +3,32 @@
 module Simulation.Engine
   ( SimulationState
   , initSimulation
-  , initSimulationWithLendingBook
+  , initSimulationWithPoolRegistry
   , executeSimulation
   , runSimulation
-  , runSimulationWithLendingBook
+  , runSimulationWithPoolRegistry
   , getSimulationStats
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Either (Either(..))
-import Data.Array ((:), length, filter, take, drop, range, head, tail, find, snoc)
+import Data.Array (length, range, (:))
 import Data.Foldable (sum, foldl)
-import Data.Functor (map)
-import Data.Traversable (traverse, sequence)
-import Data.Int as Int
-import Data.Number ((%))
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write, modify)
-import Effect.Random (random, randomInt)
 import Effect.Console (log)
-import Data.Ord (max, min)
 
 -- Core system imports
-import Token (TokenType(..), TokenAmount)
-import LendingRecord (LendingRecord, LendingSide(..), LendingTerms(..), UnbondingPeriod(..), LendingStatus(..), createLenderRecord, createBorrowerRecord)
-import Position (TermCommitment(..), LeverageMode(..), BandTier(..))
-import LendingBook (LendingBook, initLendingBook)
-import Gateway (GatewayState, initGateway, enterSystem, exitSystem)
-import SyntheticSOL (SyntheticSOLState, initSyntheticSOL)
+import Token (TokenType(..))
+import PoolRegistry (PoolRegistry, initPoolRegistry)
+import Gateway (GatewayState, initGateway)
 import Accounts (initAccountRegistry)
-import Utils (formatAmount, formatPercentage)
-import FFI (currentTime, sqrt, log, cos) as FFI
-import POL (POLState, initPOL)
-import Oracle (Oracle, PriceObservation, observeMarket, initOracle, takeMarketSnapshot)
+import Utils (formatAmount)
+import POL (initPOL)
+import Oracle (Oracle, initOracle, takeMarketSnapshot)
 
 -- Import from our new modules
 import Simulation.Agents (SimulatedAccount, generateAccounts)
 import Simulation.Market (SimulationConfig, generateMarketScenario)
-import Simulation.Actions (TradingAction(..), generateTradingSequence, getRecentlyCreatedTokens)
+import Simulation.Actions (TradingAction(..), generateTradingSequence)
 import Simulation.Analysis (SimulationResults, calculateResults)
 
 --------------------------------------------------------------------------------
@@ -51,12 +38,12 @@ import Simulation.Analysis (SimulationResults, calculateResults)
 -- Simulation state
 type SimulationState =
   { accounts :: Array SimulatedAccount
-  , lendingBook :: LendingBook
+  , poolRegistry :: PoolRegistry
   , gateway :: GatewayState
   , oracle :: Oracle
   , currentBlock :: Int
   , currentPrice :: Number
-  , priceHistory :: Array PriceObservation
+  , priceHistory :: Array { price :: Number, timestamp :: Number }
   , actionHistory :: Array TradingAction
   , nextPositionId :: Int
   }
@@ -68,32 +55,25 @@ type SimulationState =
 -- Initialize simulation with config (creates new lending book)
 initSimulation :: SimulationConfig -> Effect SimulationState
 initSimulation config = do
-  lendingBook <- initLendingBook
-  pol <- initPOL
-  oracle <- initOracle
-  initSimulationWithLendingBook config lendingBook oracle
+  poolRegistry <- initPoolRegistry
+  _ <- initPOL
+  oracle <- initOracle config.initialJitoSOLPrice
+  initSimulationWithPoolRegistry config poolRegistry oracle
 
 -- Initialize simulation with existing lending book for UI integration
-initSimulationWithLendingBook :: SimulationConfig -> LendingBook -> Oracle -> Effect SimulationState
-initSimulationWithLendingBook config existingLendingBook oracle = do
+initSimulationWithPoolRegistry :: SimulationConfig -> PoolRegistry -> Oracle -> Effect SimulationState
+initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   accounts <- generateAccounts { numAccounts: config.numAccounts, accountProfiles: config.accountProfiles }
   pol <- initPOL
   -- Create a simple oracle function for simulation
   let priceOracle = pure config.initialJitoSOLPrice
-  syntheticSOL <- initSyntheticSOL priceOracle
   -- Create account registry for simulation
   accountRegistry <- initAccountRegistry
   -- Initialize gateway with proper parameters (simplified for simulation)
-  let gateway = { syntheticSOL: syntheticSOL
-                , entryFee: 0.001
-                , exitFee: 0.002  
-                , polAllocationRate: 0.1
-                , accountRegistry: accountRegistry
-                , polState: pol
-                }
+  gateway <- initGateway priceOracle 0.001 0.002 accountRegistry pol
   
   pure { accounts: accounts
-       , lendingBook: existingLendingBook
+       , poolRegistry: existingPoolRegistry
        , gateway: gateway
        , oracle: oracle
        , currentBlock: 0
@@ -118,12 +98,12 @@ runSimulation config = do
   pure results
 
 -- Run simulation with existing lending book (for UI integration)
-runSimulationWithLendingBook :: SimulationConfig -> LendingBook -> Oracle -> Effect SimulationResults
-runSimulationWithLendingBook config existingLendingBook oracle = do
+runSimulationWithPoolRegistry :: SimulationConfig -> PoolRegistry -> Oracle -> Effect SimulationResults
+runSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   log $ "Starting simulation with existing lending book"
   log $ "Market scenario: " <> show config.scenario
   log $ "Price volatility: " <> show config.priceVolatility
-  initialState <- initSimulationWithLendingBook config existingLendingBook oracle
+  initialState <- initSimulationWithPoolRegistry config existingPoolRegistry oracle
   finalState <- executeSimulation config initialState
   results <- calculateResults config finalState
   log $ "Simulation completed. Total volume: " <> formatAmount results.totalVolume
@@ -133,7 +113,7 @@ runSimulationWithLendingBook config existingLendingBook oracle = do
 executeSimulation :: SimulationConfig -> SimulationState -> Effect SimulationState
 executeSimulation config initialState = do
   -- First, observe initial market state
-  _ <- observeMarket initialState.oracle
+  _ <- takeMarketSnapshot initialState.oracle
   log "Simulation: Observed initial market state"
   
   -- Then execute blocks 1 through simulationBlocks
@@ -141,7 +121,7 @@ executeSimulation config initialState = do
   
   -- After simulation, observe final market state
   log "Simulation: Observing final market state..."
-  _ <- observeMarket finalState.oracle
+  _ <- takeMarketSnapshot finalState.oracle
   
   pure finalState
   where
@@ -153,7 +133,7 @@ executeSimulation config initialState = do
 executeSimulationBlock :: SimulationConfig -> SimulationState -> Int -> Effect SimulationState
 executeSimulationBlock config state blockNum = do
   -- Apply market dynamics to update base prices
-  marketMovement <- generateMarketScenario config blockNum
+  _ <- generateMarketScenario config blockNum
   -- when (blockNum `mod` 20 == 0) $ do
   --   log $ "Block " <> show blockNum <> ": Market movement " <> show (marketMovement * 100.0) <> "%"
   -- Log block execution
@@ -177,18 +157,15 @@ executeSimulationBlock config state blockNum = do
   newState <- foldl executeAction (pure marketInfluencedState) actions
   
   -- Get price observations from actual market activity
-  _ <- observeMarket newState.oracle  -- Update oracle
-  priceObservations <- takeMarketSnapshot newState.oracle
+  _ <- takeMarketSnapshot newState.oracle  -- Update oracle
+  marketSnapshot <- takeMarketSnapshot newState.oracle
   
-  -- Calculate current JitoSOL/FeelsSOL price from observations (if available)
-  let jitoSOLObs = find (\obs -> obs.tokenPair.base == JitoSOL) priceObservations
-      currentPriceFromMarket = case jitoSOLObs of
-        Just obs -> obs.price
-        Nothing -> newState.currentPrice
+  -- Use the current spot price from the market snapshot
+  let currentPriceFromMarket = marketSnapshot.spot
   
   pure $ newState { currentBlock = blockNum
                   , currentPrice = currentPriceFromMarket
-                  , priceHistory = priceObservations <> state.priceHistory
+                  , priceHistory = { price: marketSnapshot.spot, timestamp: marketSnapshot.timestamp } : state.priceHistory
                   , actionHistory = state.actionHistory <> actions
                   }
 
@@ -197,7 +174,7 @@ executeAction :: Effect SimulationState -> TradingAction -> Effect SimulationSta
 executeAction stateEffect action = do
   state <- stateEffect
   case action of
-    EnterProtocol userId amount asset -> do
+    EnterProtocol userId amount _ -> do
       -- log $ "Executing: " <> show action
       -- Update account balances to simulate gateway entry
       -- Deduct JitoSOL and add FeelsSOL (1:1 exchange rate for simplicity)
@@ -206,7 +183,7 @@ executeAction stateEffect action = do
       -- Fees are automatically collected by the protocol
       pure state { accounts = updatedAccounts2 }
     
-    ExitProtocol userId amount asset -> do
+    ExitProtocol userId amount _ -> do
       -- log $ "Executing: " <> show action
       -- Update account balances to simulate gateway exit
       -- Deduct FeelsSOL and add JitoSOL (1:1 exchange rate for simplicity, minus fees)
@@ -216,60 +193,26 @@ executeAction stateEffect action = do
           updatedAccounts2 = updateAccountBalances updatedAccounts1 userId jitoAmount JitoSOL
       pure state { accounts = updatedAccounts2 }
     
-    CreateToken userId ticker name -> do
+    CreateToken _ _ _ -> do
       -- log $ "Executing: " <> show action
       -- Token creation is handled by the protocol, no balance changes needed
       pure state
       
-    CreateLendOffer userId lendAsset lendAmount collateralAsset collateralAmount terms targetToken -> do
-      -- Create a position in the new system
-      let position = 
-            { amount: lendAmount
-            , tokenPair: { base: lendAsset, quote: collateralAsset }
-            , priceStrategy: { bandTier: MediumBand, slippageTolerance: 0.01 }
-            , term: Spot
-            , leverageConfig: 
-                { mode: Static
-                , targetLeverage: 1.0
-                , currentLeverage: 1.0
-                , decayAfterTerm: false
-                }
-            , owner: userId
-            , id: state.currentBlock * 1000 + length state.actionHistory
-            , createdAt: Int.toNumber state.currentBlock
-            }
-      -- In a real implementation, would add to lending book
+    CreateLendOffer _ _ _ _ _ _ _ -> do
+      -- For MVP, just track the offer without creating a position
+      -- In the new system, positions are created through pools
       pure state
     
-    TakeLoan userId borrowAsset borrowAmount collateralAsset collateralAmount terms -> do
-      -- Create a borrowing position in the new system
-      let position = 
-            { amount: borrowAmount
-            , tokenPair: { base: borrowAsset, quote: collateralAsset }
-            , priceStrategy: { bandTier: MediumBand, slippageTolerance: 0.01 }
-            , term: Spot
-            , leverageConfig: 
-                { mode: case terms of
-                    LeverageTerms lev -> Static
-                    _ -> Static
-                , targetLeverage: case terms of
-                    LeverageTerms lev -> lev
-                    _ -> 1.0
-                , currentLeverage: 1.0
-                , decayAfterTerm: false
-                }
-            , owner: userId
-            , id: state.currentBlock * 1000 + length state.actionHistory + 1
-            , createdAt: Int.toNumber state.currentBlock
-            }
-      -- In a real implementation, would match with existing positions
+    TakeLoan _ _ _ _ _ _ -> do
+      -- For MVP, just track the loan without creating a position
+      -- In the new system, positions are created through pools
       pure state
     
-    ClosePosition userId positionId -> do
+    ClosePosition _ _ -> do
       -- Position closing is more complex and would require tracking position state
       pure state
     
-    WaitBlocks blocks -> 
+    WaitBlocks _ -> 
       pure state
 
 --------------------------------------------------------------------------------

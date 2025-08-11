@@ -24,7 +24,7 @@ import Utils (formatAmount)
 data AccountProfile
   = Conservative    -- Low-risk, stable positions
   | Moderate       -- Balanced approach
-  | Aggressive     -- High-risk, high-leverage
+  | Aggressive     -- High-risk, active trading
   | Arbitrageur    -- Exploits price differences
   | Whale          -- Large positions, market impact
   | Retail         -- Small, frequent trades

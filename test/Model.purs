@@ -8,8 +8,7 @@ import Prelude
 
 import Data.Int as Int
 import Token (TokenType(..), TokenAmount)
-import LendingRecord (LendingRecord, LendingTerms(..), UnbondingPeriod(..))
-import Risk (calculateLendingRisk)
+import Position (Position, TermCommitment(..), Tranche(..), spotTerm)
 import Data.Array (elem)
 import Data.Number (abs)
 import Data.Array.NonEmpty as NEA
@@ -47,9 +46,11 @@ testRedenominationAssociativity input x y =
     then Success
     else Failed $ "Associativity test failed for leverage " <> show x <> " * " <> show y <> " = " <> show expectedLeverage
 
--- Helper to extract leverage from lending record
-getLeverageFromRecord :: LendingRecord -> Number
-getLeverageFromRecord record = record.leverageConfig.targetLeverage
+-- Helper to extract effective leverage from position
+getLeverageFromPosition :: Position -> Number
+getLeverageFromPosition position = case position.tranche of
+  Senior -> 1.0
+  Junior -> 3.0
 
 -- Identity property tests
 -- Tests that Redenom(Token, 1x) = Token (no change)

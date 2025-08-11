@@ -1,4 +1,4 @@
-module ProtocolError
+module Errors
   ( ProtocolError(..)
   ) where
 

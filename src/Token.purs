@@ -4,16 +4,19 @@
 -- as either lending assets or collateral in the Feels protocol.
 -- Handles token launching mechanics and price discovery for user-created assets.
 module Token 
-  ( TokenType(..)
+  ( -- Newtypes
+    FeelsSOLAmount(..)
+  , unwrapFeelsSOL
+  -- Token types
+  , TokenType(..)
   , TokenAmount
   , TokenMetadata
   , TokenCreationParams
   , ValidationResult
   , TokenRegistry
+  -- Functions
   , createToken
   , createAndRegisterToken
-  , launchToken
-  , calculateTokenPrice
   , isValidTicker
   , isValidPair
   , isTradeable
@@ -36,6 +39,25 @@ import Data.String as String
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, write, modify_)
 import FFI (currentTime, generateId)
+
+--------------------------------------------------------------------------------
+-- Newtype Wrappers
+--------------------------------------------------------------------------------
+
+-- | FeelsSOL amount with type safety
+newtype FeelsSOLAmount = FeelsSOLAmount Number
+
+derive instance eqFeelsSOLAmount :: Eq FeelsSOLAmount
+derive instance ordFeelsSOLAmount :: Ord FeelsSOLAmount
+derive newtype instance semiringFeelsSOLAmount :: Semiring FeelsSOLAmount
+derive newtype instance ringFeelsSOLAmount :: Ring FeelsSOLAmount
+
+instance showFeelsSOLAmount :: Show FeelsSOLAmount where
+  show (FeelsSOLAmount n) = "FeelsSOL " <> show n
+
+-- | Extract the Number from FeelsSOLAmount
+unwrapFeelsSOL :: FeelsSOLAmount -> Number
+unwrapFeelsSOL (FeelsSOLAmount n) = n
 
 --------------------------------------------------------------------------------
 -- Token Types
@@ -72,7 +94,6 @@ type TokenMetadata =
   , createdAt :: Number
   , live :: Boolean              -- True if 100 FeelsSOL deposited via loan book
   , totalSupply :: Number            -- Total supply of token
-  , stakedFeelsSOL :: Number         -- Amount of FeelsSOL staked into this token
   }
 
 -- Token creation parameters
@@ -98,9 +119,8 @@ createToken params = do
     , tokenType: Token params.ticker
     , creator: params.creator
     , createdAt: timestamp
-    , live: true  -- Auto-live for simulation
-    , totalSupply: 1000000.0  -- Default 1M supply
-    , stakedFeelsSOL: 100.0     -- Simulate initial staking
+    , live: true  -- Tokens are live when launched through batch auction
+    , totalSupply: 1000000.0    -- Default 1M supply
     }
 
 -- Create a token and automatically register it in the global registry
@@ -109,22 +129,6 @@ createAndRegisterToken registry params = do
   token <- createToken params
   registerToken registry token
   pure token
-
--- Launch a token when sufficient loan book activity has occurred
--- This function would typically be called by the loan book system
-launchToken :: TokenMetadata -> Number -> TokenMetadata  
-launchToken token totalLoanBookValue =
-  let isLive = totalLoanBookValue >= 100.0  -- 100 FeelsSOL threshold
-  in token { live = isLive }
-
--- Calculate token price based on loan book activity
--- Note: This is a placeholder - actual price discovery happens in the loan book
--- Price should be calculated by analyzing loan offers and market activity
-calculateTokenPrice :: TokenMetadata -> Number -> Number
-calculateTokenPrice token loanBookValue =
-  if token.live && loanBookValue > 0.0
-  then loanBookValue / token.totalSupply
-  else 0.0  -- No price for non-live tokens or tokens without loan book activity
 
 --------------------------------------------------------------------------------
 -- Token Validation Functions
@@ -174,6 +178,7 @@ getTokenByTicker ticker tokens =
     [token] -> Just token
     _ -> Nothing
 
+
 --------------------------------------------------------------------------------
 -- Global Token Registry
 --------------------------------------------------------------------------------
@@ -198,7 +203,6 @@ getSystemTokens =
     , creator: "system"
     , createdAt: 0.0
     , live: true
-    , stakedFeelsSOL: 0.0
     }
   , { id: 2
     , ticker: "FeelsSOL"
@@ -208,7 +212,6 @@ getSystemTokens =
     , creator: "system"
     , createdAt: 0.0
     , live: true
-    , stakedFeelsSOL: 0.0
     }
   ]
 

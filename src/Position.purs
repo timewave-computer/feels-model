@@ -1,478 +1,349 @@
--- | Position Module - Core position types for the Feels Protocol
+-- | Position Module - Unified position system for Feels Protocol
 -- |
--- | This module implements the three-dimensional position model with:
--- | - Price Strategy: Band-aligned, tick-specific, or hybrid positioning
--- | - Term Commitment: Spot (perpetual), hourly, daily, or weekly terms
--- | - Leverage Config: Static or dynamic leverage with health-based adjustments
--- |
--- | Key features:
--- | - Adaptive bands that track market conditions
--- | - Synchronized global term expiries
--- | - Liquidation-free leverage through dynamic adjustment
--- | - "Everything is Lending" philosophy maintained
+-- | This module implements a two-tranche position model:
+-- | - Tranche Selection: Senior (1x) or Junior (3x) exposure
+-- | - Term Commitment: Spot, Hourly, Daily, or Weekly synchronized terms
+-- | - Share-based accounting within tranches
+-- | - No liquidations - positions adjust in value only
 module Position
-  ( Position
-  , TokenPair
-  , PriceStrategy(..)
-  , TickRange
-  , AdaptiveBand
-  , BandTier(..)
-  , TrackingMode(..)
+  ( -- Position types
+    Position
+  , Tranche(..)
   , TermCommitment(..)
-  , LeverageConfig
-  , LeverageMode(..)
-  , HealthFactor
+  -- Functions
   , createPosition
-  , getNextExpiry
+  , getPositionValue
   , isSpot
   , isTermPosition
-  , isLeveraged
-  , getBandWidth
-  , priceToTick
-  , tickToPrice
-  , updateAdaptiveBand
-  , createSpotPosition
-  , createTermPosition
-  , createLeveragedPosition
-  , validatePosition
-  , adjustLeverageForHealth
-  , decayLeverageAfterExpiry
-  , calculateEffectiveLeverage
+  , getTermExpiry
+  -- Term expiry functions
+  , getNextExpiry
+  , rollToSpot
+  , isExpired
+  , getNextHourlyExpiry
+  , getNextDailyExpiry
+  , getNextWeeklyExpiry
+  , blocksPerHour
+  , blocksPerDay
+  , blocksPerWeek
+  , estimateTimeFromBlocks
+  , blocksUntilExpiry
+  -- Term commitment constructors
+  , spotTerm
+  , hourlyTerm
+  , dailyTerm
+  , weeklyTerm
+  -- Term scheduling
+  , TermSchedule
+  , ExpiryBatch
+  , getNextTermExpiries
+  , groupPositionsByExpiry
+  , processExpiredPositions
   ) where
 
 import Prelude
 import Data.Maybe (Maybe(..))
-import Data.Either (Either(..))
+import Data.Int (toNumber, round)
+import Data.Array as Array
+import Data.Array ((:), head)
 import Token (TokenType)
-import FFI (currentTime, log, exp, sqrt, unsafeToInt, unsafeToNumber)
+import Common (PoolId, PositionId, BlockNumber, ShareAmount)
 
 --------------------------------------------------------------------------------
 -- Core Types
 --------------------------------------------------------------------------------
 
--- Token pair for a position
-type TokenPair =
-  { base :: TokenType
-  , quote :: TokenType
-  }
-
--- Core position structure
+-- | Position structure
 type Position =
-  { -- Core parameters
-    amount :: Number
-  , tokenPair :: TokenPair
-  
-  -- Price dimension
-  , priceStrategy :: PriceStrategy
-  
-  -- Time dimension  
-  , term :: TermCommitment
-  
-  -- Leverage dimension
-  , leverageConfig :: LeverageConfig
-  
-  -- Metadata
+  { id :: PositionId
+  , poolId :: PoolId               -- Pool this position belongs to
   , owner :: String
-  , id :: Int
-  , createdAt :: Number
+  , amount :: Number               -- Initial capital invested
+  , tranche :: Tranche             -- Senior (1x) or Junior (3x)
+  , term :: TermCommitment         -- Synchronized term commitment
+  , shares :: ShareAmount          -- Shares within their tranche
+  , createdAt :: BlockNumber       -- Creation block number
+  , value :: Number                -- Current value (never liquidated)
+  , lockedAmount :: Number         -- Amount locked below floor
   }
 
---------------------------------------------------------------------------------
--- Price Strategy Types
---------------------------------------------------------------------------------
+-- | Tranche selection (replaces leverage system)
+data Tranche
+  = Senior    -- 1x exposure, protected, lower yield
+  | Junior    -- 3x exposure, first loss, higher yield
 
--- Price positioning strategy
-data PriceStrategy
-  = BandAligned AdaptiveBand           -- Simplified, auto-adjusting
-  | TickSpecific TickRange             -- Granular, fixed
-  | BandConstrained AdaptiveBand TickRange  -- Hybrid approach
+derive instance eqTranche :: Eq Tranche
+derive instance ordTranche :: Ord Tranche
 
-derive instance eqPriceStrategy :: Eq PriceStrategy
+instance showTranche :: Show Tranche where
+  show Senior = "Senior"
+  show Junior = "Junior"
 
-instance showPriceStrategy :: Show PriceStrategy where
-  show (BandAligned band) = "BandAligned"
-  show (TickSpecific range) = "TickSpecific"
-  show (BandConstrained band range) = "BandConstrained"
-
--- Tick range for precise positioning
-type TickRange =
-  { lowerTick :: Int
-  , upperTick :: Int
-  }
-
--- Band tier for simplified positioning
-data BandTier
-  = TightBand    -- ±1%
-  | MediumBand   -- ±5%
-  | WideBand     -- ±10%
-
-derive instance eqBandTier :: Eq BandTier
-derive instance ordBandTier :: Ord BandTier
-
-instance showBandTier :: Show BandTier where
-  show TightBand = "Tight"
-  show MediumBand = "Medium"
-  show WideBand = "Wide"
-
--- Price tracking mode
-data TrackingMode
-  = TWAP         -- Time-weighted average
-  | SpotPrice    -- Current spot price
-  | Midpoint     -- Mid between bid/ask
-
-derive instance eqTrackingMode :: Eq TrackingMode
-
-instance showTrackingMode :: Show TrackingMode where
-  show TWAP = "TWAP"
-  show SpotPrice = "SpotPrice"
-  show Midpoint = "Midpoint"
-
--- Adaptive band configuration
-type AdaptiveBand =
-  { tier :: BandTier                    -- Tight/Medium/Wide
-  , centerTracking :: TrackingMode      -- TWAP/Spot/Midpoint
-  , adaptiveWidth :: Boolean            -- Adjust to volatility
-  , lastUpdate :: Number                -- Last update timestamp
-  , cachedBounds :: Maybe TickRange     -- Cached tick bounds
-  }
-
---------------------------------------------------------------------------------
--- Time Commitment Types
---------------------------------------------------------------------------------
-
--- Term commitment for positions
+-- | Term commitment with synchronized block-based expiries
 data TermCommitment
-  = Spot                               -- No expiry (∞ duration)
-  | Hourly Number                      -- Expires on the hour
-  | Daily Number                       -- Expires at 00:00 UTC
-  | Weekly Number                      -- Expires Sunday 00:00 UTC
+  = Spot                           -- Perpetual, no expiry
+  | Hourly BlockNumber             -- Expires at hourly block boundary
+  | Daily BlockNumber              -- Expires at daily block boundary
+  | Weekly BlockNumber             -- Expires at weekly block boundary
 
 derive instance eqTermCommitment :: Eq TermCommitment
 
 instance showTermCommitment :: Show TermCommitment where
   show Spot = "Spot"
-  show (Hourly expiry) = "Hourly (expires " <> show expiry <> ")"
-  show (Daily expiry) = "Daily (expires " <> show expiry <> ")"
-  show (Weekly expiry) = "Weekly (expires " <> show expiry <> ")"
+  show (Hourly expiryBlock) = "Hourly (expires block " <> show expiryBlock <> ")"
+  show (Daily expiryBlock) = "Daily (expires block " <> show expiryBlock <> ")"
+  show (Weekly expiryBlock) = "Weekly (expires block " <> show expiryBlock <> ")"
+
 
 --------------------------------------------------------------------------------
--- Leverage Types
+-- Position Creation
 --------------------------------------------------------------------------------
 
--- Health factor for dynamic leverage
-type HealthFactor = Number
-
--- Leverage mode
-data LeverageMode
-  = Static                             -- Fixed leverage
-  | Dynamic HealthFactor               -- Adjusts with pool health
-
-derive instance eqLeverageMode :: Eq LeverageMode
-
-instance showLeverageMode :: Show LeverageMode where
-  show Static = "Static"
-  show (Dynamic factor) = "Dynamic (health: " <> show factor <> ")"
-
--- Leverage configuration
-type LeverageConfig =
-  { targetLeverage :: Number            -- Desired leverage (1.0 - 10.0)
-  , currentLeverage :: Number           -- Current effective leverage
-  , mode :: LeverageMode
-  , decayAfterTerm :: Boolean           -- Whether to decay post-expiry
-  }
-
---------------------------------------------------------------------------------
--- Helper Functions
---------------------------------------------------------------------------------
-
--- Create a new position
+-- | Create a new position
 createPosition :: 
-  Int -> 
-  String -> 
-  Number -> 
-  TokenPair -> 
-  PriceStrategy -> 
-  TermCommitment -> 
-  LeverageConfig -> 
-  Number ->
+  PositionId ->    -- ID
+  PoolId ->        -- Pool ID
+  String ->        -- Owner
+  Number ->        -- Amount
+  Tranche ->       -- Senior or Junior
+  TermCommitment -> -- Term
+  ShareAmount ->   -- Shares calculated by pool
+  BlockNumber ->   -- Current block number
   Position
-createPosition id owner amount tokenPair priceStrategy term leverageConfig timestamp =
+createPosition id poolId owner amount tranche term shares currentBlock =
   { id
+  , poolId
   , owner
   , amount
-  , tokenPair
-  , priceStrategy
+  , tranche
   , term
-  , leverageConfig
-  , createdAt: timestamp
+  , shares
+  , createdAt: currentBlock
+  , value: amount  -- Initial value equals amount
+  , lockedAmount: 0.0
   }
 
--- Get next expiry timestamp for a term type
-getNextExpiry :: TermCommitment -> Number -> Number
-getNextExpiry term currentTime =
-  case term of
-    Spot -> 9999999999999.0           -- MaxTimestamp (never expires)
-    Hourly _ -> nextHourBoundary currentTime
-    Daily _ -> nextMidnightUTC currentTime  
-    Weekly _ -> nextSundayMidnightUTC currentTime
+--------------------------------------------------------------------------------
+-- Position Queries
+--------------------------------------------------------------------------------
 
--- Check if position is spot (perpetual)
+-- | Get current position value
+getPositionValue :: Position -> Number
+getPositionValue pos = pos.value
+
+-- | Check if position is spot (perpetual)
 isSpot :: Position -> Boolean
 isSpot pos = case pos.term of
   Spot -> true
   _ -> false
 
--- Check if position has term commitment
+-- | Check if position has term commitment
 isTermPosition :: Position -> Boolean
 isTermPosition pos = not (isSpot pos)
 
--- Check if position is leveraged
-isLeveraged :: Position -> Boolean
-isLeveraged pos = pos.leverageConfig.targetLeverage > 1.0
+-- | Get term expiry block number
+getTermExpiry :: Position -> Maybe Int
+getTermExpiry pos = case pos.term of
+  Spot -> Nothing
+  Hourly expiryBlock -> Just expiryBlock
+  Daily expiryBlock -> Just expiryBlock
+  Weekly expiryBlock -> Just expiryBlock
 
 --------------------------------------------------------------------------------
--- Time Boundary Calculations
+-- Tranche Helpers
 --------------------------------------------------------------------------------
 
--- Get next hour boundary
-nextHourBoundary :: Number -> Number
-nextHourBoundary currentTime =
-  let hourMs = 3600000.0  -- 60 * 60 * 1000
-      currentHour = floor (currentTime / hourMs)
-  in (currentHour + 1.0) * hourMs
+-- | Get tranche multiplier
+getTrancheMultiplier :: Tranche -> Number
+getTrancheMultiplier tranche = case tranche of
+  Senior -> 1.0
+  Junior -> 3.0  -- Fixed 3x for MVP
 
--- Get next midnight UTC
-nextMidnightUTC :: Number -> Number
-nextMidnightUTC currentTime =
-  let dayMs = 86400000.0  -- 24 * 60 * 60 * 1000
-      currentDay = floor (currentTime / dayMs)
-  in (currentDay + 1.0) * dayMs
+-- | Check if position is in junior tranche
+isJunior :: Position -> Boolean
+isJunior pos = pos.tranche == Junior
 
--- Get next Sunday midnight UTC
-nextSundayMidnightUTC :: Number -> Number
-nextSundayMidnightUTC currentTime =
-  let weekMs = 604800000.0  -- 7 * 24 * 60 * 60 * 1000
-      -- Unix epoch was Thursday, so we need to adjust
-      -- to get weeks starting on Sunday
-      adjustedTime = currentTime + 345600000.0  -- 4 days in ms
-      currentWeek = floor (adjustedTime / weekMs)
-      nextSundayAdjusted = (currentWeek + 1.0) * weekMs
-  in nextSundayAdjusted - 345600000.0
+-- | Check if position is in senior tranche
+isSenior :: Position -> Boolean
+isSenior pos = pos.tranche == Senior
 
--- Helper function for floor
-floor :: Number -> Number
-floor x = if x >= 0.0 
-          then floorPositive x
-          else -floorPositive (-x)
+--------------------------------------------------------------------------------
+-- Term System Constants and Functions
+--------------------------------------------------------------------------------
+
+-- | Blocks per hour (assuming 30-second blocks on Solana)
+-- | 2 blocks per minute * 60 minutes = 120 blocks
+blocksPerHour :: Int
+blocksPerHour = 120
+
+-- | Blocks per day
+-- | 120 blocks per hour * 24 hours = 2880 blocks
+blocksPerDay :: Int
+blocksPerDay = 2880
+
+-- | Blocks per week
+-- | 2880 blocks per day * 7 days = 20160 blocks
+blocksPerWeek :: Int
+blocksPerWeek = 20160
+
+--------------------------------------------------------------------------------
+-- Block-based Term Expiry Calculation
+--------------------------------------------------------------------------------
+
+-- | Get next synchronized expiry block for a term type
+getNextExpiry :: TermCommitment -> Int -> Int
+getNextExpiry term currentBlock =
+  case term of
+    Spot -> 2147483647              -- MaxInt32 (effectively never expires)
+    Hourly _ -> getNextHourlyExpiry currentBlock
+    Daily _ -> getNextDailyExpiry currentBlock
+    Weekly _ -> getNextWeeklyExpiry currentBlock
+
+-- | Get next hourly boundary block
+getNextHourlyExpiry :: Int -> Int
+getNextHourlyExpiry currentBlock =
+  let currentPeriod = currentBlock / blocksPerHour
+      nextPeriod = currentPeriod + 1
+  in nextPeriod * blocksPerHour
+
+-- | Get next daily boundary block
+getNextDailyExpiry :: Int -> Int
+getNextDailyExpiry currentBlock =
+  let currentPeriod = currentBlock / blocksPerDay
+      nextPeriod = currentPeriod + 1
+  in nextPeriod * blocksPerDay
+
+-- | Get next weekly boundary block
+getNextWeeklyExpiry :: Int -> Int
+getNextWeeklyExpiry currentBlock =
+  let currentPeriod = currentBlock / blocksPerWeek
+      nextPeriod = currentPeriod + 1
+  in nextPeriod * blocksPerWeek
+
+-- | Calculate blocks until expiry
+blocksUntilExpiry :: TermCommitment -> Int -> Int
+blocksUntilExpiry term currentBlock =
+  case term of
+    Spot -> 2147483647  -- MaxInt32
+    Hourly expiryBlock -> max 0 (expiryBlock - currentBlock)
+    Daily expiryBlock -> max 0 (expiryBlock - currentBlock)
+    Weekly expiryBlock -> max 0 (expiryBlock - currentBlock)
+
+--------------------------------------------------------------------------------
+-- Term Expiry Processing
+--------------------------------------------------------------------------------
+
+-- | Check if position is expired based on current block
+isExpired :: Int -> Position -> Boolean
+isExpired currentBlock position =
+  case position.term of
+    Spot -> false  -- Spot positions never expire
+    Hourly expiryBlock -> currentBlock >= expiryBlock
+    Daily expiryBlock -> currentBlock >= expiryBlock
+    Weekly expiryBlock -> currentBlock >= expiryBlock
+
+-- | Roll expired position to spot
+rollToSpot :: Position -> Position
+rollToSpot position =
+  position { term = Spot }
+  -- Note: In full implementation, this would also:
+  -- - Adjust shares based on any term completion bonuses
+  -- - Update position value with accumulated fees
+  -- - Trigger any necessary rebalancing
+
+--------------------------------------------------------------------------------
+-- UI Helper Functions
+--------------------------------------------------------------------------------
+
+-- | Estimate time remaining from blocks (for UI display only)
+-- | Returns a human-readable string
+estimateTimeFromBlocks :: Int -> String
+estimateTimeFromBlocks blocks =
+  if blocks <= 0 then
+    "Expired"
+  else if blocks < blocksPerHour then
+    let minutes = round (toNumber blocks * 0.5)  -- 30-second blocks
+    in show minutes <> " minutes"
+  else if blocks < blocksPerDay then
+    let hours = blocks / blocksPerHour
+    in show hours <> " hours"
+  else if blocks < blocksPerWeek then
+    let days = blocks / blocksPerDay
+    in show days <> " days"
+  else
+    let weeks = blocks / blocksPerWeek
+    in show weeks <> " weeks"
+
+--------------------------------------------------------------------------------
+-- Term Commitment Smart Constructors
+--------------------------------------------------------------------------------
+
+-- | Create a spot term commitment (no expiry)
+spotTerm :: TermCommitment
+spotTerm = Spot
+
+-- | Create an hourly term commitment with next expiry
+hourlyTerm :: Int -> TermCommitment
+hourlyTerm currentBlock = Hourly (getNextHourlyExpiry currentBlock)
+
+-- | Create a daily term commitment with next expiry
+dailyTerm :: Int -> TermCommitment
+dailyTerm currentBlock = Daily (getNextDailyExpiry currentBlock)
+
+-- | Create a weekly term commitment with next expiry
+weeklyTerm :: Int -> TermCommitment
+weeklyTerm currentBlock = Weekly (getNextWeeklyExpiry currentBlock)
+
+--------------------------------------------------------------------------------
+-- Term Scheduling
+--------------------------------------------------------------------------------
+
+-- | Track synchronized term expiries
+type TermSchedule =
+  { nextHourly :: BlockNumber      -- Next hourly expiry block
+  , nextDaily :: BlockNumber       -- Next daily expiry block
+  , nextWeekly :: BlockNumber      -- Next weekly expiry block
+  }
+
+-- | Batch of positions expiring at the same block
+type ExpiryBatch =
+  { expiryBlock :: BlockNumber
+  , positions :: Array Position
+  }
+
+-- | Get the next term expiry blocks
+getNextTermExpiries :: BlockNumber -> TermSchedule
+getNextTermExpiries currentBlock =
+  { nextHourly: getNextHourlyExpiry currentBlock
+  , nextDaily: getNextDailyExpiry currentBlock
+  , nextWeekly: getNextWeeklyExpiry currentBlock
+  }
+
+-- | Group positions by their expiry block (simplified implementation)
+groupPositionsByExpiry :: Array Position -> Array ExpiryBatch
+groupPositionsByExpiry positions =
+  let
+    -- Extract positions with expiries
+    termPositions = Array.filter isTermPosition positions
+    
+    -- Simple implementation: create one batch for all term positions
+    -- TODO: Implement proper grouping by expiry block
+    createBatch :: Array Position -> Maybe ExpiryBatch  
+    createBatch [] = Nothing
+    createBatch ps = 
+      Array.head ps >>= \p ->
+        getTermExpiry p >>= \expiry ->
+          Just { expiryBlock: expiry, positions: ps }
+  in
+    case createBatch termPositions of
+      Just batch -> [batch]
+      Nothing -> []
+
+-- | Process expired positions by rolling them to spot
+processExpiredPositions :: BlockNumber -> Array Position -> Array Position
+processExpiredPositions currentBlock = map processOne
   where
-    floorPositive n = 
-      let intPart = toInt n
-      in toNumber intPart
-    
-    toInt :: Number -> Int
-    toInt n = unsafeToInt n
-    
-    toNumber :: Int -> Number
-    toNumber i = unsafeToNumber i
-
---------------------------------------------------------------------------------
--- Band and Tick Calculations
---------------------------------------------------------------------------------
-
--- Get band width for a tier
-getBandWidth :: BandTier -> Number
-getBandWidth tier = case tier of
-  TightBand -> 0.01    -- ±1%
-  MediumBand -> 0.05   -- ±5%
-  WideBand -> 0.10     -- ±10%
-
--- Convert price to tick (basis point precision)
--- Tick 0 = 1.0, Tick 100 = 1.01, Tick -100 = 0.99
-priceToTick :: Number -> Int
-priceToTick price = 
-  let logPrice = log price
-      -- Each tick represents 1 basis point (0.01%)
-      tickSpacing = 0.0001  -- log(1.0001) ≈ 0.0001
-  in unsafeToInt (logPrice / tickSpacing)
-
--- Convert tick to price
-tickToPrice :: Int -> Number
-tickToPrice tick =
-  let tickSpacing = 0.0001
-  in exp (unsafeToNumber tick * tickSpacing)
-
--- Update adaptive band based on market conditions
-updateAdaptiveBand :: 
-  { currentPrice :: Number
-  , volatility :: Number
-  , baselineVol :: Number
-  , stressMultiplier :: Number  -- Added for stress-based widening
-  } -> 
-  AdaptiveBand -> 
-  AdaptiveBand
-updateAdaptiveBand params band =
-  let baseWidth = getBandWidth band.tier
-      
-      -- Adjust for volatility if enabled
-      volatilityAdjustment = if band.adaptiveWidth
-        then sqrt (params.volatility / params.baselineVol)
-        else 1.0
-      
-      -- Apply both volatility and stress adjustments
-      effectiveWidth = baseWidth * volatilityAdjustment * params.stressMultiplier
-      
-      -- Calculate new tick bounds
-      lowerPrice = params.currentPrice * (1.0 - effectiveWidth)
-      upperPrice = params.currentPrice * (1.0 + effectiveWidth)
-      
-      newBounds = 
-        { lowerTick: priceToTick lowerPrice
-        , upperTick: priceToTick upperPrice
-        }
-      
-  in band 
-    { cachedBounds = Just newBounds
-    , lastUpdate = 0.0  -- Would be set by caller with current time
-    }
-
---------------------------------------------------------------------------------
--- Math Functions
---------------------------------------------------------------------------------
--- Position Creation Helpers
---------------------------------------------------------------------------------
-
--- Create a spot trading position (price only)
-createSpotPosition ::
-  Int ->
-  String ->
-  Number ->
-  TokenPair ->
-  BandTier ->
-  Number ->
-  Position
-createSpotPosition id owner amount tokenPair bandTier timestamp =
-  let band = 
-        { tier: bandTier
-        , centerTracking: SpotPrice
-        , adaptiveWidth: true
-        , lastUpdate: timestamp
-        , cachedBounds: Nothing
-        }
-      leverage = 
-        { targetLeverage: 1.0
-        , currentLeverage: 1.0
-        , mode: Static
-        , decayAfterTerm: false
-        }
-  in createPosition id owner amount tokenPair (BandAligned band) Spot leverage timestamp
-
--- Create a term lending position (time only)
-createTermPosition ::
-  Int ->
-  String ->
-  Number ->
-  TokenPair ->
-  TermCommitment ->
-  Number ->
-  Position
-createTermPosition id owner amount tokenPair term timestamp =
-  let band = 
-        { tier: MediumBand  -- Default to medium band for term positions
-        , centerTracking: TWAP
-        , adaptiveWidth: true
-        , lastUpdate: timestamp
-        , cachedBounds: Nothing
-        }
-      leverage = 
-        { targetLeverage: 1.0
-        , currentLeverage: 1.0
-        , mode: Static
-        , decayAfterTerm: false
-        }
-  in createPosition id owner amount tokenPair (BandAligned band) term leverage timestamp
-
--- Create a leveraged position (leverage only)
-createLeveragedPosition ::
-  Int ->
-  String ->
-  Number ->
-  TokenPair ->
-  Number ->
-  Boolean ->
-  Number ->
-  Position
-createLeveragedPosition id owner amount tokenPair targetLeverage useDynamicMode timestamp =
-  let band = 
-        { tier: WideBand  -- Wide bands for leveraged positions
-        , centerTracking: SpotPrice
-        , adaptiveWidth: true
-        , lastUpdate: timestamp
-        , cachedBounds: Nothing
-        }
-      leverage = 
-        { targetLeverage: targetLeverage
-        , currentLeverage: targetLeverage
-        , mode: if useDynamicMode then Dynamic 1.0 else Static
-        , decayAfterTerm: true
-        }
-  in createPosition id owner amount tokenPair (BandAligned band) Spot leverage timestamp
-
--- Validate position parameters
-validatePosition :: Position -> Either String Position
-validatePosition pos =
-  if pos.amount <= 0.0
-    then Left "Position amount must be positive"
-    else if pos.leverageConfig.targetLeverage < 1.0
-    then Left "Leverage must be at least 1.0"
-    else if pos.leverageConfig.targetLeverage > 10.0
-    then Left "Leverage cannot exceed 10.0"
-    else Right pos
-
---------------------------------------------------------------------------------
--- Leverage Management
---------------------------------------------------------------------------------
-
--- Adjust leverage based on pool health
-adjustLeverageForHealth :: HealthFactor -> Position -> Position
-adjustLeverageForHealth health pos =
-  case pos.leverageConfig.mode of
-    Static -> pos  -- No adjustment for static leverage
-    Dynamic _ ->
-      let -- Stress adjustment: reduce leverage when health < 1.2
-          stressAdjustment = max 0.5 (min 1.0 health)
-          effectiveLeverage = pos.leverageConfig.targetLeverage * stressAdjustment
-      in pos { leverageConfig = pos.leverageConfig 
-        { currentLeverage = effectiveLeverage
-        , mode = Dynamic health
-        }}
-
--- Decay leverage after term expiry
-decayLeverageAfterExpiry :: Position -> Position
-decayLeverageAfterExpiry pos =
-  if pos.leverageConfig.decayAfterTerm && isSpot pos
-  then 
-    -- Gradually reduce leverage to 1.0
-    let decayedLeverage = max 1.0 (pos.leverageConfig.currentLeverage * 0.95)
-    in pos { leverageConfig = pos.leverageConfig 
-      { currentLeverage = decayedLeverage }}
-  else pos
-
--- Calculate effective leverage considering all factors
-calculateEffectiveLeverage :: Position -> Number
-calculateEffectiveLeverage pos = pos.leverageConfig.currentLeverage
-
--- Calculate pool health factor
-calculatePoolHealth :: 
-  { totalValue :: Number
-  , obligations :: Number
-  } -> HealthFactor
-calculatePoolHealth params =
-  if params.obligations > 0.0
-  then params.totalValue / params.obligations
-  else 2.0  -- Maximum health when no obligations
-
---------------------------------------------------------------------------------
--- Foreign Imports
---------------------------------------------------------------------------------
-
--- Number conversion functions now imported from FFI
+    processOne pos = 
+      if isExpired currentBlock pos
+      then rollToSpot pos
+      else pos
