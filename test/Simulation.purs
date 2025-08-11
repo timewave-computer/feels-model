@@ -14,8 +14,8 @@ import Effect.Console (log)
 import Test.QuickCheck (Result(..), quickCheck)
 
 -- Core system imports
-import Token (TokenCreationParams, TokenMetadata, createToken)
-import POL (getTotalPOL)
+import Protocol.Token (TokenCreationParams, TokenMetadata, createToken)
+import Protocol.POL (getTotalPOL)
 import Simulation.Sim (AccountProfile(..), MarketScenario(..), SimulationConfig, SimulationState, initSimulation, runSimulation, executeSimulation)
 import Utils (formatAmount)
 import FFI (currentTime)

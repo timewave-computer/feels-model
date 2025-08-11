@@ -1,7 +1,7 @@
 -- | Gateway module for entering and exiting the Feels Protocol.
 -- | This module manages the conversion between JitoSOL and FeelsSOL,
 -- | including synthetic asset creation and oracle-driven pricing.
-module Gateway
+module Protocol.Gateway
   ( GatewayState
   , SyntheticSOLState
   , TransformResult
@@ -26,11 +26,11 @@ import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import Effect.Ref (Ref, read, write, new)
-import Token (TokenType(..), TokenAmount)
+import Protocol.Token (TokenType(..), TokenAmount)
 import FFI (currentTime)
-import POL (POLState, contribute)
-import Accounts (AccountRegistry, depositFromChain, withdrawToChain, getChainAccountBalance, getFeelsAccountBalance)
-import Errors (ProtocolError(..))
+-- POL operations removed - now handled at UI layer
+-- Account operations removed - now handled at UI layer
+import Protocol.Errors (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Gateway Types
@@ -94,9 +94,7 @@ type GatewayState =
   { syntheticSOL :: SyntheticSOLState    -- Synthetic FeelsSOL management
   , entryFee :: Number                   -- Fee for entering (e.g., 0.001 = 0.1%)
   , exitFee :: Number                    -- Fee for exiting (e.g., 0.002 = 0.2%)
-  , accountRegistry :: AccountRegistry   -- Registry for both account types
   , polAllocationRate :: Number          -- Portion of fees going to POL (e.g., 0.25 = 25%)
-  , polState :: POLState                 -- POL state for contributions
   }
 
 --------------------------------------------------------------------------------
@@ -247,121 +245,87 @@ initGateway ::
   (Effect Number) ->    -- Price oracle function
   Number ->             -- Entry fee
   Number ->             -- Exit fee
-  AccountRegistry ->    -- Account registry
-  POLState ->           -- POL state
   Effect GatewayState
-initGateway oracle entryFee exitFee accountRegistry pol = do
+initGateway oracle entryFee exitFee = do
   syntheticSOLState <- initSyntheticSOL oracle
   pure { syntheticSOL: syntheticSOLState
        , entryFee: entryFee
        , exitFee: exitFee
-       , accountRegistry: accountRegistry
        , polAllocationRate: 0.25  -- Default 25% to POL
-       , polState: pol
        }
 
 --------------------------------------------------------------------------------
 -- System Entry (JitoSOL -> FeelsSOL)
 --------------------------------------------------------------------------------
 
--- Enter the system by depositing JitoSOL and receiving FeelsSOL
+-- Enter the system by converting JitoSOL to FeelsSOL
+-- Note: Account balance checks and transfers are handled at the UI layer
 enterSystem :: 
   GatewayState ->
-  String ->         -- User address
+  String ->         -- User address (for future use)
   Number ->         -- Amount of JitoSOL to deposit
   Effect (Either ProtocolError TransformResult)
-enterSystem state user jitoAmount = do
+enterSystem state _user jitoAmount = do
   -- Validate amount
   if jitoAmount <= 0.0
     then pure $ Left (InvalidAmountError jitoAmount)
     else do
-      -- Check user has sufficient JitoSOL in ChainAccount
-      jitoBalance <- getChainAccountBalance state.accountRegistry user
-      if jitoBalance < jitoAmount
-        then pure $ Left $ InsufficientBalanceError $ 
-          "Insufficient JitoSOL balance. Required: " <> show jitoAmount <> ", Available: " <> show jitoBalance
-        else do
-          -- Calculate fee and net amount
-          let feeAmount = jitoAmount * state.entryFee
-              netJitoAmount = jitoAmount - feeAmount
-          
-          -- Mint FeelsSOL against the net JitoSOL amount
-          mintResult <- mintFeelsSOL state.syntheticSOL netJitoAmount
-          
-          case mintResult of
-            Left err -> pure $ Left $ InvalidCommandError err
-            Right result -> do
-              -- Move JitoSOL from chain account to protocol reserves
-              _ <- depositFromChain state.accountRegistry user jitoAmount
-              
-              -- Credit FeelsSOL to user's FeelsAccount
-              _ <- depositFromChain state.accountRegistry user result.feelsSOLMinted
-              
-              -- Allocate portion of fee to POL
-              let polContribution = feeAmount * state.polAllocationRate
-              contribute state.polState polContribution
-              
-              -- Create transform result
-              timestamp <- currentTime
-              pure $ Right 
-                { direction: Enter
-                , inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
-                , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
-                , exchangeRate: result.exchangeRate
-                , fee: feeAmount
-                , timestamp: timestamp
-                }
+      -- Calculate fee and net amount
+      let feeAmount = jitoAmount * state.entryFee
+          netJitoAmount = jitoAmount - feeAmount
+      
+      -- Mint FeelsSOL against the net JitoSOL amount
+      mintResult <- mintFeelsSOL state.syntheticSOL netJitoAmount
+      
+      case mintResult of
+        Left err -> pure $ Left $ InvalidCommandError err
+        Right result -> do
+          -- Create transform result
+          timestamp <- currentTime
+          pure $ Right 
+            { direction: Enter
+            , inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
+            , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
+            , exchangeRate: result.exchangeRate
+            , fee: feeAmount
+            , timestamp: timestamp
+            }
 
 --------------------------------------------------------------------------------
 -- System Exit (FeelsSOL -> JitoSOL)
 --------------------------------------------------------------------------------
 
--- Exit the system by burning FeelsSOL and receiving JitoSOL
+-- Exit the system by burning FeelsSOL to receive JitoSOL
+-- Note: Account balance checks and transfers are handled at the UI layer
 exitSystem :: 
   GatewayState ->
-  String ->         -- User address
+  String ->         -- User address (for future use)
   Number ->         -- Amount of FeelsSOL to burn
   Effect (Either ProtocolError TransformResult)
-exitSystem state user feelsAmount = do
+exitSystem state _user feelsAmount = do
   -- Validate amount
   if feelsAmount <= 0.0
     then pure $ Left (InvalidAmountError feelsAmount)
     else do
-      -- Check user has sufficient FeelsSOL
-      feelsBalance <- getFeelsAccountBalance state.accountRegistry user FeelsSOL
-      if feelsBalance < feelsAmount
-        then pure $ Left $ InsufficientBalanceError $ 
-          "Insufficient FeelsOL balance. Required: " <> show feelsAmount <> ", Available: " <> show feelsBalance
-        else do
-          -- Burn FeelsSOL to get JitoSOL
-          burnResult <- burnFeelsSOL state.syntheticSOL feelsAmount
+      -- Burn FeelsSOL to get JitoSOL
+      burnResult <- burnFeelsSOL state.syntheticSOL feelsAmount
+      
+      case burnResult of
+        Left err -> pure $ Left $ InvalidCommandError err
+        Right result -> do
+          -- Calculate fee on JitoSOL output
+          let feeAmount = result.jitoSOLReleased * state.exitFee
+              netJitoAmount = result.jitoSOLReleased - feeAmount
           
-          case burnResult of
-            Left err -> pure $ Left $ InvalidCommandError err
-            Right result -> do
-              -- Calculate fee on JitoSOL output
-              let feeAmount = result.jitoSOLReleased * state.exitFee
-                  netJitoAmount = result.jitoSOLReleased - feeAmount
-              
-              -- Deduct FeelsSOL from user's FeelsAccount
-              _ <- withdrawToChain state.accountRegistry user feelsAmount
-              
-              -- Credit JitoSOL to user's chain account
-              _ <- withdrawToChain state.accountRegistry user netJitoAmount
-              
-              -- Allocate portion of fee to POL
-              let polContribution = feeAmount * state.polAllocationRate
-              contribute state.polState polContribution
-              
-              -- Create transform result
-              timestamp <- currentTime
-              pure $ Right 
-                { direction: Exit
-                , inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
-                , outputAmount: { tokenType: JitoSOL, amount: netJitoAmount }
-                , exchangeRate: result.exchangeRate
-                , fee: feeAmount
-                , timestamp: timestamp
+          -- Create transform result
+          timestamp <- currentTime
+          pure $ Right 
+            { direction: Exit
+            , inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
+            , outputAmount: { tokenType: JitoSOL, amount: netJitoAmount }
+            , exchangeRate: result.exchangeRate
+            , fee: feeAmount
+            , timestamp: timestamp
                 }
 
 --------------------------------------------------------------------------------

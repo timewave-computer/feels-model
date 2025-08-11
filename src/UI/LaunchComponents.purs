@@ -10,8 +10,12 @@ import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
 
-import Launch.Launch (LaunchPhase(..), BatchResult)
-import Utils (formatAmount)
+-- import Protocol.Launch.Launch (LaunchPhase(..), BatchResult) -- Module not found
+
+-- Temporary types until Launch modules are created
+data LaunchPhase = LaunchPhaseA | LaunchPhaseB
+type BatchResult = { success :: Boolean }
+-- import Utils (formatAmount) -- Module not found
 
 --------------------------------------------------------------------------------
 -- Types

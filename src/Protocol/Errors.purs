@@ -1,4 +1,4 @@
-module Errors
+module Protocol.Errors
   ( ProtocolError(..)
   ) where
 

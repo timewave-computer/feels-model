@@ -25,8 +25,8 @@ import Halogen.HTML.Properties as HP
 
 -- Import UI state and actions from State module
 import UI.State (UIState, Action(..), parseTokenType)
-import Token (TokenMetadata)
-import Position (Position, TermCommitment(..))
+import Protocol.Token (TokenMetadata)
+import Protocol.Position (Position, TermCommitment(..))
 import Utils (formatAmount)
 
 --------------------------------------------------------------------------------

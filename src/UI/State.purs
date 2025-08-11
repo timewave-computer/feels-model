@@ -1,5 +1,5 @@
--- UI State Management for the Feels Protocol application
--- Manages all UI state types, initial state, and state coordination
+-- UI Component State for the Feels Protocol application
+-- Manages only UI-specific state (form inputs, display preferences, etc.)
 module UI.State
   ( UIState
   , LaunchInfo
@@ -11,72 +11,42 @@ module UI.State
 
 import Data.Maybe (Maybe(..))
 
-import State.State (AppRuntime)
-import Token (TokenType(..), TokenMetadata)
-import Position (Position)
+import Protocol.Token (TokenType(..))
 import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
 
 --------------------------------------------------------------------------------
 -- UI State Types
 --------------------------------------------------------------------------------
 
+-- UI-only state (form inputs, display preferences, etc.)
 type UIState =
-  { api :: Maybe AppRuntime
-  , currentUser :: String
-  -- Position Creation
+  { -- Current user context
+    currentUser :: String
+  -- Position Creation Form
   , inputAmount :: Number
   , selectedAsset :: TokenType
   , collateralAsset :: TokenType
   , selectedTermType :: String  -- "spot", "hourly", "daily", "weekly"
-  -- Gateway
+  -- Gateway Form
   , showGateway :: Boolean
   , jitoSOLAmount :: Number
   , feelsSOLAmount :: Number
-  -- Wallet
-  , jitoSOLBalance :: Number
-  , feelsSOLBalance :: Number
-  -- Simulation
+  -- Simulation Form
   , simulationConfig :: SimulationConfig
   , simulationResults :: Maybe SimulationResults
   , simulationRunning :: Boolean
-  -- Chart data
-  , priceHistory :: Array 
-      { timestamp :: Number
-      , block :: Int  -- Block number
-      , price :: Number  -- JitoSOL/FeelsSOL price
-      , polValue :: Number  -- POL floor for FeelsSOL
-      , tokens :: Array 
-          { ticker :: String
-          , price :: Number  -- Token/FeelsSOL price
-          , polFloor :: Number  -- POL floor for this token
-          , live :: Boolean  -- Whether token is live
-          }
-      }
-  -- Cached data from protocol
-  , userTokens :: Array TokenMetadata
-  , userPositions :: Array Position
-  , lenderOffers :: Array Position
-  , protocolStats :: Maybe 
-      { totalValueLocked :: Number
-      , totalUsers :: Int
-      , activePositions :: Int
-      , liveTokens :: Int
-      , totalLenderOffers :: Int
-      , polBalance :: Number
-      , feelsSOLSupply :: Number
-      , jitoSOLLocked :: Number
-      }
-  , loading :: Boolean
-  , error :: Maybe String
-  -- Token Creation
+  -- Token Creation Form
   , tokenTicker :: String
   , tokenName :: String
   , tokenValidationErrors :: Array String
-  -- Launch System
+  -- Launch System Form
   , selectedLaunchId :: Maybe String
   , launchBidAmount :: Number
   , launchPriorityFeePercent :: Number
   , activeLaunches :: Array LaunchInfo
+  -- UI State
+  , loading :: Boolean
+  , error :: Maybe String
   }
 
 -- Launch info type
@@ -126,36 +96,32 @@ data Action
 
 initialUIState :: UIState
 initialUIState =
-  { api: Nothing
-  , currentUser: "main-user"
-  -- Position Creation
+  { currentUser: "main-user"
+  -- Position Creation Form
   , inputAmount: 100.0
   , selectedAsset: FeelsSOL
   , collateralAsset: JitoSOL
   , selectedTermType: "spot"
+  -- Gateway Form
   , showGateway: true
   , jitoSOLAmount: 100.0
   , feelsSOLAmount: 100.0
-  , jitoSOLBalance: 5000.0
-  , feelsSOLBalance: 5000.0
+  -- Simulation Form
   , simulationConfig: defaultSimulationConfig
   , simulationResults: Nothing
   , simulationRunning: false
-  , priceHistory: []
-  , userTokens: []
-  , userPositions: []
-  , lenderOffers: []
-  , protocolStats: Nothing
-  , loading: true
-  , error: Nothing
+  -- Token Creation Form
   , tokenTicker: ""
   , tokenName: ""
   , tokenValidationErrors: []
-  -- Launch System
+  -- Launch System Form
   , selectedLaunchId: Nothing
   , launchBidAmount: 100.0
   , launchPriorityFeePercent: 10.0
   , activeLaunches: []
+  -- UI State
+  , loading: true
+  , error: Nothing
   }
 
 -- Default simulation config

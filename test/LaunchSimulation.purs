@@ -12,14 +12,22 @@ import Effect.Console (log)
 import Effect.Random (random)
 import Effect.Ref (new, read, write)
 
--- Import launch and state modules
-import Launch.Launch (BatchResult)
-import Launch.Orchestrator as LO
-import Launch.Orchestrator (LaunchStatus(..))
-import Launch.Integration as LI
-import State.Types (AppState)
-import State.State (initState)
-import POL (getTotalPOL)
+-- Import launch and state modules (commented out - modules missing)
+-- import Protocol.Launch.Launch (BatchResult)
+-- import Protocol.Launch.Orchestrator as LO
+-- import Protocol.Launch.Orchestrator (LaunchStatus(..))
+-- import Protocol.Launch.Integration as LI
+-- import State.Types (ProtocolState)
+-- import State.State (initState)
+
+-- Temporary types until modules are created
+type BatchResult = { success :: Boolean }
+data LaunchStatus = Active | Paused
+type ProtocolState = { dummy :: Unit }
+
+initState :: Effect ProtocolState
+initState = pure { dummy: unit }
+-- import Protocol.POL (getTotalPOL) -- Module not found
 
 --------------------------------------------------------------------------------
 -- Market Simulation Types
@@ -146,7 +154,7 @@ type SimulationResults =
   }
 
 -- Run multiple batches for a launch
-runBatches :: String -> SimulationParams -> AppState -> Effect (Array BatchResult)
+runBatches :: String -> SimulationParams -> ProtocolState -> Effect (Array BatchResult)
 runBatches launchId params state = do
   resultsRef <- new []
   

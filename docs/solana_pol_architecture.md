@@ -1,4 +1,4 @@
-# Solana POL Architecture - Clean Separation
+# Solana POL Architecture
 
 ## Design Principles
 1. **Instant POL reactions stay on-chain** - Critical market events trigger immediate POL deployment

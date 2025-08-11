@@ -19,8 +19,10 @@ import Effect.Console (log)
 import Effect.Ref (new, read)
 
 -- Import API and data types
-import State.State as A
-import State.State (AppRuntime, AppResult(..), initState, executeCommand, executeQuery)
+import UI.ProtocolState as A
+import UI.ProtocolState (AppRuntime, QueryResult(..), CommandResult(..), initState, ProtocolCommand(..), IndexerQuery(..))
+import UI.Commands (executeCommand)
+import UI.Queries (executeQuery)
 import FFI (setTimeout, getElementById, getValue, triggerUIAction, registerRemoteAction)
 import Data.Nullable (toMaybe)
 import Simulation.Sim (SimulationResults)

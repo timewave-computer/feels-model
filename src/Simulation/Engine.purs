@@ -17,13 +17,13 @@ import Effect (Effect)
 import Effect.Console (log)
 
 -- Core system imports
-import Token (TokenType(..))
-import PoolRegistry (PoolRegistry, initPoolRegistry)
-import Gateway (GatewayState, initGateway)
-import Accounts (initAccountRegistry)
+import Protocol.Token (TokenType(..))
+import UI.PoolRegistry (PoolRegistry, initPoolRegistry)
+import Protocol.Gateway (GatewayState, initGateway)
+import UI.AccountRegistry (initAccountRegistry)
 import Utils (formatAmount)
-import POL (initPOL)
-import Oracle (Oracle, initOracle, takeMarketSnapshot)
+import Protocol.POL (initPOL)
+import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot)
 
 -- Import from our new modules
 import Simulation.Agents (SimulatedAccount, generateAccounts)
@@ -70,7 +70,7 @@ initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   -- Create account registry for simulation
   accountRegistry <- initAccountRegistry
   -- Initialize gateway with proper parameters (simplified for simulation)
-  gateway <- initGateway priceOracle 0.001 0.002 accountRegistry pol
+  gateway <- initGateway priceOracle 0.001 0.002
   
   pure { accounts: accounts
        , poolRegistry: existingPoolRegistry

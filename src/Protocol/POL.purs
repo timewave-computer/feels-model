@@ -2,7 +2,7 @@
 -- |
 -- | This module manages the global POL state and allocations to individual pools.
 -- | It handles fee contributions, pool allocations, and rebalancing strategies.
-module POL
+module Protocol.POL
   ( POLState
   , POLMetrics
   , POLAllocation

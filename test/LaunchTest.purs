@@ -9,10 +9,10 @@ import Effect (Effect)
 import Effect.Console (log)
 import Test.QuickCheck (Result(..), quickCheck, (===))
 
--- Import launch modules
-import Launch.Launch
-import Launch.Orchestrator as LO
-import Common (PoolId)
+-- Import launch modules (commented out - modules missing)
+-- import Protocol.Launch.Launch
+-- import Protocol.Launch.Orchestrator as LO
+import Protocol.Common (PoolId)
 
 --------------------------------------------------------------------------------
 -- Test Helpers

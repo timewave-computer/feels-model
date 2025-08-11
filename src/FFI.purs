@@ -19,7 +19,7 @@ foreign import volatility :: forall a. a -> a -> Effect Number
 -- Utility functions
 foreign import currentTime :: Effect Number
 foreign import generateId :: Number -> Int
-foreign import toNumber :: Int -> Number
+foreign import toNumber :: Int -> Number  -- Use Data.Int.toNumber instead
 
 -- DOM manipulation
 foreign import setInnerHTML :: Element -> String -> Effect Unit
@@ -27,7 +27,7 @@ foreign import addEventListener :: Element -> String -> Effect Unit -> Effect Un
 foreign import removeAllEventListeners :: Element -> String -> Effect Unit
 foreign import getValue :: Element -> Effect String
 foreign import parseFloat :: String -> Number
-foreign import floor :: Number -> Int
+foreign import floor :: Number -> Int     -- Use Data.Int.floor instead
 -- Note: In actual usage, these are typed specifically in each module
 foreign import setGlobalState :: forall a. a -> Effect Unit
 foreign import getGlobalState :: forall a. Effect a
@@ -36,7 +36,9 @@ foreign import setTimeout :: Effect Unit -> Int -> Effect Unit
 -- Application initialization
 foreign import onDOMReady :: Effect Unit -> Effect Unit
 
--- Math functions
+-- Math functions (consider replacing with Math module equivalents)
+-- sqrt, sin, cos, log, exp are available in Math module
+-- floor available in Data.Int, toNumber available in Data.Int
 foreign import log10 :: Number -> Number
 foreign import sqrt :: Number -> Number
 foreign import sin :: Number -> Number

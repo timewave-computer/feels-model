@@ -2,7 +2,7 @@
 -- |
 -- | This module provides basic price tracking functionality
 -- | until the full oracle system is implemented.
-module Oracle
+module Protocol.Oracle
   ( Oracle
   , PricePoint
   , TWAPWindow(..)

@@ -5,7 +5,7 @@
 -- | - Term Commitment: Spot, Hourly, Daily, or Weekly synchronized terms
 -- | - Share-based accounting within tranches
 -- | - No liquidations - positions adjust in value only
-module Position
+module Protocol.Position
   ( -- Position types
     Position
   , Tranche(..)
@@ -46,8 +46,8 @@ import Data.Maybe (Maybe(..))
 import Data.Int (toNumber, round)
 import Data.Array as Array
 import Data.Array ((:), head)
-import Token (TokenType)
-import Common (PoolId, PositionId, BlockNumber, ShareAmount)
+import Protocol.Token (TokenType)
+import Protocol.Common (PoolId, PositionId, BlockNumber, ShareAmount)
 
 --------------------------------------------------------------------------------
 -- Core Types

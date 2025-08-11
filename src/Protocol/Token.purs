@@ -3,7 +3,7 @@
 -- manages token metadata, creation, and validation. All tokens in the system can serve
 -- as either lending assets or collateral in the Feels protocol.
 -- Handles token launching mechanics and price discovery for user-created assets.
-module Token 
+module Protocol.Token 
   ( -- Newtypes
     FeelsSOLAmount(..)
   , unwrapFeelsSOL
@@ -13,31 +13,20 @@ module Token
   , TokenMetadata
   , TokenCreationParams
   , ValidationResult
-  , TokenRegistry
   -- Functions
   , createToken
-  , createAndRegisterToken
   , isValidTicker
   , isValidPair
   , isTradeable
-  , getTokenByTicker
   , validate
   , validateTokenTicker
-  , initTokenRegistry
-  , registerToken
-  , getTokenFromRegistry
-  , getTokenByType
-  , getAllTokens
-  , getSystemTokens
   ) where
 
 import Prelude
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..), isRight)
-import Data.Array (filter, (:), find)
-import Data.String as String
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write, modify_)
+import Data.String as String
 import FFI (currentTime, generateId)
 
 --------------------------------------------------------------------------------
@@ -96,6 +85,7 @@ type TokenMetadata =
   , totalSupply :: Number            -- Total supply of token
   }
 
+
 -- Token creation parameters
 type TokenCreationParams =
   { ticker :: String      -- 3-10 character ticker symbol
@@ -123,12 +113,6 @@ createToken params = do
     , totalSupply: 1000000.0    -- Default 1M supply
     }
 
--- Create a token and automatically register it in the global registry
-createAndRegisterToken :: TokenRegistry -> TokenCreationParams -> Effect TokenMetadata
-createAndRegisterToken registry params = do
-  token <- createToken params
-  registerToken registry token
-  pure token
 
 --------------------------------------------------------------------------------
 -- Token Validation Functions
@@ -170,68 +154,3 @@ isValidPair _ _ = false  -- No direct token ↔ token or jitoSOL operations
 -- Check if a token is tradeable (live)
 isTradeable :: TokenMetadata -> Boolean
 isTradeable token = token.live
-
--- Get token by ticker from registry
-getTokenByTicker :: String -> Array TokenMetadata -> Maybe TokenMetadata
-getTokenByTicker ticker tokens = 
-  case filter (\t -> t.ticker == ticker) tokens of
-    [token] -> Just token
-    _ -> Nothing
-
-
---------------------------------------------------------------------------------
--- Global Token Registry
---------------------------------------------------------------------------------
-
--- Global token registry type
-type TokenRegistry = Ref (Array TokenMetadata)
-
--- Initialize token registry with system tokens
-initTokenRegistry :: Effect TokenRegistry
-initTokenRegistry = do
-  let systemTokens = getSystemTokens
-  new systemTokens
-
--- Get built-in system tokens
-getSystemTokens :: Array TokenMetadata
-getSystemTokens = 
-  [ { id: 1
-    , ticker: "JitoSOL"
-    , name: "Jito Staked SOL"
-    , tokenType: JitoSOL
-    , totalSupply: 1000000.0
-    , creator: "system"
-    , createdAt: 0.0
-    , live: true
-    }
-  , { id: 2
-    , ticker: "FeelsSOL"
-    , name: "Feels SOL"
-    , tokenType: FeelsSOL
-    , totalSupply: 1000000.0
-    , creator: "system"
-    , createdAt: 0.0
-    , live: true
-    }
-  ]
-
--- Register a new token in the global registry
-registerToken :: TokenRegistry -> TokenMetadata -> Effect Unit
-registerToken registry token = do
-  modify_ (\tokens -> token : tokens) registry
-
--- Get token from registry by ticker
-getTokenFromRegistry :: TokenRegistry -> String -> Effect (Maybe TokenMetadata)
-getTokenFromRegistry registry ticker = do
-  tokens <- read registry
-  pure $ getTokenByTicker ticker tokens
-
--- Get token from registry by TokenType
-getTokenByType :: TokenRegistry -> TokenType -> Effect (Maybe TokenMetadata)
-getTokenByType registry tokenType = do
-  tokens <- read registry
-  pure $ find (\t -> t.tokenType == tokenType) tokens
-
--- Get all tokens from registry
-getAllTokens :: TokenRegistry -> Effect (Array TokenMetadata)
-getAllTokens registry = read registry

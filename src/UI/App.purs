@@ -22,19 +22,20 @@ import Data.Maybe (Maybe(..))
 import UI.State (UIState, Action(..), initialUIState)
 import UI.Actions (handleAction)
 import UI.Components (renderSystemPanel, renderGatewayPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel)
+import UI.ProtocolState (AppRuntime, initState)
 
 --------------------------------------------------------------------------------
 -- Main Component Definition
 --------------------------------------------------------------------------------
 
--- Component definition
-component :: forall q i o m. MonadAff m => H.Component q i o m
-component =
+-- Component definition with AppRuntime integration
+component :: forall q i o m. MonadAff m => AppRuntime -> H.Component q i o m
+component appRuntime =
   H.mkComponent
     { initialState: \_ -> initialUIState
-    , render
+    , render: render appRuntime
     , eval: H.mkEval $ H.defaultEval
-        { handleAction = handleAction
+        { handleAction = handleAction appRuntime
         , initialize = Just Initialize
         }
     }
@@ -44,8 +45,8 @@ component =
 --------------------------------------------------------------------------------
 
 -- Main render function with layout structure
-render :: forall m. UIState -> H.ComponentHTML Action () m
-render state =
+render :: forall m. AppRuntime -> UIState -> H.ComponentHTML Action () m
+render appRuntime state =
   HH.div
     [ HP.class_ (HH.ClassName "app") ]
     [ -- Main content
@@ -58,18 +59,18 @@ render state =
         [ -- Left column
           HH.div
             [ HP.class_ (HH.ClassName "left-column") ]
-            [ renderWalletPanel state
-            , renderGatewayPanel state
-            , renderTokenCreatorPanel state
-            , renderUserTokensPanel state.userTokens
-            , renderCreatePositionPanel state
-            , renderPositionsPanel state.userPositions
-            , renderSystemPanel state
+            [ renderWalletPanel appRuntime state
+            , renderGatewayPanel appRuntime state
+            , renderTokenCreatorPanel appRuntime state
+            , renderUserTokensPanel appRuntime
+            , renderCreatePositionPanel appRuntime state
+            , renderPositionsPanel appRuntime
+            , renderSystemPanel appRuntime state
             ]
         , -- Right column
           HH.div
             [ HP.class_ (HH.ClassName "right-column") ]
-            [ renderLoanBookPanel state.lenderOffers
+            [ renderLoanBookPanel appRuntime
             ]
         ]
     ]
@@ -83,12 +84,20 @@ renderUI :: Effect Unit
 renderUI = do
   log "Starting Feels Protocol UI..."
   
+  -- Initialize application state
+  appRuntime <- H.liftEffect initState
+  
   HA.runHalogenAff do
     appElement <- selectElement (QuerySelector "#app")
     case appElement of
       Nothing -> do
         H.liftEffect $ log "Could not find #app element"
-        HA.awaitBody >>= runUI component unit
+        HA.awaitBody >>= runUI (component appRuntime) unit
       Just element -> do
         H.liftEffect $ log "Mounting UI component"
-        runUI component unit element
+        runUI (component appRuntime) unit element
+
+  where
+    initState = do
+      log "Initializing protocol state..."
+      initState

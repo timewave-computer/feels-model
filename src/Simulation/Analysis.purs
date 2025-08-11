@@ -17,8 +17,8 @@ import FFI (sqrt) as FFI
 -- Import from our new modules
 import Simulation.Market (SimulationConfig)
 import Simulation.Actions (TradingAction(..))
-import PoolRegistry (PoolRegistry)
-import PoolRegistry as PR
+import UI.PoolRegistry (PoolRegistry)
+import UI.PoolRegistry as PR
 
 -- Import the minimal types we need (these will come from Engine in the final version)
 -- This is a placeholder - in a real modular system, we'd have a shared types module

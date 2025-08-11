@@ -2,7 +2,7 @@
 -- |
 -- | In the pool-centric system, incentives are handled through
 -- | tranche returns and pool fees, not lending rates.
-module Incentives
+module Protocol.Incentives
   ( MarketDynamics
   , DynamicsConfig
   , RateComponents
@@ -14,9 +14,9 @@ module Incentives
 import Prelude
 import Effect (Effect)
 import Effect.Ref (Ref, new, read)
-import Oracle (Oracle, takeMarketSnapshot)
-import POL (POLState)
-import Position (TermCommitment, spotTerm)
+import Protocol.Oracle (Oracle, takeMarketSnapshot)
+import Protocol.POL (POLState)
+import Protocol.Position (TermCommitment, spotTerm)
 
 --------------------------------------------------------------------------------
 -- Types

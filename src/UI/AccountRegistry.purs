@@ -1,11 +1,7 @@
--- Account management for the Feels Protocol.
--- Manages two types of accounts:
--- 1. ChainAccount: Holds JitoSOL on behalf of users (external to protocol)
--- 2. FeelsAccount: Holds FeelsSOL and Feels tokens within the protocol
---
--- Flow: User deposits JitoSOL from ChainAccount → Gateway converts to FeelsSOL → FeelsAccount
--- Exit: FeelsAccount → Gateway converts to JitoSOL → ChainAccount
-module Accounts
+-- | Account registry management for the UI.
+-- | Manages local tracking of FeelsAccounts and ChainAccounts.
+-- | In the actual Solana implementation, accounts would be PDAs.
+module UI.AccountRegistry
   ( AccountRegistry
   , FeelsAccount
   , ChainAccount
@@ -32,7 +28,7 @@ import Data.Map as Map
 import Data.Array as Array
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
-import Token (TokenType(..))
+import Protocol.Token (TokenType(..))
 import Data.Foldable (sum)
 import Data.Tuple (Tuple(..))
 
@@ -101,13 +97,11 @@ getFeelsAccountBalance registry owner token = do
 
 -- Update balance of a specific token in FeelsAccount
 updateFeelsAccountBalance :: AccountRegistry -> String -> TokenType -> Number -> Effect (Either String Unit)
-updateFeelsAccountBalance registry owner token delta = do
+updateFeelsAccountBalance registry owner token newBalance = do
   account <- getOrCreateFeelsAccount registry owner
-  let currentBalance = fromMaybe 0.0 (Map.lookup token account.balances)
-      newBalance = currentBalance + delta
   
   if newBalance < 0.0
-    then pure $ Left $ "Insufficient balance: " <> owner <> " has " <> show currentBalance <> " " <> show token
+    then pure $ Left $ "Balance cannot be negative: " <> show newBalance
     else do
       let updatedBalances = if newBalance == 0.0
                            then Map.delete token account.balances
@@ -123,14 +117,15 @@ transferBetweenFeelsAccounts registry fromUser toUser token amount = do
   if amount <= 0.0
     then pure $ Left "Transfer amount must be positive"
     else do
-      -- Check and deduct from sender
-      deductResult <- updateFeelsAccountBalance registry fromUser token (-amount)
-      case deductResult of
-        Left err -> pure $ Left err
-        Right _ -> do
-          -- Add to receiver
-          _ <- updateFeelsAccountBalance registry toUser token amount
-          pure $ Right unit
+      -- Check sender balance
+      fromBalance <- getFeelsAccountBalance registry fromUser token
+      if fromBalance < amount
+        then pure $ Left $ "Insufficient balance: " <> fromUser <> " has " <> show fromBalance <> " " <> show token
+        else do
+          -- Update balances
+          _ <- updateFeelsAccountBalance registry fromUser token (fromBalance - amount)
+          toBalance <- getFeelsAccountBalance registry toUser token
+          updateFeelsAccountBalance registry toUser token (toBalance + amount)
 
 -- Get all token balances for a user's FeelsAccount
 getAllFeelsAccountBalances :: AccountRegistry -> String -> Effect (Array TokenBalance)
@@ -199,7 +194,8 @@ depositFromChain registry owner amount = do
         Left err -> pure $ Left err
         Right _ -> do
           -- Add FeelsSOL to FeelsAccount (1:1 conversion for simplicity)
-          updateFeelsAccountBalance registry owner FeelsSOL amount
+          currentBalance <- getFeelsAccountBalance registry owner FeelsSOL
+          updateFeelsAccountBalance registry owner FeelsSOL (currentBalance + amount)
 
 -- Withdraw FeelsSOL from FeelsAccount to get JitoSOL in ChainAccount
 -- This simulates the gateway exit
@@ -208,21 +204,11 @@ withdrawToChain registry owner amount = do
   if amount <= 0.0
     then pure $ Left "Withdrawal amount must be positive"
     else do
-      -- Deduct FeelsSOL from FeelsAccount
-      deductResult <- updateFeelsAccountBalance registry owner FeelsSOL (-amount)
-      case deductResult of
-        Left err -> pure $ Left err
-        Right _ -> do
-          -- Add JitoSOL to ChainAccount (1:1 conversion for simplicity)
+      -- Check FeelsSOL balance
+      feelsBalance <- getFeelsAccountBalance registry owner FeelsSOL
+      if feelsBalance < amount
+        then pure $ Left $ "Insufficient FeelsSOL balance: " <> owner <> " has " <> show feelsBalance
+        else do
+          -- Update balances
+          _ <- updateFeelsAccountBalance registry owner FeelsSOL (feelsBalance - amount)
           updateChainAccountBalance registry owner amount
-
---------------------------------------------------------------------------------
--- Position Management (for FeelsAccount) - Commented out as unused
---------------------------------------------------------------------------------
-
--- Functions for position management are available but not currently exported
--- Uncomment and export these functions when needed:
-
--- addPositionToAccount :: AccountRegistry -> String -> Int -> Effect Unit
--- removePositionFromAccount :: AccountRegistry -> String -> Int -> Effect Unit  
--- getAccountPositions :: AccountRegistry -> String -> Effect (Array Int)

@@ -1,6 +1,6 @@
--- | Token-related actions for the Feels Protocol.
--- | This module extracts token creation and management logic from State.
-module Actions.TokenActions
+-- | Token-related UI actions.
+-- | This module orchestrates token creation and management for the frontend.
+module UI.Actions.TokenActions
   ( createToken
   , validateTokenParams
   ) where
@@ -12,9 +12,10 @@ import Data.Array (find)
 import Effect (Effect)
 
 -- Import types
-import State.Types (AppState)
-import Token (TokenMetadata, TokenRegistry, createAndRegisterToken, getAllTokens)
-import Errors (ProtocolError(..))
+import UI.ProtocolState (ProtocolState)
+import Protocol.Token (TokenMetadata)
+import UI.TokenRegistry (TokenRegistry, createAndRegisterToken, getAllTokens)
+import Protocol.Errors (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Token Creation
@@ -38,7 +39,7 @@ validateTokenParams ticker name tokenRegistry = do
           Nothing -> pure $ Right unit
 
 -- | Create a new token and set up initial POL
-createToken :: String -> String -> String -> AppState -> Effect (Either ProtocolError TokenMetadata)
+createToken :: String -> String -> String -> ProtocolState -> Effect (Either ProtocolError TokenMetadata)
 createToken creator ticker name state = do
   -- Validate parameters
   validationResult <- validateTokenParams ticker name state.tokenRegistry

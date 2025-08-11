@@ -22,10 +22,12 @@ import UI.State (UIState, Action(..))
 import UI.Integration (initializeRemoteActions, refreshProtocolData, processSimulationResults)
 
 -- Import API and data types
-import State.State as A
-import State.State (AppResult(..), initState, executeCommand, executeQuery)
-import Token (TokenType(..), TokenMetadata)
-import Position (spotTerm, hourlyTerm, dailyTerm, weeklyTerm)
+import UI.ProtocolState as A
+import UI.ProtocolState (QueryResult(..), CommandResult(..), initState, ProtocolCommand(..), IndexerQuery(..))
+import UI.Commands (executeCommand)
+import UI.Queries (executeQuery)
+import Protocol.Token (TokenType(..), TokenMetadata)
+import Protocol.Position (spotTerm, hourlyTerm, dailyTerm, weeklyTerm)
 import FFI (setTimeout, checkAndInitializeChart)
 import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
 

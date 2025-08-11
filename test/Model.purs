@@ -7,8 +7,8 @@ module Test.Model where
 import Prelude
 
 import Data.Int as Int
-import Token (TokenType(..), TokenAmount)
-import Position (Position, TermCommitment(..), Tranche(..), spotTerm)
+import Protocol.Token (TokenType(..), TokenAmount)
+import Protocol.Position (Position, TermCommitment(..), Tranche(..), spotTerm)
 import Data.Array (elem)
 import Data.Number (abs)
 import Data.Array.NonEmpty as NEA

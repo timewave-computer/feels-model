@@ -1,8 +1,7 @@
--- | PoolRegistry Module - Global registry for all pools and positions
--- |
--- | This module provides centralized management of pools and enables
--- | cross-pool queries for positions, user portfolios, and system metrics.
-module PoolRegistry
+-- | Pool registry management for the UI.
+-- | Provides centralized management of pools and positions.
+-- | In Solana, pools and positions would be Program Derived Addresses (PDAs).
+module UI.PoolRegistry
   ( PoolRegistry
   , initPoolRegistry
   , addPool
@@ -28,9 +27,9 @@ import Data.Maybe (Maybe(..))
 import Data.Array ((:), filter, concat, mapMaybe, fromFoldable)
 import Data.Array as Array
 import Data.Tuple (Tuple(..))
-import Pool (PoolState)
-import Position (Position)
-import Common (PoolId, PositionId)
+import Protocol.Pool (PoolState)
+import Protocol.Position (Position)
+import Protocol.Common (PoolId, PositionId)
 
 --------------------------------------------------------------------------------
 -- Types

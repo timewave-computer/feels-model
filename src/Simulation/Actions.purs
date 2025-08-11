@@ -18,8 +18,8 @@ import Data.String as String
 import Data.Enum (toEnum)
 
 -- Core system imports
-import Token (TokenType(..))
-import Position (TermCommitment(..), weeklyTerm)
+import Protocol.Token (TokenType(..))
+import Protocol.Position (TermCommitment(..), weeklyTerm)
 import Utils (formatAmount)
 
 -- Import from our new modules
@@ -27,7 +27,7 @@ import Simulation.Agents (AccountProfile(..), SimulatedAccount)
 import Simulation.Market (SimulationConfig, MarketScenario(..), generateMarketScenario)
 
 -- Import needed types that will be in Engine (for now we'll define minimal versions)
-import Oracle (Oracle, takeMarketSnapshot)
+import Protocol.Oracle (Oracle, takeMarketSnapshot)
 
 -- Minimal simulation state type for actions (Engine will have the full version)
 type ActionSimulationState =
