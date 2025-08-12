@@ -119,7 +119,7 @@ runE2ESimulationTest = do
       initialState <- initSimulation config
       
       -- Record initial POL
-      initialPOL <- getTotalPOL initialState.gateway.polState
+      initialPOL <- getTotalPOL initialState.feelsSOL.polState
       log $ "Initial POL: " <> formatAmount initialPOL
       
       -- Phase 3: Run simulation
@@ -127,7 +127,7 @@ runE2ESimulationTest = do
       finalState <- executeSimulation config initialState
       
       -- Record final POL
-      finalPOL <- getTotalPOL finalState.gateway.polState
+      finalPOL <- getTotalPOL finalState.feelsSOL.polState
       log $ "Final POL: " <> formatAmount finalPOL
       
       -- Phase 4: Calculate metrics

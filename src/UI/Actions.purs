@@ -152,9 +152,9 @@ handleAction = case _ of
   CreateTokenUI -> do
     handleCreateToken
 
-  -- Gateway Actions
-  ToggleGateway -> do
-    H.modify_ \s -> s { showGateway = not s.showGateway }
+  -- FeelsSOL Actions
+  ToggleFeelsSOL -> do
+    H.modify_ \s -> s { showFeelsSOL = not s.showFeelsSOL }
 
   UpdateJitoSOLAmount amount -> do
     H.modify_ _ { jitoSOLAmount = amount }
@@ -162,11 +162,11 @@ handleAction = case _ of
   UpdateFeelsSOLAmount amount -> do
     H.modify_ _ { feelsSOLAmount = amount }
 
-  EnterGateway -> do
-    handleEnterGateway
+  EnterFeelsSOL -> do
+    handleEnterFeelsSOL
 
-  ExitGateway -> do
-    handleExitGateway
+  ExitFeelsSOL -> do
+    handleExitFeelsSOL
 
   -- Simulation Actions
   UpdateSimulationConfig updater -> do
@@ -276,43 +276,43 @@ handleCreateToken = do
           H.modify_ _ { error = Just "Please fix validation errors before creating token" }
 
 --------------------------------------------------------------------------------
--- Gateway Handlers
+-- FeelsSOL Handlers
 --------------------------------------------------------------------------------
 
-handleEnterGateway :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
-handleEnterGateway = do
+handleEnterFeelsSOL :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
+handleEnterFeelsSOL = do
   state <- H.get
   case state.api of
     Nothing -> pure unit
     Just protocol -> do
       result <- H.liftEffect $ executeCommand protocol
-        (A.EnterGateway state.currentUser state.jitoSOLAmount)
+        (A.EnterFeelsSOL state.currentUser state.jitoSOLAmount)
       
       case result of
-        Right (GatewayEntered info) -> do
-          H.liftEffect $ log $ "Entered gateway: " <> show info.feelsSOLMinted <> " FeelsSOL minted"
+        Right (FeelsSOLMinted info) -> do
+          H.liftEffect $ log $ "Entered FeelsSOL: " <> show info.feelsSOLMinted <> " FeelsSOL minted"
           handleAction RefreshData
         Right _ ->
-          H.modify_ _ { error = Just "Unexpected result from gateway entry" }
+          H.modify_ _ { error = Just "Unexpected result from FeelsSOL entry" }
         Left err ->
           H.modify_ _ { error = Just $ show err }
 
-handleExitGateway :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
-handleExitGateway = do
+handleExitFeelsSOL :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
+handleExitFeelsSOL = do
   state <- H.get
   case state.api of
     Nothing -> pure unit
     Just protocol -> do
       -- For exit, we use the input amount as FeelsSOL amount to convert
       result <- H.liftEffect $ executeCommand protocol
-        (A.ExitGateway state.currentUser state.feelsSOLAmount)
+        (A.ExitFeelsSOL state.currentUser state.feelsSOLAmount)
       
       case result of
-        Right (GatewayExited info) -> do
-          H.liftEffect $ log $ "Exited gateway: " <> show info.jitoSOLReceived <> " JitoSOL received"
+        Right (FeelsSOLBurned info) -> do
+          H.liftEffect $ log $ "Exited FeelsSOL: " <> show info.jitoSOLReceived <> " JitoSOL received"
           handleAction RefreshData
         Right _ ->
-          H.modify_ _ { error = Just "Unexpected result from gateway exit" }
+          H.modify_ _ { error = Just "Unexpected result from FeelsSOL exit" }
         Left err ->
           H.modify_ _ { error = Just $ show err }
 

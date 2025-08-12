@@ -2,7 +2,7 @@
 -- Contains all render functions for different panels and UI elements
 module UI.Components
   ( renderSystemPanel
-  , renderGatewayPanel
+  , renderFeelsSOLPanel
   , renderWalletPanel
   , renderTokenCreatorPanel
   , renderUserTokensPanel
@@ -62,15 +62,15 @@ renderSystemPanel state =
         ]
 
 --------------------------------------------------------------------------------
--- Gateway Panel Components
+-- FeelsSOL Panel Components
 --------------------------------------------------------------------------------
 
--- Gateway panel (always visible)
-renderGatewayPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderGatewayPanel state =
+-- FeelsSOL minting/burning panel (always visible)
+renderFeelsSOLPanel :: forall m. UIState -> H.ComponentHTML Action () m
+renderFeelsSOLPanel state =
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Gateway" ]
+    [ HH.h2_ [ HH.text "FeelsSOL Minting" ]
     , HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
         [ HH.label [ HP.for "jitosol-amount" ] [ HH.text "JitoSOL Amount (for entering):" ]
@@ -96,14 +96,14 @@ renderGatewayPanel state =
             ]
         ]
     , HH.div
-        [ HP.class_ (HH.ClassName "gateway-actions") ]
+        [ HP.class_ (HH.ClassName "feelsSOL-actions") ]
         [ HH.button
-            [ HE.onClick \_ -> EnterGateway
+            [ HE.onClick \_ -> EnterFeelsSOL
             , HP.class_ (HH.ClassName "btn btn--primary")
             ]
             [ HH.text "JitoSOL →", HH.br_, HH.text "FeelsSOL" ]
         , HH.button
-            [ HE.onClick \_ -> ExitGateway
+            [ HE.onClick \_ -> ExitFeelsSOL
             , HP.class_ (HH.ClassName "btn btn--primary")
             ]
             [ HH.text "FeelsSOL →", HH.br_, HH.text "JitoSOL" ]

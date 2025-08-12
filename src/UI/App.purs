@@ -21,7 +21,7 @@ import Data.Maybe (Maybe(..))
 -- Import UI modules
 import UI.State (UIState, Action(..), initialUIState)
 import UI.Actions (handleAction)
-import UI.Components (renderSystemPanel, renderGatewayPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel)
+import UI.Components (renderSystemPanel, renderFeelsSOLPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel)
 import UI.ProtocolState (AppRuntime, initState)
 
 --------------------------------------------------------------------------------
@@ -60,7 +60,7 @@ render appRuntime state =
           HH.div
             [ HP.class_ (HH.ClassName "left-column") ]
             [ renderWalletPanel appRuntime state
-            , renderGatewayPanel appRuntime state
+            , renderFeelsSOLPanel appRuntime state
             , renderTokenCreatorPanel appRuntime state
             , renderUserTokensPanel appRuntime
             , renderCreatePositionPanel appRuntime state

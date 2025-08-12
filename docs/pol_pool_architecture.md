@@ -21,7 +21,7 @@ type POLState = Ref
 ```
 
 **Key Responsibilities:**
-- Receives contributions from protocol fees (Gateway fees, trading fees, etc.)
+- Receives contributions from protocol fees (FeelsSOL minting/burning fees, trading fees, etc.)
 - Manages allocation of POL to individual pools
 - Tracks performance and rebalances allocations
 - Maintains a reserve of unallocated POL for new opportunities
@@ -55,7 +55,7 @@ Protocol Fees → Global POL → Pool Allocations → Liquidity Positions
                     └─────── Rebalancing ───────────┘
 ```
 
-1. **Fee Collection**: Gateway fees, trading fees, and staking rewards flow to global POL
+1. **Fee Collection**: FeelsSOL minting/burning fees, trading fees, and staking rewards flow to global POL
 2. **Allocation**: POLManager allocates POL to pools based on strategy (volume, TVL, performance)
 3. **Deployment**: Pools deploy their allocated POL into liquidity positions
 4. **Rebalancing**: Underperforming pools can have POL withdrawn and reallocated
@@ -81,7 +81,7 @@ data AllocationStrategy
 ## Example Usage
 
 ```purescript
--- Gateway contributes fees to global POL
+-- FeelsSOL system contributes fees to global POL
 contributeToTokenPOL polState JitoSOL feeAmount
 
 -- Allocate POL to a high-performing pool

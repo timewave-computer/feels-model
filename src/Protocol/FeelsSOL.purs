@@ -1,21 +1,18 @@
--- | Gateway module for entering and exiting the Feels Protocol.
+-- | FeelsSOL module for managing the synthetic SOL token.
 -- | This module manages the conversion between JitoSOL and FeelsSOL,
 -- | including synthetic asset creation and oracle-driven pricing.
-module Protocol.Gateway
-  ( GatewayState
-  , SyntheticSOLState
+module Protocol.FeelsSOL
+  ( FeelsSOLState
   , TransformResult
-  , TransformDirection(..)
   , OraclePrice
   , MintResult
   , BurnResult
-  , initGateway
+  , initFeelsSOL
   , enterSystem
   , exitSystem
   , getExchangeRate
   , getTotalLocked
   , getTotalMinted
-  -- High-level query functions
   , getOraclePrice
   , getTotalSupply
   , getSystemHealth
@@ -28,24 +25,11 @@ import Effect (Effect)
 import Effect.Ref (Ref, read, write, new)
 import Protocol.Token (TokenType(..), TokenAmount)
 import FFI (currentTime)
--- POL operations removed - now handled at UI layer
--- Account operations removed - now handled at UI layer
 import Protocol.Errors (ProtocolError(..))
 
 --------------------------------------------------------------------------------
--- Gateway Types
+-- FeelsSOL Types
 --------------------------------------------------------------------------------
-
--- Direction of transformation
-data TransformDirection
-  = Enter  -- JitoSOL -> FeelsSOL
-  | Exit   -- FeelsSOL -> JitoSOL
-
-derive instance eqTransformDirection :: Eq TransformDirection
-
-instance showTransformDirection :: Show TransformDirection where
-  show Enter = "Enter (JitoSOL -> FeelsSOL)"
-  show Exit = "Exit (FeelsSOL -> JitoSOL)"
 
 -- Oracle price information
 type OraclePrice =
@@ -72,49 +56,28 @@ type BurnResult =
 
 -- Result of a transformation
 type TransformResult =
-  { direction :: TransformDirection
-  , inputAmount :: TokenAmount
+  { inputAmount :: TokenAmount
   , outputAmount :: TokenAmount
   , exchangeRate :: Number
   , fee :: Number
   , timestamp :: Number
   }
 
--- Synthetic SOL state (previously separate module)
-type SyntheticSOLState =
-  { totalFeelsSOLSupply :: Ref Number    -- Total FeelsSOL in circulation
-  , totalJitoSOLBacking :: Ref Number    -- Total JitoSOL backing the synthetics
-  , priceOracle :: Effect Number         -- JitoSOL/SOL price oracle
-  , lastOracleUpdate :: Ref Number       -- Last oracle update timestamp
+-- FeelsSOL state for managing the synthetic SOL system
+type FeelsSOLState =
+  { totalFeelsSOLSupply :: Ref Number      -- Total FeelsSOL in circulation
+  , totalJitoSOLBacking :: Ref Number      -- Total JitoSOL backing the synthetics
+  , priceOracle :: Effect Number           -- JitoSOL/SOL price oracle
+  , lastOracleUpdate :: Ref Number         -- Last oracle update timestamp
   , cachedPrice :: Ref (Maybe OraclePrice) -- Cached oracle price
-  }
-
--- Gateway state for managing system entry/exit
-type GatewayState =
-  { syntheticSOL :: SyntheticSOLState    -- Synthetic FeelsSOL management
-  , entryFee :: Number                   -- Fee for entering (e.g., 0.001 = 0.1%)
-  , exitFee :: Number                    -- Fee for exiting (e.g., 0.002 = 0.2%)
-  , polAllocationRate :: Number          -- Portion of fees going to POL (e.g., 0.25 = 25%)
+  , entryFee :: Number                     -- Fee for entering (e.g., 0.001 = 0.1%)
+  , exitFee :: Number                      -- Fee for exiting (e.g., 0.002 = 0.2%)
+  , polAllocationRate :: Number            -- Portion of fees going to POL (e.g., 0.25 = 25%)
   }
 
 --------------------------------------------------------------------------------
--- Synthetic SOL Functions
+-- Helper Functions
 --------------------------------------------------------------------------------
-
--- Initialize synthetic SOL state
-initSyntheticSOL :: (Effect Number) -> Effect SyntheticSOLState
-initSyntheticSOL priceOracle = do
-  totalSupply <- new 0.0
-  totalBacking <- new 0.0
-  lastUpdate <- new 0.0
-  cachedPrice <- new Nothing
-  
-  pure { totalFeelsSOLSupply: totalSupply
-       , totalJitoSOLBacking: totalBacking
-       , priceOracle: priceOracle
-       , lastOracleUpdate: lastUpdate
-       , cachedPrice: cachedPrice
-       }
 
 -- Validate if a token can be used as collateral
 validateCollateral :: TokenType -> Either String Unit
@@ -123,7 +86,7 @@ validateCollateral FeelsSOL = Right unit  -- Allow FeelsSOL for composability
 validateCollateral token = Left $ "Unsupported collateral type: " <> show token
 
 -- Get oracle price with caching
-getOraclePrice :: SyntheticSOLState -> Effect OraclePrice
+getOraclePrice :: FeelsSOLState -> Effect OraclePrice
 getOraclePrice state = do
   cachedPrice <- read state.cachedPrice
   lastUpdate <- read state.lastOracleUpdate
@@ -148,7 +111,7 @@ getOraclePrice state = do
       pure newPrice
 
 -- Mint FeelsSOL against JitoSOL collateral
-mintFeelsSOL :: SyntheticSOLState -> Number -> Effect (Either String MintResult)
+mintFeelsSOL :: FeelsSOLState -> Number -> Effect (Either String MintResult)
 mintFeelsSOL state jitoSOLAmount = do
   if jitoSOLAmount <= 0.0
     then pure $ Left "Amount must be positive"
@@ -180,7 +143,7 @@ mintFeelsSOL state jitoSOLAmount = do
             }
 
 -- Burn FeelsSOL and release JitoSOL collateral
-burnFeelsSOL :: SyntheticSOLState -> Number -> Effect (Either String BurnResult)
+burnFeelsSOL :: FeelsSOLState -> Number -> Effect (Either String BurnResult)
 burnFeelsSOL state feelsSOLAmount = do
   if feelsSOLAmount <= 0.0
     then pure $ Left "Amount must be positive"
@@ -220,11 +183,11 @@ getCollateralValue FeelsSOL amount _ = Right amount
 getCollateralValue token _ _ = Left $ "Cannot value unsupported collateral: " <> show token
 
 -- Get total FeelsSOL supply
-getTotalSupply :: SyntheticSOLState -> Effect Number
+getTotalSupply :: FeelsSOLState -> Effect Number
 getTotalSupply state = read state.totalFeelsSOLSupply
 
 -- Get current collateral ratio (backing / supply)
-getCollateralRatio :: SyntheticSOLState -> Effect Number
+getCollateralRatio :: FeelsSOLState -> Effect Number
 getCollateralRatio state = do
   supply <- read state.totalFeelsSOLSupply
   backing <- read state.totalJitoSOLBacking
@@ -237,18 +200,26 @@ getCollateralRatio state = do
       pure (backingValue / supply)
 
 --------------------------------------------------------------------------------
--- Gateway Initialization
+-- FeelsSOL Initialization
 --------------------------------------------------------------------------------
 
--- Initialize the gateway with oracle and fee parameters
-initGateway :: 
+-- Initialize the FeelsSOL system with oracle and fee parameters
+initFeelsSOL :: 
   (Effect Number) ->    -- Price oracle function
   Number ->             -- Entry fee
   Number ->             -- Exit fee
-  Effect GatewayState
-initGateway oracle entryFee exitFee = do
-  syntheticSOLState <- initSyntheticSOL oracle
-  pure { syntheticSOL: syntheticSOLState
+  Effect FeelsSOLState
+initFeelsSOL oracle entryFee exitFee = do
+  totalSupply <- new 0.0
+  totalBacking <- new 0.0
+  lastUpdate <- new 0.0
+  cachedPrice <- new Nothing
+  
+  pure { totalFeelsSOLSupply: totalSupply
+       , totalJitoSOLBacking: totalBacking
+       , priceOracle: oracle
+       , lastOracleUpdate: lastUpdate
+       , cachedPrice: cachedPrice
        , entryFee: entryFee
        , exitFee: exitFee
        , polAllocationRate: 0.25  -- Default 25% to POL
@@ -259,9 +230,8 @@ initGateway oracle entryFee exitFee = do
 --------------------------------------------------------------------------------
 
 -- Enter the system by converting JitoSOL to FeelsSOL
--- Note: Account balance checks and transfers are handled at the UI layer
 enterSystem :: 
-  GatewayState ->
+  FeelsSOLState ->
   String ->         -- User address (for future use)
   Number ->         -- Amount of JitoSOL to deposit
   Effect (Either ProtocolError TransformResult)
@@ -275,7 +245,7 @@ enterSystem state _user jitoAmount = do
           netJitoAmount = jitoAmount - feeAmount
       
       -- Mint FeelsSOL against the net JitoSOL amount
-      mintResult <- mintFeelsSOL state.syntheticSOL netJitoAmount
+      mintResult <- mintFeelsSOL state netJitoAmount
       
       case mintResult of
         Left err -> pure $ Left $ InvalidCommandError err
@@ -283,8 +253,7 @@ enterSystem state _user jitoAmount = do
           -- Create transform result
           timestamp <- currentTime
           pure $ Right 
-            { direction: Enter
-            , inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
+            { inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
             , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
             , exchangeRate: result.exchangeRate
             , fee: feeAmount
@@ -296,9 +265,8 @@ enterSystem state _user jitoAmount = do
 --------------------------------------------------------------------------------
 
 -- Exit the system by burning FeelsSOL to receive JitoSOL
--- Note: Account balance checks and transfers are handled at the UI layer
 exitSystem :: 
-  GatewayState ->
+  FeelsSOLState ->
   String ->         -- User address (for future use)
   Number ->         -- Amount of FeelsSOL to burn
   Effect (Either ProtocolError TransformResult)
@@ -308,7 +276,7 @@ exitSystem state _user feelsAmount = do
     then pure $ Left (InvalidAmountError feelsAmount)
     else do
       -- Burn FeelsSOL to get JitoSOL
-      burnResult <- burnFeelsSOL state.syntheticSOL feelsAmount
+      burnResult <- burnFeelsSOL state feelsAmount
       
       case burnResult of
         Left err -> pure $ Left $ InvalidCommandError err
@@ -320,37 +288,36 @@ exitSystem state _user feelsAmount = do
           -- Create transform result
           timestamp <- currentTime
           pure $ Right 
-            { direction: Exit
-            , inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
+            { inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
             , outputAmount: { tokenType: JitoSOL, amount: netJitoAmount }
             , exchangeRate: result.exchangeRate
             , fee: feeAmount
             , timestamp: timestamp
-                }
+            }
 
 --------------------------------------------------------------------------------
 -- Query Functions
 --------------------------------------------------------------------------------
 
 -- Get current exchange rate (JitoSOL/FeelsSOL)
-getExchangeRate :: GatewayState -> Effect Number
+getExchangeRate :: FeelsSOLState -> Effect Number
 getExchangeRate state = do
-  oraclePrice <- getOraclePrice state.syntheticSOL
+  oraclePrice <- getOraclePrice state
   pure oraclePrice.price
 
--- Get total JitoSOL locked in the gateway
-getTotalLocked :: GatewayState -> Effect Number
-getTotalLocked state = read state.syntheticSOL.totalJitoSOLBacking
+-- Get total JitoSOL locked in the FeelsSOL system
+getTotalLocked :: FeelsSOLState -> Effect Number
+getTotalLocked state = read state.totalJitoSOLBacking
 
 -- Get total FeelsSOL minted
-getTotalMinted :: GatewayState -> Effect Number
-getTotalMinted state = getTotalSupply state.syntheticSOL
+getTotalMinted :: FeelsSOLState -> Effect Number
+getTotalMinted state = getTotalSupply state
 
 -- | Get system health metrics
--- | Provides a high-level view of the gateway's status
-getSystemHealth :: GatewayState -> Effect { collateralRatio :: Number, totalLocked :: Number, totalMinted :: Number, isHealthy :: Boolean }
+-- | Provides a high-level view of the FeelsSOL system's status
+getSystemHealth :: FeelsSOLState -> Effect { collateralRatio :: Number, totalLocked :: Number, totalMinted :: Number, isHealthy :: Boolean }
 getSystemHealth state = do
-  ratio <- getCollateralRatio state.syntheticSOL
+  ratio <- getCollateralRatio state
   locked <- getTotalLocked state
   minted <- getTotalMinted state
   let isHealthy = ratio >= 1.0  -- System is healthy if fully collateralized

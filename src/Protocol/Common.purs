@@ -48,8 +48,8 @@ data CommandResult
   = TokenCreated TokenMetadata
   | PositionCreated Position
   | TokensTransferred { from :: String, to :: String, token :: TokenType, amount :: Number }
-  | GatewayEntered { user :: String, feelsSOLMinted :: Number }
-  | GatewayExited { user :: String, jitoSOLReceived :: Number }
+  | FeelsSOLMinted { user :: String, feelsSOLMinted :: Number }
+  | FeelsSOLBurned { user :: String, jitoSOLReceived :: Number }
   | UnbondingInitiated Int
   | PositionWithdrawn Int
   | OfferingCreated String String  -- poolId, ticker

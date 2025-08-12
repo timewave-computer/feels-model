@@ -20,10 +20,10 @@ Each position type contributes to POL growth:
 1. **Swap Fees** (Perpetual Loans): Portion of collateral exchange fees (α)
 2. **Staking Fees** (Fixed-Term Loans): Portion of interest rate spreads (β)  
 3. **Leverage Fees** (Synthetic Positions): Portion of leverage position fees (γ)
-4. **Gateway Fees**: Portion of JitoSOL ↔ FeelsSOL conversion fees (δ)
+4. **FeelsSOL Fees**: Portion of JitoSOL ↔ FeelsSOL conversion fees (δ)
 
 ### Growth Formula
-$$\text{POL}_{\text{growth\_rate}} = \alpha \times \text{SwapVolume} \times \text{SwapFee} + \beta \times \text{StakingVolume} \times \text{InterestSpread} + \gamma \times \text{LeverageVolume} \times \text{LeverageFee} + \delta \times \text{GatewayVolume} \times \text{GatewayFee}$$
+$$\text{POL}_{\text{growth\_rate}} = \alpha \times \text{SwapVolume} \times \text{SwapFee} + \beta \times \text{StakingVolume} \times \text{InterestSpread} + \gamma \times \text{LeverageVolume} \times \text{LeverageFee} + \delta \times \text{FeelsSOLVolume} \times \text{FeelsSOLFee}$$
 
 ## Tick-Based POL
 
@@ -57,8 +57,8 @@ calculatePOLContribution fees =
   let swapContribution = fees.baseFee * 0.15  -- 15% of swap fees
       stakingContribution = fees.totalFee * 0.25  -- 25% of staking fees
       leverageContribution = fees.totalFee * 0.30  -- 30% of leverage fees
-      gatewayContribution = fees.baseFee * 0.20  -- 20% of gateway fees
-  in swapContribution + stakingContribution + leverageContribution + gatewayContribution
+      feelsSOLContribution = fees.baseFee * 0.20  -- 20% of FeelsSOL minting/burning fees
+  in swapContribution + stakingContribution + leverageContribution + feelsSOLContribution
 ```
 
 ### 3. POL Tick Generation

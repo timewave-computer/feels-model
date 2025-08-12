@@ -23,7 +23,7 @@ import Protocol.Common (CommandResult(..))
 -- Import domain modules
 import Protocol.Token (TokenType)
 import Protocol.Position (TermCommitment)
-import Protocol.Gateway (getTotalSupply)
+import Protocol.FeelsSOL (getTotalSupply)
 import Protocol.POL (contribute)
 import Protocol.Oracle (takeMarketSnapshot)
 import FFI (currentTime)
@@ -34,7 +34,7 @@ import Protocol.Offering (OfferingPhase(..), OfferingConfig, PhaseConfig)
 -- Import action modules
 import UI.Actions.TokenActions as TokenActions
 import UI.Actions.PositionActions as PositionActions
-import UI.Actions.GatewayActions as GatewayActions
+import UI.Actions.FeelsSOLActions as FeelsSOLActions
 import UI.Actions.AccountActions as AccountActions
 import UI.PoolRegistry (PoolRegistry, getPool)
 import Protocol.Pool (PoolState)
@@ -55,8 +55,8 @@ captureRebaseDifferential runtime = do
       
   -- Only capture if price has increased (staking rewards)
   when (currentJitoPrice > previousPrice) $ do
-        -- Get total FeelsSOL supply from gateway
-        totalSupply <- getTotalSupply state.gateway.syntheticSOL
+        -- Get total FeelsSOL supply from FeelsSOL state
+        totalSupply <- getTotalSupply state.feelsSOL
         
         -- Calculate differential value
         let priceAppreciation = currentJitoPrice - previousPrice
@@ -117,27 +117,27 @@ handleTransferTokens from to token amount state = do
       let newState = state { timestamp = timestamp }
       pure $ Right $ Tuple newState (TokensTransferred { from, to, token, amount })
 
--- | Handle gateway entry command
-handleEnterGateway :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleEnterGateway user jitoAmount state = do
-  result <- GatewayActions.enterGateway user jitoAmount state
+-- | Handle FeelsSOL entry command
+handleEnterFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleEnterFeelsSOL user jitoAmount state = do
+  result <- FeelsSOLActions.enterFeelsSOL user jitoAmount state
   case result of
     Left err -> pure $ Left err
     Right feelsSOLMinted -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      pure $ Right $ Tuple newState (GatewayEntered { user, feelsSOLMinted })
+      pure $ Right $ Tuple newState (FeelsSOLMinted { user, feelsSOLMinted })
 
--- | Handle gateway exit command
-handleExitGateway :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleExitGateway user feelsAmount state = do
-  result <- GatewayActions.exitGateway user feelsAmount state
+-- | Handle FeelsSOL exit command
+handleExitFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleExitFeelsSOL user feelsAmount state = do
+  result <- FeelsSOLActions.exitFeelsSOL user feelsAmount state
   case result of
     Left err -> pure $ Left err
     Right jitoSOLReceived -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      pure $ Right $ Tuple newState (GatewayExited { user, jitoSOLReceived })
+      pure $ Right $ Tuple newState (FeelsSOLBurned { user, jitoSOLReceived })
 
 -- | Handle unbonding initiation
 handleInitiateUnbonding :: String -> Int -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -247,10 +247,10 @@ executeCommand cmd state = case cmd of
     handleCreatePosition user lendAsset amount collateralAsset collateralAmount term targetToken state
   TransferTokens from to token amount ->
     handleTransferTokens from to token amount state
-  EnterGateway user amount ->
-    handleEnterGateway user amount state
-  ExitGateway user amount ->
-    handleExitGateway user amount state
+  EnterFeelsSOL user amount ->
+    handleEnterFeelsSOL user amount state
+  ExitFeelsSOL user amount ->
+    handleExitFeelsSOL user amount state
   InitiateUnbonding user positionId ->
     handleInitiateUnbonding user positionId state
   WithdrawPosition user positionId ->

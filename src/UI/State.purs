@@ -27,8 +27,8 @@ type UIState =
   , selectedAsset :: TokenType
   , collateralAsset :: TokenType
   , selectedTermType :: String  -- "spot", "hourly", "daily", "weekly"
-  -- Gateway Form
-  , showGateway :: Boolean
+  -- FeelsSOL Form
+  , showFeelsSOL :: Boolean
   , jitoSOLAmount :: Number
   , feelsSOLAmount :: Number
   -- Simulation Form
@@ -73,12 +73,12 @@ data Action
   | CreateTokenUI
   | UpdateTokenTicker String
   | UpdateTokenName String
-  -- Gateway
-  | ToggleGateway
+  -- FeelsSOL
+  | ToggleFeelsSOL
   | UpdateJitoSOLAmount Number
   | UpdateFeelsSOLAmount Number
-  | EnterGateway
-  | ExitGateway
+  | EnterFeelsSOL
+  | ExitFeelsSOL
   -- Launch System
   | SelectLaunch String
   | UpdateLaunchBidAmount Number
@@ -102,8 +102,8 @@ initialUIState =
   , selectedAsset: FeelsSOL
   , collateralAsset: JitoSOL
   , selectedTermType: "spot"
-  -- Gateway Form
-  , showGateway: true
+  -- FeelsSOL Form
+  , showFeelsSOL: true
   , jitoSOLAmount: 100.0
   , feelsSOLAmount: 100.0
   -- Simulation Form

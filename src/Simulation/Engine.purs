@@ -19,7 +19,7 @@ import Effect.Console (log)
 -- Core system imports
 import Protocol.Token (TokenType(..))
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry)
-import Protocol.Gateway (GatewayState, initGateway)
+import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
 import UI.AccountRegistry (initAccountRegistry)
 import Utils (formatAmount)
 import Protocol.POL (initPOL)
@@ -39,7 +39,7 @@ import Simulation.Analysis (SimulationResults, calculateResults)
 type SimulationState =
   { accounts :: Array SimulatedAccount
   , poolRegistry :: PoolRegistry
-  , gateway :: GatewayState
+  , feelsSOL :: FeelsSOLState
   , oracle :: Oracle
   , currentBlock :: Int
   , currentPrice :: Number
@@ -69,12 +69,12 @@ initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   let priceOracle = pure config.initialJitoSOLPrice
   -- Create account registry for simulation
   accountRegistry <- initAccountRegistry
-  -- Initialize gateway with proper parameters (simplified for simulation)
-  gateway <- initGateway priceOracle 0.001 0.002
+  -- Initialize FeelsSOL with proper parameters (simplified for simulation)
+  feelsSOL <- initFeelsSOL priceOracle 0.001 0.002
   
   pure { accounts: accounts
        , poolRegistry: existingPoolRegistry
-       , gateway: gateway
+       , feelsSOL: feelsSOL
        , oracle: oracle
        , currentBlock: 0
        , currentPrice: config.initialJitoSOLPrice
@@ -176,7 +176,7 @@ executeAction stateEffect action = do
   case action of
     EnterProtocol userId amount _ -> do
       -- log $ "Executing: " <> show action
-      -- Update account balances to simulate gateway entry
+      -- Update account balances to simulate FeelsSOL entry
       -- Deduct JitoSOL and add FeelsSOL (1:1 exchange rate for simplicity)
       let updatedAccounts1 = updateAccountBalances state.accounts userId (-amount) JitoSOL
       let updatedAccounts2 = updateAccountBalances updatedAccounts1 userId amount FeelsSOL
@@ -185,7 +185,7 @@ executeAction stateEffect action = do
     
     ExitProtocol userId amount _ -> do
       -- log $ "Executing: " <> show action
-      -- Update account balances to simulate gateway exit
+      -- Update account balances to simulate FeelsSOL exit
       -- Deduct FeelsSOL and add JitoSOL (1:1 exchange rate for simplicity, minus fees)
       let feelsAmount = amount
           jitoAmount = amount * 0.998  -- 0.2% exit fee

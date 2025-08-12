@@ -178,11 +178,11 @@ updateChainAccountBalance registry owner delta = do
       pure $ Right unit
 
 --------------------------------------------------------------------------------
--- Gateway Operations
+-- FeelsSOL Operations
 --------------------------------------------------------------------------------
 
 -- Deposit JitoSOL from ChainAccount to get FeelsSOL in FeelsAccount
--- This simulates the gateway conversion
+-- This simulates the FeelsSOL conversion
 depositFromChain :: AccountRegistry -> String -> Number -> Effect (Either String Unit)
 depositFromChain registry owner amount = do
   if amount <= 0.0
@@ -198,7 +198,7 @@ depositFromChain registry owner amount = do
           updateFeelsAccountBalance registry owner FeelsSOL (currentBalance + amount)
 
 -- Withdraw FeelsSOL from FeelsAccount to get JitoSOL in ChainAccount
--- This simulates the gateway exit
+-- This simulates the FeelsSOL exit
 withdrawToChain :: AccountRegistry -> String -> Number -> Effect (Either String Unit)
 withdrawToChain registry owner amount = do
   if amount <= 0.0

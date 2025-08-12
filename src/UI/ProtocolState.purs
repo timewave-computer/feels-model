@@ -33,7 +33,7 @@ import Protocol.Token (TokenType(..), TokenMetadata)
 import UI.TokenRegistry (TokenRegistry, initTokenRegistry)
 import Protocol.Position (Position, TermCommitment)
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry, addPool)
-import Protocol.Gateway (GatewayState, initGateway)
+import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
 import Protocol.POL (POLState, initPOL, contribute)
 import Protocol.Oracle (Oracle, initOracle)
 import Protocol.Incentives (MarketDynamics, initMarketDynamics)
@@ -56,9 +56,9 @@ data ProtocolCommand
     -- ^ user, lendAsset, amount, collateralAsset, collateralAmount, term, targetToken
   | TransferTokens String String TokenType Number  
     -- ^ from, to, token, amount
-  | EnterGateway String Number  
+  | EnterFeelsSOL String Number  
     -- ^ user, jitoSOLAmount
-  | ExitGateway String Number   
+  | ExitFeelsSOL String Number   
     -- ^ user, feelsSOLAmount
   | InitiateUnbonding String Int  
     -- ^ user, positionId
@@ -97,7 +97,7 @@ derive instance eqIndexerQuery :: Eq IndexerQuery
 type ProtocolState =
   { tokenRegistry :: TokenRegistry
   , poolRegistry :: PoolRegistry
-  , gateway :: GatewayState
+  , feelsSOL :: FeelsSOLState
   , polState :: POLState
   , oracle :: Oracle
   , marketDynamics :: MarketDynamics
@@ -141,11 +141,11 @@ initState = do
   -- Initialize POL state
   polState <- initPOL
   
-  -- Create a simple oracle function for the gateway
+  -- Create a simple oracle function for FeelsSOL
   let priceOracle = pure 1.05  -- Fixed price for demo
   
-  -- Initialize gateway with oracle
-  gateway <- initGateway priceOracle 0.001 0.002
+  -- Initialize FeelsSOL with oracle
+  feelsSOL <- initFeelsSOL priceOracle 0.001 0.002
   
   -- Initialize empty offerings map
   let offerings = Map.empty
@@ -157,7 +157,7 @@ initState = do
   let initialState =
         { tokenRegistry
         , poolRegistry
-        , gateway
+        , feelsSOL
         , polState
         , oracle
         , marketDynamics
