@@ -1,6 +1,6 @@
 -- | FeelsSOL-related UI actions.
 -- | This module orchestrates FeelsSOL minting and burning operations for the frontend.
-module UI.Actions.FeelsSOLActions
+module UI.Action.FeelsSOLActions
   ( enterFeelsSOL
   , exitFeelsSOL
   , getExchangeRate
@@ -14,8 +14,8 @@ import Effect (Effect)
 import UI.ProtocolState (ProtocolState)
 import Protocol.FeelsSOL (enterSystem, exitSystem, getOraclePrice)
 import Protocol.POL (contribute)
-import Protocol.Errors (ProtocolError(..))
-import UI.AccountRegistry (depositFromChain, withdrawToChain, getChainAccountBalance, getFeelsAccountBalance)
+import Protocol.Error (ProtocolError(..))
+import UI.Account (depositFromChain, withdrawToChain, getChainAccountBalance, getFeelsAccountBalance)
 import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------
@@ -45,7 +45,7 @@ enterFeelsSOL user jitoAmount state = do
               let polContribution = txResult.fee * state.feelsSOL.polAllocationRate
               contribute state.polState polContribution
               
-              pure $ Right { user, feelsSOLMinted: txResult.outputAmount.amount }
+              pure $ Right { user, feelsSOLMinted: txResult.feelsSOLMinted }
 
 -- | Exit the FeelsSOL system by converting FeelsSOL to JitoSOL
 exitFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError { user :: String, jitoSOLReceived :: Number })
@@ -62,7 +62,7 @@ exitFeelsSOL user feelsAmount state = do
         Left err -> pure $ Left err
         Right txResult -> do
           -- Move FeelsSOL back to JitoSOL in chain account
-          withdrawResult <- withdrawToChain state.accounts user txResult.outputAmount.amount
+          withdrawResult <- withdrawToChain state.accounts user txResult.jitoSOLReleased
           case withdrawResult of
             Left err -> pure $ Left $ InvalidCommandError err
             Right _ -> do
@@ -70,7 +70,7 @@ exitFeelsSOL user feelsAmount state = do
               let polContribution = txResult.fee * state.feelsSOL.polAllocationRate
               contribute state.polState polContribution
               
-              pure $ Right { user, jitoSOLReceived: txResult.outputAmount.amount }
+              pure $ Right { user, jitoSOLReceived: txResult.jitoSOLReleased }
 
 -- | Get the current JitoSOL/FeelsSOL exchange rate
 getExchangeRate :: ProtocolState -> Effect Number

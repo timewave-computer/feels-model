@@ -1,6 +1,6 @@
 -- | Token-related UI actions.
 -- | This module orchestrates token creation and management for the frontend.
-module UI.Actions.TokenActions
+module UI.Action.TokenActions
   ( createToken
   , validateTokenParams
   ) where
@@ -15,7 +15,7 @@ import Effect (Effect)
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenMetadata)
 import UI.TokenRegistry (TokenRegistry, createAndRegisterToken, getAllTokens)
-import Protocol.Errors (ProtocolError(..))
+import Protocol.Error (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Token Creation

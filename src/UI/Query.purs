@@ -1,9 +1,7 @@
 -- | Query types and handlers for off-chain protocol reads.
 -- | This module handles all read-only operations on indexed protocol state.
-module UI.Queries
-  ( -- Query type
-    IndexerQuery(..)
-  , -- Query execution
+module UI.Query
+  ( -- Query execution
     executeQuery
   , -- Query handlers (exported for testing)
     handleGetUserTokens
@@ -25,14 +23,14 @@ import Data.Maybe (Maybe(..))
 import Data.Array (filter, find, nub, length)
 import Data.Foldable (sum)
 import Effect (Effect)
+import Unsafe.Coerce (unsafeCoerce)
 
 -- Import protocol modules for data access
-import Protocol.Token (TokenType(..), TokenMetadata)
 import UI.TokenRegistry (getAllTokens)
 import UI.PoolRegistry (getUserPositions, getAllPositions)
-import Protocol.POL (getTotalPOL, getPOLMetrics)
-import UI.AccountRegistry (getFeelsAccountBalance, getTotalTokenBalance)
-import Protocol.Errors (ProtocolError(..))
+import Protocol.POL (getTotalPOL, getPOLMetrics, calculateGrowthRate24h)
+import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
+import Protocol.Error (ProtocolError(..))
 import Protocol.Offering as Offering
 import Data.Map as Map
 import Data.Tuple (Tuple(..))
@@ -40,31 +38,12 @@ import Data.Traversable (traverse)
 import Data.Array as Array
 import Data.Function (identity)
 import Effect.Ref (read)
-import Protocol.Position (Position)
+import Protocol.Position as P
 
 -- Import app state and result types
 import UI.ProtocolState (ProtocolState, IndexerQuery(..))
-import Protocol.Common (QueryResult(..))
-
---------------------------------------------------------------------------------
--- Query Types
---------------------------------------------------------------------------------
-
--- | Queries that read protocol state (off-chain operations)
-data IndexerQuery
-  = GetUserTokens String
-  | GetAllTokens
-  | GetUserPositions String
-  | GetUserBalance String TokenType
-  | GetTokenByTicker String
-  | GetLenderOffers
-  | GetSystemStats
-  | GetPOLMetrics
-  | GetPositionTargetToken Int
-  | GetActiveLaunches
-  | GetLaunchStatus String
-
-derive instance eqIndexerQuery :: Eq IndexerQuery
+import Protocol.Common (QueryResult(..), TokenMetadata, Position, OfferingResult)
+import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------
 -- Query Execution
@@ -91,22 +70,29 @@ executeQuery query state = case query of
 
 -- | Handle user tokens query
 handleGetUserTokens :: String -> ProtocolState -> Effect (Either ProtocolError QueryResult)
-handleGetUserTokens _ _state = do
-  -- In a real implementation, we'd filter tokens by owner
-  -- For now, return empty array as we don't track ownership in TokenRegistry
-  pure $ Right $ TokenList []
+handleGetUserTokens user state = do
+  -- Get all tokens and filter by creator
+  allTokens <- getAllTokens state.tokenRegistry
+  let userTokens = filter (\t -> t.creator == user) allTokens
+      -- Convert from Token.TokenMetadata to foreign TokenMetadata type
+      convertedTokens = unsafeCoerce userTokens :: Array TokenMetadata
+  pure $ Right $ TokenList convertedTokens
 
 -- | Handle all tokens query
 handleGetAllTokens :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetAllTokens state = do
   allTokens <- getAllTokens state.tokenRegistry
-  pure $ Right $ TokenList allTokens
+  -- Convert from Token.TokenMetadata to foreign TokenMetadata type
+  let convertedTokens = unsafeCoerce allTokens :: Array TokenMetadata
+  pure $ Right $ TokenList convertedTokens
 
 -- | Handle user positions query
 handleGetUserPositions :: String -> ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetUserPositions user state = do
   positions <- getUserPositions user state.poolRegistry
-  pure $ Right $ PositionList positions
+  -- Convert from P.Position to foreign Position type
+  let convertedPositions = unsafeCoerce positions :: Array Position
+  pure $ Right $ PositionList convertedPositions
 
 -- | Handle user balance query
 handleGetUserBalance :: String -> TokenType -> ProtocolState -> Effect (Either ProtocolError QueryResult)
@@ -119,13 +105,17 @@ handleGetTokenByTicker :: String -> ProtocolState -> Effect (Either ProtocolErro
 handleGetTokenByTicker ticker state = do
   allTokens <- getAllTokens state.tokenRegistry
   let maybeToken = find (\t -> t.ticker == ticker) allTokens
-  pure $ Right $ TokenInfo maybeToken
+      -- Convert from Token.TokenMetadata to foreign TokenMetadata type
+      convertedToken = unsafeCoerce maybeToken :: Maybe TokenMetadata
+  pure $ Right $ TokenInfo convertedToken
 
 -- | Handle lender offers query
 handleGetLenderOffers :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetLenderOffers state = do
   offers <- getAllPositions state.poolRegistry
-  pure $ Right $ LenderOfferList offers
+  -- Convert from P.Position to foreign Position type
+  let convertedOffers = unsafeCoerce offers :: Array Position
+  pure $ Right $ LenderOfferList convertedOffers
 
 -- | Handle system stats query
 handleGetSystemStats :: ProtocolState -> Effect (Either ProtocolError QueryResult)
@@ -161,9 +151,10 @@ handleGetPOLMetrics :: ProtocolState -> Effect (Either ProtocolError QueryResult
 handleGetPOLMetrics state = do
   balance <- getTotalPOL state.polState
   _metrics <- getPOLMetrics state.polState
+  growthRate <- calculateGrowthRate24h state.polState
   pure $ Right $ POLMetricsResult
     { balance
-    , growthRate24h: 0.0  -- TODO: Implement growth rate calculation
+    , growthRate24h: growthRate
     }
 
 -- | Handle position target token query
@@ -196,4 +187,6 @@ handleGetOfferingStatus poolId state = do
     Nothing -> pure $ Right $ OfferingStatusResult Nothing
     Just offeringRef -> do
       result <- Offering.getOfferingStatus offeringRef
-      pure $ Right $ OfferingStatusResult (Just result)
+      -- Convert from Offering.OfferingResult to foreign OfferingResult type
+      let convertedResult = unsafeCoerce result :: OfferingResult
+      pure $ Right $ OfferingStatusResult (Just convertedResult)

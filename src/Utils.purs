@@ -14,7 +14,7 @@ module Utils
 import Prelude
 import Data.Int as Int
 import Data.Number (pow)
-import Math (sqrt)
+import FFI (sqrt)
 import Data.Foldable (sum)
 import Data.Array (length)
 import Data.Array as Array

@@ -24,12 +24,11 @@ import Effect.Ref (read, write)
 import Data.Tuple (Tuple(..))
 
 import UI.ProtocolState (AppRuntime, ProtocolCommand, IndexerQuery(..))
-import UI.Queries (executeQuery)
-import UI.Commands (executeCommand)
-import Protocol.Token (TokenType(..), TokenMetadata)
-import Protocol.Position (Position)
-import Protocol.Common (CommandResult, QueryResult(..))
-import Protocol.Errors (ProtocolError)
+import UI.Query (executeQuery)
+import UI.Command (executeCommand)
+import Protocol.Common (CommandResult, QueryResult(..), TokenMetadata, Position)
+import Protocol.Token (TokenType(..))
+import Protocol.Error (ProtocolError)
 
 --------------------------------------------------------------------------------
 -- Data Query Functions
@@ -38,25 +37,28 @@ import Protocol.Errors (ProtocolError)
 -- | Get user's token metadata
 getUserTokens :: AppRuntime -> String -> Effect (Array TokenMetadata)
 getUserTokens appRuntime user = do
-  result <- executeQuery (GetUserTokens user) appRuntime
+  state <- read appRuntime.state
+  result <- executeQuery (GetUserTokens user) state
   pure $ case result of
-    Right (TokensResult tokens) -> tokens
+    Right (TokenList tokens) -> tokens
     _ -> []
 
 -- | Get user's positions  
 getUserPositions :: AppRuntime -> String -> Effect (Array Position)
 getUserPositions appRuntime user = do
-  result <- executeQuery (GetUserPositions user) appRuntime
+  state <- read appRuntime.state
+  result <- executeQuery (GetUserPositions user) state
   pure $ case result of
-    Right (PositionsResult positions) -> positions
+    Right (PositionList positions) -> positions
     _ -> []
 
 -- | Get lender offers
 getLenderOffers :: AppRuntime -> Effect (Array Position)
 getLenderOffers appRuntime = do
-  result <- executeQuery GetLenderOffers appRuntime
+  state <- read appRuntime.state
+  result <- executeQuery GetLenderOffers state
   pure $ case result of
-    Right (PositionsResult offers) -> offers
+    Right (LenderOfferList offers) -> offers
     _ -> []
 
 -- | Get protocol statistics
@@ -71,17 +73,19 @@ getProtocolStats :: AppRuntime -> Effect
     , jitoSOLLocked :: Number
     }
 getProtocolStats appRuntime = do
-  result <- executeQuery GetSystemStats appRuntime
+  state <- read appRuntime.state
+  result <- executeQuery GetSystemStats state
   pure $ case result of
-    Right (StatsResult stats) -> stats
+    Right (SystemStatsResult stats) -> stats
     _ -> { totalValueLocked: 0.0, totalUsers: 0, activePositions: 0, liveTokens: 0, totalLenderOffers: 0, polBalance: 0.0, feelsSOLSupply: 0.0, jitoSOLLocked: 0.0 }
 
 -- | Get user balance for specific token
 getUserBalance :: AppRuntime -> String -> TokenType -> Effect Number
 getUserBalance appRuntime user token = do
-  result <- executeQuery (GetUserBalance user token) appRuntime
+  state <- read appRuntime.state
+  result <- executeQuery (GetUserBalance user token) state
   pure $ case result of
-    Right (BalanceResult balance) -> balance
+    Right (Balance balance) -> balance
     _ -> 0.0
 
 -- | Get wallet balances (JitoSOL and FeelsSOL)
@@ -110,16 +114,23 @@ getPriceHistory :: AppRuntime -> Effect (Array
     })
 getPriceHistory appRuntime = do
   state <- read appRuntime.state
-  -- For now, generate mock chart data based on current state
-  -- In a real implementation, this would query historical data
-  pure 
-    [ { timestamp: state.timestamp
-      , block: state.currentBlock
-      , price: state.lastJitoSOLPrice
-      , polValue: 1.0
+  -- Return stored price history, or current state if empty
+  case state.priceHistory of
+    [] -> pure 
+      [ { timestamp: state.timestamp
+        , block: state.currentBlock
+        , price: state.lastJitoSOLPrice
+        , polValue: 1.0
+        , tokens: []
+        }
+      ]
+    history -> pure $ map (\h -> 
+      { timestamp: h.timestamp
+      , block: h.block
+      , price: h.price
+      , polValue: h.polValue
       , tokens: []
-      }
-    ]
+      }) history
 
 --------------------------------------------------------------------------------
 -- Command Execution

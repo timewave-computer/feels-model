@@ -10,21 +10,21 @@ import Effect (Effect)
 import Effect.Console (log)
 import Control.Monad (when)
 
--- Chart data point structure
+-- Chart data point structure for simulation analysis
 type ChartPoint =
   { timestamp :: Number
   , block :: Int
   , price :: Number        -- JitoSOL/FeelsSOL exchange rate
-  , nfvValue :: Number     -- NFV floor value
+  , polValue :: Number     -- Protocol-Owned Liquidity value
   , tokens :: Array 
       { ticker :: String
       , price :: Number      -- Token/FeelsSOL price
-      , nfvFloor :: Number   -- Token NFV floor
+      , polFloor :: Number   -- Token POL backing floor
       , live :: Boolean
       }
   }
 
--- Validate chart data makes sense for a lending book with swap/leverage
+-- Validate chart data makes sense for the unified tick-based protocol
 validateChartData :: Array ChartPoint -> Effect Boolean
 validateChartData chartData = do
   log "=== CHART DATA VALIDATION ==="
@@ -42,9 +42,9 @@ validateChartData chartData = do
     let jitoSOLPriceValid = all (\p -> p.price >= 1.0 && p.price <= 1.1) chartData
     log $ "JitoSOL price in valid range (1.0-1.1): " <> show jitoSOLPriceValid
     
-    -- Check 3: NFV value should track slightly below price
-    let nfvTracking = all (\p -> p.nfvValue > 0.0 && p.nfvValue <= p.price) chartData
-    log $ "NFV tracking below price: " <> show nfvTracking
+    -- Check 3: POL value should track protocol growth
+    let polTracking = all (\p -> p.polValue > 0.0 && p.polValue <= p.price) chartData
+    log $ "POL value tracking properly: " <> show polTracking
     
     -- Check 4: Token prices should be positive when live
     let tokensValid = all validateTokens chartData
@@ -63,13 +63,13 @@ validateChartData chartData = do
           log $ "  Initial tokens: " <> show (length firstPoint.tokens)
           log $ "  Later tokens: " <> show (length laterPoint.tokens)
           
-          -- Check 6: Token NFV floors should be non-decreasing
-          let nfvFloorsValid = checkNFVFloors chartData
-          log $ "NFV floors non-decreasing: " <> show nfvFloorsValid
+          -- Check 6: Token POL backing floors should be non-decreasing
+          let polFloorsValid = checkPOLFloors chartData
+          log $ "POL backing floors non-decreasing: " <> show polFloorsValid
           
           -- Summary
-          let allValid = blocksIncreasing && jitoSOLPriceValid && nfvTracking && 
-                        tokensValid && tokenCreation && nfvFloorsValid
+          let allValid = blocksIncreasing && jitoSOLPriceValid && polTracking && 
+                        tokensValid && tokenCreation && polFloorsValid
           
           if allValid then
             log "✓ Chart data validation PASSED"
@@ -91,22 +91,22 @@ validateChartData chartData = do
       where
         validateToken t = 
           if t.live 
-          then t.price > 0.0 && t.nfvFloor >= 0.0 && t.nfvFloor <= t.price
+          then t.price > 0.0 && t.polFloor >= 0.0 && t.polFloor <= t.price
           else true  -- Non-live tokens can have any values
     
-    checkNFVFloors :: Array ChartPoint -> Boolean
-    checkNFVFloors points = 
-      -- For each token, check that its NFV floor never decreases
+    checkPOLFloors :: Array ChartPoint -> Boolean
+    checkPOLFloors points = 
+      -- For each token, check that its POL backing floor never decreases
       let allTickers = case head points of
             Just p -> map _.ticker p.tokens
             Nothing -> []
-      in all (checkTokenNFVFloor points) allTickers
+      in all (checkTokenPOLFloor points) allTickers
     
-    checkTokenNFVFloor :: Array ChartPoint -> String -> Boolean
-    checkTokenNFVFloor points ticker = 
+    checkTokenPOLFloor :: Array ChartPoint -> String -> Boolean
+    checkTokenPOLFloor points ticker = 
       let tokenData = map (\p -> 
             case find (\t -> t.ticker == ticker) p.tokens of
-              Just t -> Just t.nfvFloor
+              Just t -> Just t.polFloor
               Nothing -> Nothing
           ) points
           validPairs = filter (\{a,b} -> isJust a && isJust b) $
@@ -124,7 +124,7 @@ analyzeChartData chartData = do
     {first: Just f, last: Just l} -> do
       log $ "Simulation span: Block " <> show f.block <> " to " <> show l.block
       log $ "JitoSOL price movement: " <> show f.price <> " → " <> show l.price
-      log $ "NFV growth: " <> show f.nfvValue <> " → " <> show l.nfvValue
+      log $ "POL growth: " <> show f.polValue <> " → " <> show l.polValue
       
       -- Token analysis
       let initialTokens = filter _.live f.tokens
@@ -138,7 +138,7 @@ analyzeChartData chartData = do
       when (length finalTokens > 0) $ do
         log $ "\nToken price discovery:"
         traverse_ (\t -> 
-          log $ "  " <> t.ticker <> ": " <> show t.price <> " FeelsSOL (NFV floor: " <> show t.nfvFloor <> ")"
+          log $ "  " <> t.ticker <> ": " <> show t.price <> " FeelsSOL (POL floor: " <> show t.polFloor <> ")"
         ) finalTokens
       
       -- Check for swap activity

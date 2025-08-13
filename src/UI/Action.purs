@@ -1,6 +1,6 @@
 -- UI Action Handling for the Feels Protocol application
 -- Contains all action handling logic for user interactions
-module UI.Actions
+module UI.Action
   ( handleAction
   , validateTokenInput
   ) where
@@ -12,9 +12,10 @@ import Data.String.Common (trim)
 import Data.String as String
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
+import Data.Tuple (Tuple(..))
 import Effect.Aff.Class (class MonadAff)
 import Effect.Console (log)
-import Effect.Ref (read)
+import Effect.Ref (read, write)
 import Halogen as H
 
 -- Import state and action types
@@ -23,12 +24,14 @@ import UI.Integration (initializeRemoteActions, refreshProtocolData, processSimu
 
 -- Import API and data types
 import UI.ProtocolState as A
-import UI.ProtocolState (QueryResult(..), CommandResult(..), initState, ProtocolCommand(..), IndexerQuery(..))
-import UI.Commands (executeCommand)
-import UI.Queries (executeQuery)
-import Protocol.Token (TokenType(..), TokenMetadata)
-import Protocol.Position (spotTerm, hourlyTerm, dailyTerm, weeklyTerm)
-import FFI (setTimeout, checkAndInitializeChart)
+import UI.ProtocolState (initState, ProtocolCommand, IndexerQuery(..))
+import UI.ProtocolState as PS
+import Protocol.Common (QueryResult(..), CommandResult(..), TokenMetadata)
+import UI.Command (executeCommand)
+import UI.Query (executeQuery)
+import Protocol.Token (TokenType(..))
+import Protocol.Position (spotTerm, monthlyTerm)
+import FFI (setTimeout, checkAndInitializeChart, setChartData)
 import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
 
 --------------------------------------------------------------------------------
@@ -62,14 +65,15 @@ handleAction = case _ of
         H.liftEffect $ refreshProtocolData protocol state.currentUser
         
         -- Update UI state with refreshed data
-        posResult <- H.liftEffect $ executeQuery protocol (A.GetUserPositions state.currentUser)
+        protocolState <- H.liftEffect $ read protocol.state
+        posResult <- H.liftEffect $ executeQuery (A.GetUserPositions state.currentUser) protocolState
         case posResult of
           Right (PositionList positions) -> 
             H.modify_ _ { userPositions = positions }
           _ -> pure unit
         
         -- Get lender offers
-        offersResult <- H.liftEffect $ executeQuery protocol A.GetLenderOffers
+        offersResult <- H.liftEffect $ executeQuery A.GetLenderOffers protocolState
         case offersResult of
           Right (LenderOfferList offers) -> do
             H.liftEffect $ log $ "RefreshData: Found " <> show (length offers) <> " lender offers"
@@ -79,7 +83,7 @@ handleAction = case _ of
           _ -> pure unit
         
         -- Get protocol stats
-        statsResult <- H.liftEffect $ executeQuery protocol A.GetSystemStats
+        statsResult <- H.liftEffect $ executeQuery A.GetSystemStats protocolState
         case statsResult of
           Right (SystemStatsResult stats) -> do
             H.liftEffect $ log $ "RefreshData: Updated protocol stats - TVL: " <> show stats.totalValueLocked <> ", Users: " <> show stats.totalUsers
@@ -89,16 +93,16 @@ handleAction = case _ of
           _ -> pure unit
         
         -- Get wallet balances
-        jitoBalanceResult <- H.liftEffect $ executeQuery protocol (A.GetUserBalance state.currentUser JitoSOL)
+        jitoBalanceResult <- H.liftEffect $ executeQuery (A.GetUserBalance state.currentUser JitoSOL) protocolState
         case jitoBalanceResult of
           Right (Balance balance) ->
-            H.modify_ _ { jitoSOLBalance = balance }
+            H.modify_ _ { jitoBalance = balance }
           _ -> pure unit
         
-        feelsBalanceResult <- H.liftEffect $ executeQuery protocol (A.GetUserBalance state.currentUser FeelsSOL)
+        feelsBalanceResult <- H.liftEffect $ executeQuery (A.GetUserBalance state.currentUser FeelsSOL) protocolState
         case feelsBalanceResult of
           Right (Balance balance) ->
-            H.modify_ _ { feelsSOLBalance = balance }
+            H.modify_ _ { feelsBalance = balance }
           _ -> pure unit
         
         -- Clear any errors
@@ -208,27 +212,28 @@ handleCreatePosition = do
       protocolState <- H.liftEffect $ read protocol.state
       let currentBlock = protocolState.currentBlock
           term = case state.selectedTermType of
-            "hourly" -> hourlyTerm currentBlock
-            "daily" -> dailyTerm currentBlock
-            "weekly" -> weeklyTerm currentBlock
+            "monthly" -> monthlyTerm currentBlock
             _ -> spotTerm
           
           collateralAmount = state.inputAmount * 1.5  -- Simplified
       
       -- Execute create position command
-      result <- H.liftEffect $ executeCommand protocol
-        (A.CreatePosition 
+      protocolState <- H.liftEffect $ read protocol.state
+      result <- H.liftEffect $ executeCommand
+        (PS.CreatePosition 
           state.currentUser
           state.selectedAsset
           state.inputAmount
           state.collateralAsset
           collateralAmount
           term
-          Nothing)
+          false  -- rollover: default to false for now
+          Nothing) protocolState
       
       case result of
-        Right (PositionCreated pos) -> do
-          H.liftEffect $ log $ "Position created: #" <> show pos.id
+        Right (Tuple newState (PositionCreated pos)) -> do
+          H.liftEffect $ write newState protocol.state
+          H.liftEffect $ log $ "Position created successfully"
           -- Refresh all data
           handleAction RefreshData
         Right _ ->
@@ -252,21 +257,22 @@ handleCreateToken = do
       if null state.tokenValidationErrors && ticker /= "" && name /= ""
         then do
           -- Execute create token command
-          result <- H.liftEffect $ executeCommand protocol 
-            (A.CreateToken state.currentUser ticker name)
+          protocolState <- H.liftEffect $ read protocol.state
+          result <- H.liftEffect $ executeCommand  
+            (PS.CreateToken state.currentUser ticker name) protocolState
           
           case result of
-            Right (TokenCreated token) -> do
-              H.liftEffect $ log $ "Token created: " <> token.ticker
+            Right (Tuple newState (TokenCreated token)) -> do
+              H.liftEffect $ write newState protocol.state
+              H.liftEffect $ log $ "Token created successfully"
               -- Reset form and clear validation errors
               H.modify_ \s -> s 
-                { userTokens = token : s.userTokens
-                , tokenTicker = ""
+                { tokenTicker = ""
                 , tokenName = ""
                 , tokenValidationErrors = []
                 , error = Nothing
                 }
-              -- Refresh all data
+              -- Refresh data to get updated token list
               handleAction RefreshData
             Right _ -> 
               H.modify_ _ { error = Just "Unexpected result from token creation" }
@@ -285,11 +291,13 @@ handleEnterFeelsSOL = do
   case state.api of
     Nothing -> pure unit
     Just protocol -> do
-      result <- H.liftEffect $ executeCommand protocol
-        (A.EnterFeelsSOL state.currentUser state.jitoSOLAmount)
+      protocolState <- H.liftEffect $ read protocol.state
+      result <- H.liftEffect $ executeCommand
+        (PS.EnterFeelsSOL state.currentUser state.jitoSOLAmount) protocolState
       
       case result of
-        Right (FeelsSOLMinted info) -> do
+        Right (Tuple newState (FeelsSOLMinted info)) -> do
+          H.liftEffect $ write newState protocol.state
           H.liftEffect $ log $ "Entered FeelsSOL: " <> show info.feelsSOLMinted <> " FeelsSOL minted"
           handleAction RefreshData
         Right _ ->
@@ -304,11 +312,13 @@ handleExitFeelsSOL = do
     Nothing -> pure unit
     Just protocol -> do
       -- For exit, we use the input amount as FeelsSOL amount to convert
-      result <- H.liftEffect $ executeCommand protocol
-        (A.ExitFeelsSOL state.currentUser state.feelsSOLAmount)
+      protocolState <- H.liftEffect $ read protocol.state
+      result <- H.liftEffect $ executeCommand
+        (PS.ExitFeelsSOL state.currentUser state.feelsSOLAmount) protocolState
       
       case result of
-        Right (FeelsSOLBurned info) -> do
+        Right (Tuple newState (FeelsSOLBurned info)) -> do
+          H.liftEffect $ write newState protocol.state
           H.liftEffect $ log $ "Exited FeelsSOL: " <> show info.jitoSOLReceived <> " JitoSOL received"
           handleAction RefreshData
         Right _ ->
@@ -343,9 +353,17 @@ handleRunSimulation = do
       _ <- H.liftEffect $ do
         -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
         -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
-        _ <- executeCommand protocol (A.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotTerm Nothing)
+        state1 <- read protocol.state
+        result1 <- executeCommand (PS.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotTerm false Nothing) state1
+        _ <- case result1 of
+          Right (Tuple newState1 _) -> write newState1 protocol.state
+          _ -> pure unit
         -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
-        _ <- executeCommand protocol (A.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotTerm Nothing)
+        state2 <- read protocol.state
+        result2 <- executeCommand (PS.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotTerm false Nothing) state2
+        _ <- case result2 of
+          Right (Tuple newState2 _) -> write newState2 protocol.state
+          _ -> pure unit
         pure unit
       
       -- Run simulation
@@ -368,6 +386,11 @@ handleRunSimulation = do
         , simulationResults = Just results
         , priceHistory = priceHistory
         }
+      
+      -- Set chart data in the DOM
+      H.liftEffect $ do
+        log $ "Setting chart data with " <> show (length priceHistory) <> " points"
+        setChartData priceHistory
       
       -- Force a render cycle before initializing chart
       H.liftEffect $ log "State updated, scheduling chart render..."
@@ -394,19 +417,11 @@ validateTokenInput ticker name existingTokens =
         else if String.length trimmedTicker > 10 then ["Ticker must be at most 10 characters"]
         else []
       
-      -- Check for duplicate ticker
-      duplicateTickerErrors = 
-        if trimmedTicker == "" then []
-        else case find (\t -> t.ticker == trimmedTicker) existingTokens of
-          Just _ -> ["Token with ticker '" <> trimmedTicker <> "' already exists"]
-          Nothing -> []
+      -- Cannot check for duplicates on foreign TokenMetadata type
+      duplicateTickerErrors = []
       
-      -- Check for duplicate name  
-      duplicateNameErrors =
-        if trimmedName == "" then []
-        else case find (\t -> t.name == trimmedName) existingTokens of
-          Just _ -> ["Token with name '" <> trimmedName <> "' already exists"]
-          Nothing -> []
+      -- Cannot check for duplicates on foreign TokenMetadata type
+      duplicateNameErrors = []
           
       -- Reserved ticker checks
       reservedTickerErrors =

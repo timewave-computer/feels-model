@@ -1,6 +1,6 @@
 -- | Command processing for the Feels Protocol UI.
 -- | This module handles all state modifications through commands.
-module UI.Commands
+module UI.Command
   ( commandHandlers
   , executeCommand
   , captureRebaseDifferential
@@ -14,28 +14,30 @@ import Data.Traversable (traverse)
 import Effect (Effect)
 import Effect.Ref (read, write)
 import Data.Map as Map
-import Math (log, floor)
+import FFI (log, floor)
+import Data.Array (length, drop)
+import Unsafe.Coerce (unsafeCoerce)
 
 -- Import app state types
 import UI.ProtocolState (ProtocolState, AppRuntime, ProtocolCommand(..))
 import Protocol.Common (CommandResult(..))
+import Protocol.Token (TokenType(..))
 
 -- Import domain modules
-import Protocol.Token (TokenType)
 import Protocol.Position (TermCommitment)
 import Protocol.FeelsSOL (getTotalSupply)
-import Protocol.POL (contribute)
+import Protocol.POL (contribute, getTotalPOL)
 import Protocol.Oracle (takeMarketSnapshot)
 import FFI (currentTime)
-import Protocol.Errors (ProtocolError(..))
+import Protocol.Error (ProtocolError(..))
 import Protocol.Offering as Offering
 import Protocol.Offering (OfferingPhase(..), OfferingConfig, PhaseConfig)
 
 -- Import action modules
-import UI.Actions.TokenActions as TokenActions
-import UI.Actions.PositionActions as PositionActions
-import UI.Actions.FeelsSOLActions as FeelsSOLActions
-import UI.Actions.AccountActions as AccountActions
+import UI.Action.TokenActions as TokenActions
+import UI.Action.PositionActions as PositionActions
+import UI.Action.FeelsSOLActions as FeelsSOLActions
+import UI.Action.AccountActions as AccountActions
 import UI.PoolRegistry (PoolRegistry, getPool)
 import Protocol.Pool (PoolState)
 
@@ -66,8 +68,24 @@ captureRebaseDifferential runtime = do
         when (differentialValue > 0.0) $ do
           contribute state.polState differentialValue
           
-          -- Update state with new price
-          let newState = state { lastJitoSOLPrice = currentJitoPrice }
+          -- Get current POL value
+          polBalance <- getTotalPOL state.polState
+          
+          -- Update state with new price and record history
+          currentTime <- currentTime
+          let priceRecord = { timestamp: currentTime
+                            , block: state.currentBlock
+                            , price: currentJitoPrice
+                            , polValue: polBalance
+                            }
+              newHistory = state.priceHistory <> [priceRecord]
+              -- Keep only last 100 records
+              trimmedHistory = if length newHistory > 100 
+                              then drop (length newHistory - 100) newHistory
+                              else newHistory
+              newState = state { lastJitoSOLPrice = currentJitoPrice
+                               , priceHistory = trimmedHistory
+                               }
           write newState runtime.state
           
           -- Notify listeners
@@ -88,12 +106,14 @@ handleCreateToken creator ticker name state = do
     Right newToken -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      pure $ Right $ Tuple newState (TokenCreated newToken)
+          -- Convert from Token.TokenMetadata to foreign TokenMetadata type
+          convertedToken = unsafeCoerce newToken
+      pure $ Right $ Tuple newState (TokenCreated convertedToken)
 
 -- | Handle position creation command
-handleCreatePosition :: String -> TokenType -> Number -> TokenType -> Number -> TermCommitment -> Maybe String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleCreatePosition user lendAsset amount collateralAsset collateralAmount term targetToken state = do
-  result <- PositionActions.createPosition user lendAsset amount collateralAsset collateralAmount term targetToken state
+handleCreatePosition :: String -> TokenType -> Number -> TokenType -> Number -> TermCommitment -> Boolean -> Maybe String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleCreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state = do
+  result <- PositionActions.createPosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state
   case result of
     Left err -> pure $ Left err
     Right { position, positionTokenMap } -> do
@@ -104,7 +124,9 @@ handleCreatePosition user lendAsset amount collateralAsset collateralAmount term
             { positionTokenMap = positionTokenMap
             , timestamp = timestamp 
             }
-      pure $ Right $ Tuple newState (PositionCreated position)
+      -- Convert from P.Position to foreign Position type
+      let convertedPosition = unsafeCoerce position
+      pure $ Right $ Tuple newState (PositionCreated convertedPosition)
 
 -- | Handle token transfer command
 handleTransferTokens :: String -> String -> TokenType -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -123,10 +145,10 @@ handleEnterFeelsSOL user jitoAmount state = do
   result <- FeelsSOLActions.enterFeelsSOL user jitoAmount state
   case result of
     Left err -> pure $ Left err
-    Right feelsSOLMinted -> do
+    Right mintResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      pure $ Right $ Tuple newState (FeelsSOLMinted { user, feelsSOLMinted })
+      pure $ Right $ Tuple newState (FeelsSOLMinted mintResult)
 
 -- | Handle FeelsSOL exit command
 handleExitFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -134,10 +156,10 @@ handleExitFeelsSOL user feelsAmount state = do
   result <- FeelsSOLActions.exitFeelsSOL user feelsAmount state
   case result of
     Left err -> pure $ Left err
-    Right jitoSOLReceived -> do
+    Right burnResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      pure $ Right $ Tuple newState (FeelsSOLBurned { user, jitoSOLReceived })
+      pure $ Right $ Tuple newState (FeelsSOLBurned burnResult)
 
 -- | Handle unbonding initiation
 handleInitiateUnbonding :: String -> Int -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -172,12 +194,15 @@ handleCreateOffering ticker totalTokens phases state = do
                , treasuryAddress: "treasury"
                }
   
-  offeringState <- Offering.initOffering config
-  let poolId = "FeelsSOL/" <> ticker
-      newState = state { offerings = Map.insert poolId offeringState state.offerings
-                       , timestamp = state.timestamp 
-                       }
-  pure $ Right $ Tuple newState (OfferingCreated poolId ticker)
+  offeringResult <- Offering.initOffering config
+  case offeringResult of
+    Left err -> pure $ Left err
+    Right offeringState -> do
+      let poolId = "FeelsSOL/" <> ticker
+          newState = state { offerings = Map.insert poolId offeringState state.offerings
+                           , timestamp = state.timestamp 
+                           }
+      pure $ Right $ Tuple newState (OfferingCreated poolId ticker)
   where
     convertPhase p = 
       { phase: parsePhase p.phase
@@ -187,8 +212,7 @@ handleCreateOffering ticker totalTokens phases state = do
       , tickLower: priceToTick p.priceLower
       , tickUpper: priceToTick p.priceUpper
       }
-    parsePhase "Weekly" = WeeklyPhase
-    parsePhase "Daily" = DailyPhase
+    parsePhase "Monthly" = MonthlyPhase
     parsePhase _ = SpotPhase
     priceToTick price = floor (log price / log 1.0001)
 
@@ -243,8 +267,8 @@ executeCommand :: ProtocolCommand -> ProtocolState -> Effect (Either ProtocolErr
 executeCommand cmd state = case cmd of
   CreateToken creator ticker name -> 
     handleCreateToken creator ticker name state
-  CreatePosition user lendAsset amount collateralAsset collateralAmount term targetToken ->
-    handleCreatePosition user lendAsset amount collateralAsset collateralAmount term targetToken state
+  CreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken ->
+    handleCreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state
   TransferTokens from to token amount ->
     handleTransferTokens from to token amount state
   EnterFeelsSOL user amount ->

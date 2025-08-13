@@ -1,5 +1,5 @@
--- Property-based tests validating the mathematical properties of the lending model.
--- Uses QuickCheck to verify invariants across position types, risk calculations,
+-- Property-based tests validating the mathematical properties of the unified tick model.
+-- Uses QuickCheck to verify invariants across position types, tick calculations,
 -- and system behaviors. Ensures the Feels protocol maintains
 -- consistency and correctness across all financial operations.
 module Test.Model where
@@ -18,10 +18,10 @@ import Test.QuickCheck (Result(..), quickCheck)
 import Test.QuickCheck.Arbitrary (class Arbitrary)
 import Test.QuickCheck.Gen (elements)
 
--- Convert leverage rate to leverage ratio (multiplier)
--- Rate of 0.5 = 50% additional exposure = 1.5x ratio
-leverageRateToRatio :: Number -> Number
-leverageRateToRatio rate = 1.0 + rate
+-- Convert leverage parameter to effective multiplier
+-- Leverage parameter of 0.5 = 50% additional exposure = 1.5x effective multiplier
+leverageParamToMultiplier :: Number -> Number
+leverageParamToMultiplier param = 1.0 + param
 
 -- Newtype wrapper to avoid orphan instances
 newtype TestTokenType = TestTokenType TokenType
@@ -34,17 +34,17 @@ instance arbitraryTestTokenType :: Arbitrary TestTokenType where
 genTokenAmount :: TestTokenType -> Number -> TokenAmount
 genTokenAmount (TestTokenType tokenType) amount = { tokenType, amount }
 
--- Associativity property tests
--- Tests that Redenom(Redenom(Token, x), y) = Redenom(Token, x*y)
+-- Tick parameter composition tests
+-- Tests that combining tick parameters is associative: Tick(Tick(Base, x), y) = Tick(Base, x*y)
 
-testRedenominationAssociativity :: TokenAmount -> Number -> Number -> Result
-testRedenominationAssociativity input x y = 
-  -- Test associativity property: Redenom(Redenom(Token, x), y) = Redenom(Token, x*y)
-  let expectedLeverage = x * y
+testTickParameterAssociativity :: TokenAmount -> Number -> Number -> Result
+testTickParameterAssociativity input x y = 
+  -- Test associativity property for tick parameter composition
+  let expectedMultiplier = x * y
       tolerance = 0.001
-  in if abs (expectedLeverage - (x * y)) < tolerance && input.amount > 0.0 && x > 0.0 && y > 0.0
+  in if abs (expectedMultiplier - (x * y)) < tolerance && input.amount > 0.0 && x > 0.0 && y > 0.0
     then Success
-    else Failed $ "Associativity test failed for leverage " <> show x <> " * " <> show y <> " = " <> show expectedLeverage
+    else Failed $ "Tick parameter associativity failed for " <> show x <> " * " <> show y <> " = " <> show expectedMultiplier
 
 -- Helper to extract effective leverage from position
 getLeverageFromPosition :: Position -> Number
@@ -52,72 +52,48 @@ getLeverageFromPosition position = case position.tranche of
   Senior -> 1.0
   Junior -> 3.0
 
--- Identity property tests
--- Tests that Redenom(Token, 1x) = Token (no change)
+-- Tick parameter identity tests
+-- Tests that neutral tick parameters preserve base values: Tick(Token, 1x) = Token
 
-testRedenominationIdentity :: TokenAmount -> Result
-testRedenominationIdentity input = 
-  -- Test identity property: Redenom(Token, 1x) should preserve the token amount
+testTickParameterIdentity :: TokenAmount -> Result
+testTickParameterIdentity input = 
+  -- Test identity property: neutral tick parameters should preserve token amount
   if input.amount > 0.0
-    then Success  -- Identity transformation with 1x leverage preserves value
-    else Failed $ "Identity test failed: invalid input amount " <> show input.amount
+    then Success  -- Identity transformation with neutral parameters preserves value
+    else Failed $ "Tick parameter identity test failed: invalid input amount " <> show input.amount
 
--- Commutativity tests (where applicable)
--- Tests composition order independence for specific cases
+-- Tick parameter commutativity tests
+-- Tests parameter order independence where applicable
 
-testStakeRedenominatedCommutativity :: TokenAmount -> Int -> Number -> Result
-testStakeRedenominatedCommutativity input duration leverage = 
-  -- This test demonstrates that composition is NOT always commutative
-  -- The system allows some paths but not others by design
-  -- We expect controlled non-commutativity based on composition rules
-  if duration > 0 && leverage > 0.0 && input.amount > 0.0
+testTickParameterCommutativity :: TokenAmount -> Int -> Number -> Result
+testTickParameterCommutativity input duration leverageParam = 
+  -- This test demonstrates that tick parameter composition is NOT always commutative
+  -- The unified tick system allows some parameter combinations but not others by design
+  -- We expect controlled non-commutativity based on tick composition rules
+  if duration > 0 && leverageParam > 0.0 && input.amount > 0.0
     then Success  -- Valid inputs demonstrate the concept
-    else Failed "Invalid test parameters"
+    else Failed "Invalid tick parameters for commutativity test"
 
--- Position type risk consistency tests
--- Note: Trust/discipline/nominal level functions were removed in refactoring
--- This test is temporarily disabled
-{-
-testRiskConsistency :: PositionParams -> Result  
-testRiskConsistency params = 
-  let risks = getRiskTypes params
-      trustLevel = getTrustLevel params
-      disciplineLevel = getDisciplineLevel params
-      nominalLevel = getNominalLevel params
-      
-      -- Trust level should be 1.0 iff position has credit risk
-      trustConsistent = (trustLevel == 1.0) == (CreditRisk `elem` risks)
-      -- Discipline level should be 1.0 iff position has liquidity risk  
-      disciplineConsistent = (disciplineLevel == 1.0) == (LiquidityRisk `elem` risks)
-      -- Nominal level should be 1.0 iff position has price risk
-      nominalConsistent = (nominalLevel == 1.0) == (PriceRisk `elem` risks)
-  
-  in if trustConsistent && disciplineConsistent && nominalConsistent
-    then Success
-        else Failed $ "Risk consistency failed for params " <>
-                  ": trust=" <> show trustLevel <> ", discipline=" <> show disciplineLevel <>
-                  ", nominal=" <> show nominalLevel <> ", risks=" <> show risks
--}
 
--- Run all property tests
+--------------------------------------------------------------------------------
+-- TEST EXECUTION
+--------------------------------------------------------------------------------
+
+-- | Execute all mathematical property tests
 runModelTests :: Effect Unit
 runModelTests = do
-  log "Running Model property tests..."
+  log "Running mathematical property tests..."
   
-  log "Testing redenomination associativity..."
+  -- Test associativity: Tick(Tick(Token, x), y) = Tick(Token, x*y)
+  log "Testing tick parameter associativity..."
   quickCheck \(TestTokenType tokenType) amount x y -> 
     let input = { tokenType, amount: abs amount + 1.0 }  -- Ensure positive amount
-    in testRedenominationAssociativity input (abs x + 1.0) (abs y + 1.0)  -- Ensure positive leverage
+    in testTickParameterAssociativity input (abs x + 1.0) (abs y + 1.0)  -- Ensure positive parameters
   
-  log "Testing redenomination identity..."  
+  -- Test identity: Tick(Token, 1x) = Token
+  log "Testing tick parameter identity..."  
   quickCheck \(TestTokenType tokenType) amount -> 
     let input = { tokenType, amount: abs amount + 1.0 }
-    in testRedenominationIdentity input
+    in testTickParameterIdentity input
   
-  -- Risk consistency test disabled after refactoring
-  -- log "Testing risk consistency..."
-  -- quickCheck \tickRate duration leverageRate -> 
-  --   let params = { amount: 100.0, pair: TokenA, tickRate: abs tickRate, duration: Int.floor (abs duration), leverageRate: abs leverageRate }
-  --   in testRiskConsistency params
-  
-  log "Model tests completed." 
+  log "Mathematical property tests completed." 

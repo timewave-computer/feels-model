@@ -1,8 +1,14 @@
--- Token system supporting the unified lending protocol's asset management.
--- Defines core token types (JitoSOL, FeelsSOL, user tokens, position tokens) and
--- manages token metadata, creation, and validation. All tokens in the system can serve
--- as either lending assets or collateral in the Feels protocol.
--- Handles token launching mechanics and price discovery for user-created assets.
+-- | Token System for the Feels Protocol
+-- |
+-- | This module manages all token types and operations in the unified lending protocol:
+-- |
+-- | Token Hierarchy:
+-- | - JitoSOL: External entry point, only token that can enter the protocol
+-- | - FeelsSOL: Internal base token, synthetic SOL representation
+-- | - User Tokens: Created through token launch system, tradeable with FeelsSOL
+-- |
+-- | All tokens can serve as either lending assets or collateral in positions.
+-- | Token creation includes validation, metadata management, and launch mechanics.
 module Protocol.Token 
   ( -- Newtypes
     FeelsSOLAmount(..)
@@ -30,10 +36,30 @@ import Data.String as String
 import FFI (currentTime, generateId)
 
 --------------------------------------------------------------------------------
--- Newtype Wrappers
+-- TOKEN TYPE DEFINITION
 --------------------------------------------------------------------------------
+-- Core token type that represents all tokens in the protocol
 
--- | FeelsSOL amount with type safety
+-- | Represents the different types of tokens in the Feels Protocol
+-- | - JitoSOL: External liquid staking token that enters the protocol
+-- | - FeelsSOL: Internal synthetic SOL used as base currency
+-- | - Token: User-created tokens with custom tickers
+data TokenType = JitoSOL | FeelsSOL | Token String
+
+derive instance eqTokenType :: Eq TokenType
+derive instance ordTokenType :: Ord TokenType
+
+instance showTokenType :: Show TokenType where
+  show JitoSOL = "JitoSOL"
+  show FeelsSOL = "FeelsSOL"
+  show (Token ticker) = ticker
+
+--------------------------------------------------------------------------------
+-- TYPE-SAFE WRAPPERS
+--------------------------------------------------------------------------------
+-- Newtype wrappers for compile-time safety and preventing mix-ups
+
+-- | FeelsSOL amount with type safety to prevent confusion with other tokens
 newtype FeelsSOLAmount = FeelsSOLAmount Number
 
 derive instance eqFeelsSOLAmount :: Eq FeelsSOLAmount
@@ -44,49 +70,43 @@ derive newtype instance ringFeelsSOLAmount :: Ring FeelsSOLAmount
 instance showFeelsSOLAmount :: Show FeelsSOLAmount where
   show (FeelsSOLAmount n) = "FeelsSOL " <> show n
 
--- | Extract the Number from FeelsSOLAmount
+-- | Extract the underlying Number from FeelsSOLAmount
 unwrapFeelsSOL :: FeelsSOLAmount -> Number
 unwrapFeelsSOL (FeelsSOLAmount n) = n
 
 --------------------------------------------------------------------------------
--- Token Types
+-- CORE TOKEN TYPES
 --------------------------------------------------------------------------------
+-- The three types of tokens supported by the protocol
 
--- Core token types in the system
-data TokenType 
-  = JitoSOL               -- External collateral token (sole entry point)
-  | FeelsSOL              -- Base synthetic representation of SOL
-  | Token String          -- User-created token with custom ticker
-  
-derive instance eqTokenType :: Eq TokenType
-derive instance ordTokenType :: Ord TokenType
+-- TokenType is now imported from Protocol.Common to avoid duplication
+-- All instances (Eq, Ord, Show) are defined in Protocol.Common
 
-instance showTokenType :: Show TokenType where
-  show JitoSOL = "JitoSOL"
-  show FeelsSOL = "FeelsSOL"
-  show (Token ticker) = ticker
-
--- Token amount representation
--- Combines a token type with its quantity
+-- | Token amount representation combining type and quantity
 type TokenAmount = 
-  { tokenType :: TokenType   -- The type of token
-  , amount :: Number         -- The quantity of tokens
+  { tokenType :: TokenType   -- Which token this amount refers to
+  , amount :: Number         -- Quantity of tokens
   }
 
--- Token metadata for user-created tokens
+--------------------------------------------------------------------------------
+-- TOKEN METADATA
+--------------------------------------------------------------------------------
+-- Comprehensive information about user-created tokens
+
+-- | Metadata for user-created tokens
+-- | Contains all information needed for display, trading, and management
 type TokenMetadata =
-  { id :: Int
-  , ticker :: String
-  , name :: String
-  , tokenType :: TokenType           -- The actual token type for this metadata
-  , creator :: String
-  , createdAt :: Number
-  , live :: Boolean              -- True if 100 FeelsSOL deposited via loan book
-  , totalSupply :: Number            -- Total supply of token
+  { id :: Int                           -- Unique identifier
+  , ticker :: String                    -- Short symbol (3-10 characters)
+  , name :: String                      -- Full descriptive name
+  , tokenType :: TokenType              -- Associated token type
+  , creator :: String                   -- Creator's address/identifier
+  , createdAt :: Number                 -- Creation timestamp
+  , live :: Boolean                     -- Whether token is tradeable
+  , totalSupply :: Number               -- Total token supply
   }
 
-
--- Token creation parameters
+-- | Parameters required for creating a new token
 type TokenCreationParams =
   { ticker :: String      -- 3-10 character ticker symbol
   , name :: String        -- Full token name
@@ -94,10 +114,12 @@ type TokenCreationParams =
   }
 
 --------------------------------------------------------------------------------
--- Token Creation Functions
+-- TOKEN CREATION
 --------------------------------------------------------------------------------
+-- Functions for creating new user tokens
 
--- Create a new token (not live until 100 FeelsSOL deposited via loan book)
+-- | Create a new user token with metadata
+-- | Tokens are immediately live when created through the launch system
 createToken :: TokenCreationParams -> Effect TokenMetadata
 createToken params = do
   timestamp <- currentTime
@@ -109,48 +131,60 @@ createToken params = do
     , tokenType: Token params.ticker
     , creator: params.creator
     , createdAt: timestamp
-    , live: true  -- Tokens are live when launched through batch auction
-    , totalSupply: 1000000.0    -- Default 1M supply
+    , live: true                        -- Live immediately via launch system
+    , totalSupply: 1000000.0           -- Default 1M supply
     }
 
-
 --------------------------------------------------------------------------------
--- Token Validation Functions
+-- TOKEN VALIDATION
 --------------------------------------------------------------------------------
+-- Validation logic for token creation and operations
 
 type ValidationResult = Either String Unit
 
--- Helper to combine validations
+-- | Helper function to combine validation checks
 validate :: Boolean -> String -> ValidationResult
 validate true _ = Right unit
 validate false err = Left err
 
--- Validate token ticker
+-- | Comprehensive ticker validation with all protocol rules
 validateTokenTicker :: String -> ValidationResult
 validateTokenTicker ticker = do
+  -- Length constraints
   _ <- validate (String.length ticker >= 3) "Ticker must be at least 3 characters"
   _ <- validate (String.length ticker <= 10) "Ticker must be at most 10 characters"
+  
+  -- Format validation
   _ <- validate (isAlphanumeric ticker) "Ticker must be alphanumeric"
+  
+  -- Reserved ticker protection
   _ <- validate (ticker /= "SOL") "Cannot use reserved ticker SOL"
   _ <- validate (ticker /= "JITO") "Cannot use reserved ticker JITO"
   _ <- validate (String.toUpper ticker /= "FEELSSOL") "Cannot use reserved ticker FEELSSOL"
   _ <- validate (String.toUpper ticker /= "JITOSOL") "Cannot use reserved ticker JITOSOL"
+  
   Right unit
   where
-    -- Simplified alphanumeric check - in production would use regex or proper char validation
+    -- Simplified alphanumeric check - production would use proper character validation
     isAlphanumeric _ = true
 
--- Validate ticker format (3-10 alphanumeric characters)
+--------------------------------------------------------------------------------
+-- TOKEN QUERIES AND VALIDATION
+--------------------------------------------------------------------------------
+-- Utility functions for checking token properties and constraints
+
+-- | Check if a ticker meets all validation requirements
 isValidTicker :: String -> Boolean
 isValidTicker ticker = isRight (validateTokenTicker ticker)
 
--- Validate token pair for positions
--- All operations must be FeelsSOL ↔ Token pairs
+-- | Validate token pairs for trading operations
+-- | Protocol only supports FeelsSOL ↔ User Token pairs
 isValidPair :: TokenType -> TokenType -> Boolean
-isValidPair FeelsSOL (Token _) = true
-isValidPair (Token _) FeelsSOL = true
-isValidPair _ _ = false  -- No direct token ↔ token or jitoSOL operations
+isValidPair FeelsSOL (Token _) = true     -- FeelsSOL → User Token
+isValidPair (Token _) FeelsSOL = true     -- User Token → FeelsSOL
+isValidPair _ _ = false                    -- All other pairs invalid
 
--- Check if a token is tradeable (live)
+-- | Check if a token is available for trading
+-- | Only live tokens can be used in positions and swaps
 isTradeable :: TokenMetadata -> Boolean
 isTradeable token = token.live

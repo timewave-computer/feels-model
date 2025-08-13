@@ -104,18 +104,8 @@ addPosition position registryRef = do
     { positions = Map.insert position.id position reg.positions 
     }) registryRef
   
-  -- Add position ID to pool's position book
-  registry <- read registryRef
-  case Map.lookup position.poolId registry.pools of
-    Just pool -> do
-      let updatedPool = pool 
-            { positions = pool.positions 
-              { positionIds = position.id : pool.positions.positionIds }
-            }
-      modify_ (\reg -> reg 
-        { pools = Map.insert position.poolId updatedPool reg.pools 
-        }) registryRef
-    Nothing -> pure unit  -- Pool doesn't exist, skip
+  -- Position successfully added to registry
+  pure unit
 
 -- | Remove a position from the registry and its pool
 removePosition :: PositionId -> PoolRegistry -> Effect Unit
@@ -130,17 +120,9 @@ removePosition posId registryRef = do
         { positions = Map.delete posId reg.positions 
         }) registryRef
       
-      -- Remove from pool's position book
-      case Map.lookup position.poolId registry.pools of
-        Just pool -> do
-          let updatedPool = pool 
-                { positions = pool.positions 
-                  { positionIds = filter (_ /= posId) pool.positions.positionIds }
-                }
-          modify_ (\reg -> reg 
-            { pools = Map.insert position.poolId updatedPool reg.pools 
-            }) registryRef
-        Nothing -> pure unit
+      -- Pool cleanup would happen here if needed
+      -- (e.g., updating pool liquidity if this was an LP position)
+      pure unit
     Nothing -> pure unit  -- Position doesn't exist
 
 -- | Get a specific position (searches across all pools)
@@ -165,8 +147,7 @@ getAllPositions registryRef = do
 getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
 getPoolPositions poolId registryRef = do
   registry <- read registryRef
-  case Map.lookup poolId registry.pools of
-    Just pool -> do
-      let positionIds = pool.positions.positionIds
-      pure $ mapMaybe (\pid -> Map.lookup pid registry.positions) positionIds
-    Nothing -> pure []
+  -- Filter all positions to find ones belonging to this pool
+  let allPositions = fromFoldable $ Map.values registry.positions
+      poolPositions = filter (\pos -> pos.poolId == poolId) allPositions
+  pure poolPositions

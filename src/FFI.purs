@@ -45,6 +45,7 @@ foreign import sin :: Number -> Number
 foreign import cos :: Number -> Number
 foreign import log :: Number -> Number
 foreign import exp :: Number -> Number
+foreign import pow :: Number -> Number -> Number
 foreign import generateRecordId :: Effect Int
 
 -- DOM attribute access
@@ -53,6 +54,7 @@ foreign import getAttribute :: String -> Element -> Effect String
 -- Chart rendering
 foreign import initializePriceChart :: Effect Unit
 foreign import checkAndInitializeChart :: Effect Unit
+foreign import setChartData :: forall a. a -> Effect Unit
 
 -- Remote control functions
 foreign import registerRemoteAction :: forall a. String -> (Foreign -> Effect a) -> Effect Unit

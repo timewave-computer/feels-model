@@ -2,7 +2,7 @@
 -- |
 -- | This module implements a two-tranche position model:
 -- | - Tranche Selection: Senior (1x) or Junior (3x) exposure
--- | - Term Commitment: Spot, Hourly, Daily, or Weekly synchronized terms
+-- | - Term Commitment: Spot or Monthly (28-day) synchronized terms
 -- | - Share-based accounting within tranches
 -- | - No liquidations - positions adjust in value only
 module Protocol.Position
@@ -20,19 +20,12 @@ module Protocol.Position
   , getNextExpiry
   , rollToSpot
   , isExpired
-  , getNextHourlyExpiry
-  , getNextDailyExpiry
-  , getNextWeeklyExpiry
-  , blocksPerHour
-  , blocksPerDay
-  , blocksPerWeek
-  , estimateTimeFromBlocks
+  , getNextMonthlyExpiry
+  , blocksPerMonth
   , blocksUntilExpiry
   -- Term commitment constructors
   , spotTerm
-  , hourlyTerm
-  , dailyTerm
-  , weeklyTerm
+  , monthlyTerm
   -- Term scheduling
   , TermSchedule
   , ExpiryBatch
@@ -45,15 +38,18 @@ import Prelude
 import Data.Maybe (Maybe(..))
 import Data.Int (toNumber, round)
 import Data.Array as Array
-import Data.Array ((:), head)
+import Data.Array ((:), head, filter, groupBy, sortWith)
+import Data.Array.NonEmpty as NEA
+import Data.Array.NonEmpty (NonEmptyArray)
 import Protocol.Token (TokenType)
 import Protocol.Common (PoolId, PositionId, BlockNumber, ShareAmount)
 
 --------------------------------------------------------------------------------
--- Core Types
+-- CORE TYPE DEFINITIONS
 --------------------------------------------------------------------------------
+-- The fundamental types that define positions, tranches, and term commitments
 
--- | Position structure
+-- | Position structure - represents a user's lending position in the protocol
 type Position =
   { id :: PositionId
   , poolId :: PoolId               -- Pool this position belongs to
@@ -61,13 +57,14 @@ type Position =
   , amount :: Number               -- Initial capital invested
   , tranche :: Tranche             -- Senior (1x) or Junior (3x)
   , term :: TermCommitment         -- Synchronized term commitment
+  , rollover :: Boolean            -- Whether position auto-rolls to next term
   , shares :: ShareAmount          -- Shares within their tranche
   , createdAt :: BlockNumber       -- Creation block number
   , value :: Number                -- Current value (never liquidated)
   , lockedAmount :: Number         -- Amount locked below floor
   }
 
--- | Tranche selection (replaces leverage system)
+-- | Tranche selection - replaces traditional leverage with risk/reward tiers
 data Tranche
   = Senior    -- 1x exposure, protected, lower yield
   | Junior    -- 3x exposure, first loss, higher yield
@@ -81,269 +78,215 @@ instance showTranche :: Show Tranche where
 
 -- | Term commitment with synchronized block-based expiries
 data TermCommitment
-  = Spot                           -- Perpetual, no expiry
-  | Hourly BlockNumber             -- Expires at hourly block boundary
-  | Daily BlockNumber              -- Expires at daily block boundary
-  | Weekly BlockNumber             -- Expires at weekly block boundary
+  = Spot                           -- Perpetual swap, no expiry
+  | Monthly BlockNumber            -- 28-day term, expires at block boundary
 
 derive instance eqTermCommitment :: Eq TermCommitment
 
 instance showTermCommitment :: Show TermCommitment where
-  show Spot = "Spot"
-  show (Hourly expiryBlock) = "Hourly (expires block " <> show expiryBlock <> ")"
-  show (Daily expiryBlock) = "Daily (expires block " <> show expiryBlock <> ")"
-  show (Weekly expiryBlock) = "Weekly (expires block " <> show expiryBlock <> ")"
+  show Spot = "Spot (Perpetual)"
+  show (Monthly expiryBlock) = "Monthly (expires block " <> show expiryBlock <> ")"
+
+--------------------------------------------------------------------------------
+-- SYSTEM CONSTANTS
+--------------------------------------------------------------------------------
+-- Block timing constants used throughout the term system
+
+-- | Blocks per month (28 days, assuming 30-second blocks on Solana)
+-- | 2 blocks per minute * 60 * 24 * 28 = 80640 blocks
+blocksPerMonth :: Int
+blocksPerMonth = 80640
 
 
 --------------------------------------------------------------------------------
--- Position Creation
+-- TERM COMMITMENT CONSTRUCTORS
 --------------------------------------------------------------------------------
+-- Validated ways to create term commitments
 
--- | Create a new position
+-- | Create a spot term commitment (perpetual swap, no expiry)
+spotTerm :: TermCommitment
+spotTerm = Spot
+
+-- | Create a monthly term commitment (28 days from current block)
+monthlyTerm :: Int -> TermCommitment
+monthlyTerm currentBlock = Monthly (getNextMonthlyExpiry currentBlock)
+
+--------------------------------------------------------------------------------
+-- POSITION CREATION
+--------------------------------------------------------------------------------
+-- Functions for creating new positions
+
+-- | Create a new position with all required parameters
 createPosition :: 
-  PositionId ->    -- ID
-  PoolId ->        -- Pool ID
-  String ->        -- Owner
-  Number ->        -- Amount
-  Tranche ->       -- Senior or Junior
-  TermCommitment -> -- Term
-  ShareAmount ->   -- Shares calculated by pool
-  BlockNumber ->   -- Current block number
+  PositionId ->     -- Unique position identifier
+  PoolId ->         -- Pool this position belongs to
+  String ->         -- Position owner
+  Number ->         -- Initial investment amount
+  Tranche ->        -- Senior (1x) or Junior (3x) tranche
+  TermCommitment -> -- Term commitment (Spot or Monthly)
+  Boolean ->        -- Auto-rollover setting
+  ShareAmount ->    -- Shares allocated by pool (calculated elsewhere)
+  BlockNumber ->    -- Current block number
   Position
-createPosition id poolId owner amount tranche term shares currentBlock =
+createPosition id poolId owner amount tranche term rollover shares currentBlock =
   { id
   , poolId
   , owner
   , amount
   , tranche
   , term
+  , rollover
   , shares
   , createdAt: currentBlock
-  , value: amount  -- Initial value equals amount
+  , value: amount  -- Initial value equals amount invested
   , lockedAmount: 0.0
   }
 
 --------------------------------------------------------------------------------
--- Position Queries
+-- POSITION QUERIES AND INSPECTION
 --------------------------------------------------------------------------------
+-- Functions to inspect position properties and current state
 
--- | Get current position value
+-- | Get current position value (never liquidated, only adjusted)
 getPositionValue :: Position -> Number
 getPositionValue pos = pos.value
 
--- | Check if position is spot (perpetual)
+-- | Check if position is spot (perpetual swap, no expiry)
 isSpot :: Position -> Boolean
 isSpot pos = case pos.term of
   Spot -> true
   _ -> false
 
--- | Check if position has term commitment
+-- | Check if position has a term commitment (will expire)
 isTermPosition :: Position -> Boolean
 isTermPosition pos = not (isSpot pos)
 
--- | Get term expiry block number
+-- | Get term expiry block number if position has term commitment
 getTermExpiry :: Position -> Maybe Int
 getTermExpiry pos = case pos.term of
   Spot -> Nothing
-  Hourly expiryBlock -> Just expiryBlock
-  Daily expiryBlock -> Just expiryBlock
-  Weekly expiryBlock -> Just expiryBlock
+  Monthly expiryBlock -> Just expiryBlock
 
---------------------------------------------------------------------------------
--- Tranche Helpers
---------------------------------------------------------------------------------
-
--- | Get tranche multiplier
-getTrancheMultiplier :: Tranche -> Number
-getTrancheMultiplier tranche = case tranche of
-  Senior -> 1.0
-  Junior -> 3.0  -- Fixed 3x for MVP
-
--- | Check if position is in junior tranche
-isJunior :: Position -> Boolean
-isJunior pos = pos.tranche == Junior
-
--- | Check if position is in senior tranche
+-- | Check if position is in senior tranche (1x exposure, protected)
 isSenior :: Position -> Boolean
 isSenior pos = pos.tranche == Senior
 
---------------------------------------------------------------------------------
--- Term System Constants and Functions
---------------------------------------------------------------------------------
+-- | Check if position is in junior tranche (3x exposure, first loss)
+isJunior :: Position -> Boolean
+isJunior pos = pos.tranche == Junior
 
--- | Blocks per hour (assuming 30-second blocks on Solana)
--- | 2 blocks per minute * 60 minutes = 120 blocks
-blocksPerHour :: Int
-blocksPerHour = 120
-
--- | Blocks per day
--- | 120 blocks per hour * 24 hours = 2880 blocks
-blocksPerDay :: Int
-blocksPerDay = 2880
-
--- | Blocks per week
--- | 2880 blocks per day * 7 days = 20160 blocks
-blocksPerWeek :: Int
-blocksPerWeek = 20160
+-- | Get the exposure multiplier for a tranche
+getTrancheMultiplier :: Tranche -> Number
+getTrancheMultiplier tranche = case tranche of
+  Senior -> 1.0  -- Protected exposure
+  Junior -> 3.0  -- Fixed 3x exposure for MVP
 
 --------------------------------------------------------------------------------
--- Block-based Term Expiry Calculation
+-- TERM EXPIRY CALCULATION
 --------------------------------------------------------------------------------
+-- Core logic for calculating when positions expire and next expiry dates
 
--- | Get next synchronized expiry block for a term type
+-- | Get the next synchronized expiry block for a given term type
 getNextExpiry :: TermCommitment -> Int -> Int
 getNextExpiry term currentBlock =
   case term of
     Spot -> 2147483647              -- MaxInt32 (effectively never expires)
-    Hourly _ -> getNextHourlyExpiry currentBlock
-    Daily _ -> getNextDailyExpiry currentBlock
-    Weekly _ -> getNextWeeklyExpiry currentBlock
+    Monthly _ -> getNextMonthlyExpiry currentBlock
 
--- | Get next hourly boundary block
-getNextHourlyExpiry :: Int -> Int
-getNextHourlyExpiry currentBlock =
-  let currentPeriod = currentBlock / blocksPerHour
+-- | Calculate the next monthly boundary block (28-day synchronized expiry)
+getNextMonthlyExpiry :: Int -> Int
+getNextMonthlyExpiry currentBlock =
+  let currentPeriod = currentBlock / blocksPerMonth
       nextPeriod = currentPeriod + 1
-  in nextPeriod * blocksPerHour
+  in nextPeriod * blocksPerMonth
 
--- | Get next daily boundary block
-getNextDailyExpiry :: Int -> Int
-getNextDailyExpiry currentBlock =
-  let currentPeriod = currentBlock / blocksPerDay
-      nextPeriod = currentPeriod + 1
-  in nextPeriod * blocksPerDay
-
--- | Get next weekly boundary block
-getNextWeeklyExpiry :: Int -> Int
-getNextWeeklyExpiry currentBlock =
-  let currentPeriod = currentBlock / blocksPerWeek
-      nextPeriod = currentPeriod + 1
-  in nextPeriod * blocksPerWeek
-
--- | Calculate blocks until expiry
+-- | Calculate blocks remaining until a term commitment expires
 blocksUntilExpiry :: TermCommitment -> Int -> Int
 blocksUntilExpiry term currentBlock =
   case term of
-    Spot -> 2147483647  -- MaxInt32
-    Hourly expiryBlock -> max 0 (expiryBlock - currentBlock)
-    Daily expiryBlock -> max 0 (expiryBlock - currentBlock)
-    Weekly expiryBlock -> max 0 (expiryBlock - currentBlock)
+    Spot -> 2147483647  -- MaxInt32 (never expires)
+    Monthly expiryBlock -> max 0 (expiryBlock - currentBlock)
 
 --------------------------------------------------------------------------------
--- Term Expiry Processing
+-- TERM EXPIRY PROCESSING
 --------------------------------------------------------------------------------
+-- Functions for handling position expiry and rollover logic
 
--- | Check if position is expired based on current block
+-- | Check if a position has expired based on current block
 isExpired :: Int -> Position -> Boolean
 isExpired currentBlock position =
   case position.term of
     Spot -> false  -- Spot positions never expire
-    Hourly expiryBlock -> currentBlock >= expiryBlock
-    Daily expiryBlock -> currentBlock >= expiryBlock
-    Weekly expiryBlock -> currentBlock >= expiryBlock
+    Monthly expiryBlock -> currentBlock >= expiryBlock
 
--- | Roll expired position to spot
+-- | Handle an expired position based on its rollover setting
+handleExpiredPosition :: Position -> Int -> Position
+handleExpiredPosition position currentBlock =
+  if position.rollover
+    then -- Auto-roll to next monthly term
+      position { term = Monthly (getNextMonthlyExpiry currentBlock) }
+    else -- Convert to spot (no further expiry)
+      rollToSpot position
+
+-- | Convert a position to spot (remove term commitment)
 rollToSpot :: Position -> Position
-rollToSpot position =
-  position { term = Spot }
-  -- Note: In full implementation, this would also:
-  -- - Adjust shares based on any term completion bonuses
-  -- - Update position value with accumulated fees
-  -- - Trigger any necessary rebalancing
+rollToSpot position = position { term = Spot }
 
 --------------------------------------------------------------------------------
--- UI Helper Functions
+-- BATCH TERM SCHEDULING
 --------------------------------------------------------------------------------
+-- Higher-level functions for managing multiple positions and synchronized expiries
 
--- | Estimate time remaining from blocks (for UI display only)
--- | Returns a human-readable string
-estimateTimeFromBlocks :: Int -> String
-estimateTimeFromBlocks blocks =
-  if blocks <= 0 then
-    "Expired"
-  else if blocks < blocksPerHour then
-    let minutes = round (toNumber blocks * 0.5)  -- 30-second blocks
-    in show minutes <> " minutes"
-  else if blocks < blocksPerDay then
-    let hours = blocks / blocksPerHour
-    in show hours <> " hours"
-  else if blocks < blocksPerWeek then
-    let days = blocks / blocksPerDay
-    in show days <> " days"
-  else
-    let weeks = blocks / blocksPerWeek
-    in show weeks <> " weeks"
-
---------------------------------------------------------------------------------
--- Term Commitment Smart Constructors
---------------------------------------------------------------------------------
-
--- | Create a spot term commitment (no expiry)
-spotTerm :: TermCommitment
-spotTerm = Spot
-
--- | Create an hourly term commitment with next expiry
-hourlyTerm :: Int -> TermCommitment
-hourlyTerm currentBlock = Hourly (getNextHourlyExpiry currentBlock)
-
--- | Create a daily term commitment with next expiry
-dailyTerm :: Int -> TermCommitment
-dailyTerm currentBlock = Daily (getNextDailyExpiry currentBlock)
-
--- | Create a weekly term commitment with next expiry
-weeklyTerm :: Int -> TermCommitment
-weeklyTerm currentBlock = Weekly (getNextWeeklyExpiry currentBlock)
-
---------------------------------------------------------------------------------
--- Term Scheduling
---------------------------------------------------------------------------------
-
--- | Track synchronized term expiries
+-- | Track upcoming synchronized term expiry dates
 type TermSchedule =
-  { nextHourly :: BlockNumber      -- Next hourly expiry block
-  , nextDaily :: BlockNumber       -- Next daily expiry block
-  , nextWeekly :: BlockNumber      -- Next weekly expiry block
+  { nextMonthly :: BlockNumber      -- Next monthly expiry block
   }
 
--- | Batch of positions expiring at the same block
+-- | A batch of positions that expire at the same synchronized block
 type ExpiryBatch =
   { expiryBlock :: BlockNumber
   , positions :: Array Position
   }
 
--- | Get the next term expiry blocks
+-- | Get the next term expiry blocks for scheduling
 getNextTermExpiries :: BlockNumber -> TermSchedule
 getNextTermExpiries currentBlock =
-  { nextHourly: getNextHourlyExpiry currentBlock
-  , nextDaily: getNextDailyExpiry currentBlock
-  , nextWeekly: getNextWeeklyExpiry currentBlock
+  { nextMonthly: getNextMonthlyExpiry currentBlock
   }
 
--- | Group positions by their expiry block (simplified implementation)
+-- | Group positions by their expiry block for batch processing
 groupPositionsByExpiry :: Array Position -> Array ExpiryBatch
 groupPositionsByExpiry positions =
   let
-    -- Extract positions with expiries
-    termPositions = Array.filter isTermPosition positions
+    -- Extract positions with expiries and their expiry blocks
+    termPositionsWithExpiry = Array.mapMaybe getPositionWithExpiry positions
     
-    -- Simple implementation: create one batch for all term positions
-    -- TODO: Implement proper grouping by expiry block
-    createBatch :: Array Position -> Maybe ExpiryBatch  
-    createBatch [] = Nothing
-    createBatch ps = 
-      Array.head ps >>= \p ->
-        getTermExpiry p >>= \expiry ->
-          Just { expiryBlock: expiry, positions: ps }
+    -- Sort by expiry block for consistent ordering
+    sorted = sortWith _.expiry termPositionsWithExpiry
+    
+    -- Group positions by identical expiry blocks
+    grouped = groupBy (\a b -> a.expiry == b.expiry) sorted
+    
+    -- Convert grouped positions to ExpiryBatch format
+    toBatch :: NonEmptyArray { position :: Position, expiry :: BlockNumber } -> ExpiryBatch
+    toBatch group = 
+      let positions' = NEA.toArray $ map _.position group
+          expiry = (NEA.head group).expiry
+      in { expiryBlock: expiry, positions: positions' }
   in
-    case createBatch termPositions of
-      Just batch -> [batch]
-      Nothing -> []
+    map toBatch grouped
+  where
+    -- Extract position with its expiry block (if it has one)
+    getPositionWithExpiry :: Position -> Maybe { position :: Position, expiry :: BlockNumber }
+    getPositionWithExpiry pos = 
+      getTermExpiry pos >>= \expiry -> 
+        Just { position: pos, expiry: expiry }
 
--- | Process expired positions by rolling them to spot
+-- | Process all expired positions in an array, handling rollover settings
 processExpiredPositions :: BlockNumber -> Array Position -> Array Position
 processExpiredPositions currentBlock = map processOne
   where
     processOne pos = 
       if isExpired currentBlock pos
-      then rollToSpot pos
+      then handleExpiredPosition pos currentBlock
       else pos

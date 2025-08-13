@@ -3,6 +3,7 @@
 module UI.State
   ( UIState
   , LaunchInfo
+  , SystemStats
   , Action(..)
   , initialUIState
   , defaultSimulationConfig
@@ -12,7 +13,9 @@ module UI.State
 import Data.Maybe (Maybe(..))
 
 import Protocol.Token (TokenType(..))
+import Protocol.Common (Position, TokenMetadata)
 import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
+import UI.ProtocolState (AppRuntime)
 
 --------------------------------------------------------------------------------
 -- UI State Types
@@ -22,11 +25,13 @@ import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), 
 type UIState =
   { -- Current user context
     currentUser :: String
+  -- Protocol API runtime
+  , api :: Maybe AppRuntime
   -- Position Creation Form
   , inputAmount :: Number
   , selectedAsset :: TokenType
   , collateralAsset :: TokenType
-  , selectedTermType :: String  -- "spot", "hourly", "daily", "weekly"
+  , selectedTermType :: String  -- "spot", "monthly"
   -- FeelsSOL Form
   , showFeelsSOL :: Boolean
   , jitoSOLAmount :: Number
@@ -47,6 +52,14 @@ type UIState =
   -- UI State
   , loading :: Boolean
   , error :: Maybe String
+  -- Protocol Data (cached for UI display)
+  , userPositions :: Array Position
+  , lenderOffers :: Array Position
+  , protocolStats :: Maybe SystemStats
+  , userTokens :: Array TokenMetadata
+  , jitoBalance :: Number
+  , feelsBalance :: Number
+  , priceHistory :: Array { timestamp :: Number, block :: Int, price :: Number, polValue :: Number, tokens :: Array { ticker :: String, price :: Number, polFloor :: Number, live :: Boolean } }
   }
 
 -- Launch info type
@@ -56,6 +69,18 @@ type LaunchInfo =
   , currentPhase :: String
   , currentPrice :: Number
   , totalDistributed :: Number
+  }
+
+-- System stats type (cached from protocol queries)
+type SystemStats =
+  { totalValueLocked :: Number
+  , totalUsers :: Int
+  , activePositions :: Int
+  , liveTokens :: Int
+  , totalLenderOffers :: Int
+  , polBalance :: Number
+  , feelsSOLSupply :: Number
+  , jitoSOLLocked :: Number
   }
 
 -- Component Actions
@@ -97,6 +122,7 @@ data Action
 initialUIState :: UIState
 initialUIState =
   { currentUser: "main-user"
+  , api: Nothing
   -- Position Creation Form
   , inputAmount: 100.0
   , selectedAsset: FeelsSOL
@@ -122,6 +148,14 @@ initialUIState =
   -- UI State
   , loading: true
   , error: Nothing
+  -- Protocol Data (cached for UI display)
+  , userPositions: []
+  , lenderOffers: []
+  , protocolStats: Nothing
+  , userTokens: []
+  , jitoBalance: 0.0
+  , feelsBalance: 0.0
+  , priceHistory: []
   }
 
 -- Default simulation config

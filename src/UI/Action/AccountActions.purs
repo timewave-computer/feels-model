@@ -1,6 +1,6 @@
 -- | Account-related UI actions.
 -- | This module handles account operations orchestration for the frontend.
-module UI.Actions.AccountActions
+module UI.Action.AccountActions
   ( getBalance
   , transfer
   , transferTokens  -- Alias for transfer
@@ -13,9 +13,9 @@ import Effect (Effect)
 
 -- Import types
 import UI.ProtocolState (ProtocolState)
-import Protocol.Token (TokenType)
-import UI.AccountRegistry (getFeelsAccountBalance, updateFeelsAccountBalance)
-import Protocol.Errors (ProtocolError(..))
+import Protocol.Token (TokenType(..))
+import UI.Account (getFeelsAccountBalance, updateFeelsAccountBalance)
+import Protocol.Error (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- Account Operations

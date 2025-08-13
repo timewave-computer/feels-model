@@ -51,6 +51,7 @@ export const sin = (x) => Math.sin(x);
 export const cos = (x) => Math.cos(x);
 export const log = (x) => Math.log(x);
 export const exp = (x) => Math.exp(x);
+export const pow = (x) => (y) => Math.pow(x, y);
 
 // System state exports
 export const totalStaked = () => systemGlobalState.totalStaked;
@@ -1116,6 +1117,17 @@ if (typeof window !== 'undefined') {
   window.checkAndInitializeChart = checkAndInitializeChart;
   window.initializePriceChart = initializePriceChart;
 }
+
+// Set chart data in the hidden element
+export const setChartData = function(data) {
+  return function() {
+    const element = document.getElementById('chart-data-hidden');
+    if (element) {
+      element.textContent = JSON.stringify(data);
+      console.log('Chart data set:', data.length, 'points');
+    }
+  };
+};
 
 //==============================================================================
 // Math Functions (from Position.js and others)

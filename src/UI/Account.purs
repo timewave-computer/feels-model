@@ -1,7 +1,7 @@
--- | Account registry management for the UI.
+-- | Account and account registry management for the UI.
 -- | Manages local tracking of FeelsAccounts and ChainAccounts.
 -- | In the actual Solana implementation, accounts would be PDAs.
-module UI.AccountRegistry
+module UI.Account
   ( AccountRegistry
   , FeelsAccount
   , ChainAccount

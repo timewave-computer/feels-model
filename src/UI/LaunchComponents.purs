@@ -10,12 +10,19 @@ import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
 
--- import Protocol.Launch.Launch (LaunchPhase(..), BatchResult) -- Module not found
+import Protocol.Offering (OfferingPhase(..))
+import Utils (formatAmount)
 
--- Temporary types until Launch modules are created
-data LaunchPhase = LaunchPhaseA | LaunchPhaseB
-type BatchResult = { success :: Boolean }
--- import Utils (formatAmount) -- Module not found
+-- Use OfferingPhase instead of LaunchPhase
+type LaunchPhase = OfferingPhase
+type BatchResult = 
+  { success :: Boolean
+  , batchNumber :: Int
+  , winners :: Array String
+  , basePayment :: Number
+  , avgPriorityFeeRatio :: Number
+  , protocolRevenue :: Number
+  }
 
 --------------------------------------------------------------------------------
 -- Types
@@ -63,10 +70,8 @@ renderLaunchCreator _ =
     , HH.div
         [ HP.class_ (HH.ClassName "launch-info") ]
         [ HH.ul_
-            [ HH.li_ [ HH.text "Weekly Phase: 7-day commitment, lowest price" ]
-            , HH.li_ [ HH.text "Daily Phase: 1-day commitment, +20% premium" ]
-            , HH.li_ [ HH.text "Hourly Phase: 1-hour commitment, +10% premium" ]
-            , HH.li_ [ HH.text "Spot Phase: Immediate liquidity, +5% premium" ]
+            [ HH.li_ [ HH.text "Monthly Phase: 28-day commitment, lowest price" ]
+            , HH.li_ [ HH.text "Spot Phase: Immediate liquidity, higher price" ]
             ]
         ]
     ]
@@ -277,9 +282,7 @@ renderBatchRow batch =
 
 phaseClass :: LaunchPhase -> String
 phaseClass = case _ of
-  WeeklyPhase -> "phase-weekly"
-  DailyPhase -> "phase-daily"
-  HourlyPhase -> "phase-hourly"
+  MonthlyPhase -> "phase-monthly"
   SpotPhase -> "phase-spot"
   Completed -> "phase-completed"
 

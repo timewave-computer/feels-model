@@ -3,7 +3,6 @@
 -- | including synthetic asset creation and oracle-driven pricing.
 module Protocol.FeelsSOL
   ( FeelsSOLState
-  , TransformResult
   , OraclePrice
   , MintResult
   , BurnResult
@@ -23,9 +22,9 @@ import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import Effect.Ref (Ref, read, write, new)
-import Protocol.Token (TokenType(..), TokenAmount)
+import Protocol.Token (TokenType(..))
 import FFI (currentTime)
-import Protocol.Errors (ProtocolError(..))
+import Protocol.Error (ProtocolError(..))
 
 --------------------------------------------------------------------------------
 -- FeelsSOL Types
@@ -43,6 +42,7 @@ type MintResult =
   { feelsSOLMinted :: Number
   , jitoSOLLocked :: Number
   , exchangeRate :: Number
+  , fee :: Number
   , timestamp :: Number
   }
 
@@ -51,17 +51,10 @@ type BurnResult =
   { feelsSOLBurned :: Number
   , jitoSOLReleased :: Number
   , exchangeRate :: Number
-  , timestamp :: Number
-  }
-
--- Result of a transformation
-type TransformResult =
-  { inputAmount :: TokenAmount
-  , outputAmount :: TokenAmount
-  , exchangeRate :: Number
   , fee :: Number
   , timestamp :: Number
   }
+
 
 -- FeelsSOL state for managing the synthetic SOL system
 type FeelsSOLState =
@@ -139,6 +132,7 @@ mintFeelsSOL state jitoSOLAmount = do
             { feelsSOLMinted: feelsSOLAmount
             , jitoSOLLocked: jitoSOLAmount
             , exchangeRate: exchangeRate
+            , fee: 0.0  -- No fee for minting
             , timestamp: timestamp
             }
 
@@ -173,6 +167,7 @@ burnFeelsSOL state feelsSOLAmount = do
                 { feelsSOLBurned: feelsSOLAmount
                 , jitoSOLReleased: jitoSOLToRelease
                 , exchangeRate: exchangeRate
+                , fee: 0.0  -- No fee for burning
                 , timestamp: timestamp
                 }
 
@@ -234,7 +229,7 @@ enterSystem ::
   FeelsSOLState ->
   String ->         -- User address (for future use)
   Number ->         -- Amount of JitoSOL to deposit
-  Effect (Either ProtocolError TransformResult)
+  Effect (Either ProtocolError MintResult)
 enterSystem state _user jitoAmount = do
   -- Validate amount
   if jitoAmount <= 0.0
@@ -250,14 +245,12 @@ enterSystem state _user jitoAmount = do
       case mintResult of
         Left err -> pure $ Left $ InvalidCommandError err
         Right result -> do
-          -- Create transform result
-          timestamp <- currentTime
           pure $ Right 
-            { inputAmount: { tokenType: JitoSOL, amount: jitoAmount }
-            , outputAmount: { tokenType: FeelsSOL, amount: result.feelsSOLMinted }
+            { feelsSOLMinted: result.feelsSOLMinted
+            , jitoSOLLocked: jitoAmount
             , exchangeRate: result.exchangeRate
             , fee: feeAmount
-            , timestamp: timestamp
+            , timestamp: result.timestamp
             }
 
 --------------------------------------------------------------------------------
@@ -269,7 +262,7 @@ exitSystem ::
   FeelsSOLState ->
   String ->         -- User address (for future use)
   Number ->         -- Amount of FeelsSOL to burn
-  Effect (Either ProtocolError TransformResult)
+  Effect (Either ProtocolError BurnResult)
 exitSystem state _user feelsAmount = do
   -- Validate amount
   if feelsAmount <= 0.0
@@ -283,16 +276,13 @@ exitSystem state _user feelsAmount = do
         Right result -> do
           -- Calculate fee on JitoSOL output
           let feeAmount = result.jitoSOLReleased * state.exitFee
-              netJitoAmount = result.jitoSOLReleased - feeAmount
           
-          -- Create transform result
-          timestamp <- currentTime
           pure $ Right 
-            { inputAmount: { tokenType: FeelsSOL, amount: feelsAmount }
-            , outputAmount: { tokenType: JitoSOL, amount: netJitoAmount }
+            { feelsSOLBurned: feelsAmount
+            , jitoSOLReleased: result.jitoSOLReleased - feeAmount
             , exchangeRate: result.exchangeRate
             , fee: feeAmount
-            , timestamp: timestamp
+            , timestamp: result.timestamp
             }
 
 --------------------------------------------------------------------------------

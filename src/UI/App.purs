@@ -20,22 +20,22 @@ import Data.Maybe (Maybe(..))
 
 -- Import UI modules
 import UI.State (UIState, Action(..), initialUIState)
-import UI.Actions (handleAction)
-import UI.Components (renderSystemPanel, renderFeelsSOLPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel)
-import UI.ProtocolState (AppRuntime, initState)
+import UI.Action (handleAction)
+import UI.Component (renderSystemPanel, renderFeelsSOLPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel, renderSimulationPanel)
+-- Removed unused import
 
 --------------------------------------------------------------------------------
 -- Main Component Definition
 --------------------------------------------------------------------------------
 
 -- Component definition with AppRuntime integration
-component :: forall q i o m. MonadAff m => AppRuntime -> H.Component q i o m
-component appRuntime =
+component :: forall q i o m. MonadAff m => H.Component q i o m
+component =
   H.mkComponent
     { initialState: \_ -> initialUIState
-    , render: render appRuntime
+    , render: render
     , eval: H.mkEval $ H.defaultEval
-        { handleAction = handleAction appRuntime
+        { handleAction = handleAction
         , initialize = Just Initialize
         }
     }
@@ -45,8 +45,8 @@ component appRuntime =
 --------------------------------------------------------------------------------
 
 -- Main render function with layout structure
-render :: forall m. AppRuntime -> UIState -> H.ComponentHTML Action () m
-render appRuntime state =
+render :: forall m. UIState -> H.ComponentHTML Action () m
+render state =
   HH.div
     [ HP.class_ (HH.ClassName "app") ]
     [ -- Main content
@@ -59,18 +59,35 @@ render appRuntime state =
         [ -- Left column
           HH.div
             [ HP.class_ (HH.ClassName "left-column") ]
-            [ renderWalletPanel appRuntime state
-            , renderFeelsSOLPanel appRuntime state
-            , renderTokenCreatorPanel appRuntime state
-            , renderUserTokensPanel appRuntime
-            , renderCreatePositionPanel appRuntime state
-            , renderPositionsPanel appRuntime
-            , renderSystemPanel appRuntime state
+            [ renderWalletPanel state
+            , renderFeelsSOLPanel state
+            , renderTokenCreatorPanel state
+            , renderUserTokensPanel state.userTokens
+            , renderCreatePositionPanel state
+            , renderPositionsPanel state.userPositions
+            , renderSimulationPanel state
+            , renderSystemPanel state
             ]
         , -- Right column
           HH.div
             [ HP.class_ (HH.ClassName "right-column") ]
-            [ renderLoanBookPanel appRuntime
+            [ -- Hidden data element for chart
+              HH.div
+                [ HP.id "chart-data-hidden"
+                , HP.style "display: none;"
+                ]
+                [ HH.text "" ]  -- Chart data will be populated by JavaScript
+            , -- Chart canvas
+              HH.div
+                [ HP.class_ (HH.ClassName "panel") ]
+                [ HH.h2_ [ HH.text "Price Chart" ]
+                , HH.canvas
+                    [ HP.id "price-chart"
+                    , HP.width 600
+                    , HP.height 400
+                    ]
+                ]
+            , renderLoanBookPanel state.lenderOffers
             ]
         ]
     ]
@@ -84,18 +101,15 @@ renderUI :: Effect Unit
 renderUI = do
   log "Starting Feels Protocol UI..."
   
-  -- Initialize application state
-  appRuntime <- H.liftEffect initState
-  
   HA.runHalogenAff do
     appElement <- selectElement (QuerySelector "#app")
     case appElement of
       Nothing -> do
         H.liftEffect $ log "Could not find #app element"
-        HA.awaitBody >>= runUI (component appRuntime) unit
+        HA.awaitBody >>= runUI component unit
       Just element -> do
         H.liftEffect $ log "Mounting UI component"
-        runUI (component appRuntime) unit element
+        runUI component unit element
 
   where
     initState = do
