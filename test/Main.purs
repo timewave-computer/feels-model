@@ -12,6 +12,7 @@ import Effect (Effect)
 import Effect.Console (log)
 import Test.Model (runModelTests)
 import Test.Simulation (runSimulationTests)
+import Test.LendingYieldTest (lendingYieldTests)
 
 --------------------------------------------------------------------------------
 -- TEST SUITE EXECUTION
@@ -28,6 +29,9 @@ main = do
   
   -- Market simulation and scenario tests
   runSimulationTests
+  
+  -- Lending yield system tests
+  lendingYieldTests
   
   log "===================================="
   log "Test suite execution completed" 

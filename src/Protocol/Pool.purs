@@ -1,14 +1,35 @@
 -- | Core AMM mechanics with efficient state management
 -- |
 -- | This module implements concentrated liquidity AMM mechanics using a tick-based system.
--- | It defines two pool representations:
 -- |
--- | 1. PoolState - Complete AMM pool state for full-featured operations (swaps, liquidity)
--- | 2. POLPool - Minimal pool state optimized for Protocol-Owned Liquidity decisions
+-- | === Pool State Architecture ===
 -- |
--- | Ticks provide discrete price levels for liquidity placement, while the underlying
--- | AMM math (x*y=L²) is used for continuous price discovery within ranges
--- | and accurate swap execution across tick boundaries.
+-- | We maintain two complementary pool representations for different use cases:
+-- |
+-- |     ┌─────────────────────────────────────────┐
+-- |     │           PoolState (Full State)         │
+-- |     │  - Complete AMM state                    │
+-- |     │  - All position tracking                 │
+-- |     │  - Fee growth per token                  │
+-- |     │  - Leverage tier tracking                │
+-- |     │  - Used for: swaps, liquidity ops       │
+-- |     └─────────────────────────────────────────┘
+-- |                         │
+-- |                         │ Derives metrics
+-- |                         ↓
+-- |     ┌─────────────────────────────────────────┐
+-- |     │      POLPool (Derived Metrics View)     │
+-- |     │  - Minimal state for POL decisions      │
+-- |     │  - Rolling 24h volume                   │
+-- |     │  - TWAP (time-weighted avg price)       │
+-- |     │  - Current liquidity & price            │
+-- |     │  - Used for: automated POL strategies   │
+-- |     └─────────────────────────────────────────┘
+-- |
+-- | POLPool is NOT a separate pool - it's a lightweight view derived from PoolState
+-- | containing only the metrics needed for Protocol-Owned Liquidity decisions.
+-- | This separation optimizes gas costs for frequent POL operations while maintaining
+-- | a single source of truth in PoolState.
 module Protocol.Pool
   ( PoolState
   , OfferingId
@@ -19,8 +40,8 @@ module Protocol.Pool
   , LiquidityResult
   , POLPool
   , PoolEvent(..)
-  , TrancheState
-  , TrancheValues
+  , LeverageState
+  , LeverageValues
   , initializePool
   , swap
   , addLiquidity
@@ -30,20 +51,28 @@ module Protocol.Pool
   , executeSwap
   , updateTWAP
   , isTickInPOLRange
-  -- Tranche value functions
-  , calculateTrancheValues
-  , updateTrancheValues
+  -- Leverage value functions
+  , calculateLeverageValues
+  , updateLeverageValues
   , distributePoolPnL
+  -- Yield functions
+  , calculatePositionYield
+  , updatePositionYield
+  , getAPY
+  , syncPositionValue
   ) where
 
 import Prelude
 import Data.Maybe (Maybe(..))
+import Data.Array as Array
 import Data.Int (toNumber, floor)
 import Data.Ord (abs, min, max)
+import Data.Array (find, sortBy, zipWith, (:), mapWithIndex)
+import Data.Foldable (sum)
 import FFI (sqrt, log, pow)
 import Protocol.Token (TokenType)
 import Protocol.Tick (Tick)
-import Protocol.Position (TermCommitment, Tranche(..), Position)
+import Protocol.Position (Position, Duration(..), Leverage(..), leverageMultiplier)
 import Protocol.Common (PositionId, BlockNumber)
 import Protocol.POL (POLTriggerType(..))
 
@@ -51,7 +80,15 @@ import Protocol.POL (POLTriggerType(..))
 -- On-Chain Pool State
 --------------------------------------------------------------------------------
 
--- | Essential pool state for on-chain storage
+-- | Complete pool state - the authoritative on-chain representation
+-- |
+-- | This is the single source of truth for all pool operations. It contains:
+-- | - Full AMM state for swap execution
+-- | - All position and liquidity tracking
+-- | - Detailed fee accounting per token
+-- | - Leverage tier value distribution
+-- |
+-- | POLPool views are derived from this state, not stored separately.
 type PoolState =
   { token0 :: TokenType             -- Base token (usually FeelsSOL)
   , token1 :: TokenType             -- Quote token
@@ -63,6 +100,9 @@ type PoolState =
   , protocolFee :: Number           -- Protocol fee share (basis points)
   , unlocked :: Boolean             -- Reentrancy guard
   , offering :: Maybe OfferingId    -- Active offering (if any)
+  , leverageState :: LeverageState  -- Tracks value by leverage tier
+  , totalValue :: Number            -- Total pool value
+  , lastUpdateBlock :: BlockNumber  -- Last value update block
   }
 
 -- | Offering identifier
@@ -79,27 +119,38 @@ type PoolConfig =
 -- POL-Optimized Types
 --------------------------------------------------------------------------------
 
--- | Minimal pool state optimized for Protocol-Owned Liquidity (POL) operations
--- | This stripped-down representation contains only the essential data needed
--- | for POL decision-making and efficient on-chain storage/computation.
--- | Unlike PoolState which tracks full AMM state, POLPool focuses on metrics
--- | critical for automated liquidity management.
+-- | Minimal pool metrics view for Protocol-Owned Liquidity (POL) operations
+-- |
+-- | IMPORTANT: This is a derived view of PoolState, not a separate pool!
+-- |
+-- | POLPool contains a subset of PoolState fields plus computed metrics needed
+-- | for automated liquidity management decisions. It's designed to be:
+-- | - Lightweight for frequent reads during POL strategy execution
+-- | - Gas-efficient by avoiding unnecessary state access
+-- | - Forward-compatible with cross-program invocations
+-- |
+-- | Derivation from PoolState:
+-- | - sqrtPrice, currentTick, liquidity → Direct copies from PoolState
+-- | - volume24h → Computed from swap events over last 24h
+-- | - twap → Calculated from price history
+-- | - feeGrowthGlobal → Simplified view of feeGrowthGlobal0/1
+-- | - pol* fields → Specific to POL position within the pool
 type POLPool =
-  { -- Essential swap state
-    sqrtPrice :: Number
-  , currentTick :: Int
-  , liquidity :: Number
+  { -- Core state (mirrors PoolState)
+    sqrtPrice :: Number         -- Same as PoolState.sqrtPriceX96 (simplified)
+  , currentTick :: Int          -- Same as PoolState.tick
+  , liquidity :: Number         -- Same as PoolState.liquidity
   
-    -- Minimal metrics for instant POL decisions
-  , volume24h :: Number         -- Single rolling value
-  , feeGrowthGlobal :: Number
-  , twap :: Number              -- Time-weighted average price
-  , lastUpdateSlot :: Int
+    -- Computed metrics (derived from events/history)
+  , volume24h :: Number         -- Rolling 24h volume (computed)
+  , feeGrowthGlobal :: Number   -- Simplified fee view (derived)
+  , twap :: Number              -- Time-weighted average price (computed)
+  , lastUpdateSlot :: Int       -- Last computation timestamp
   
-    -- POL state
-  , polAmount :: Number
-  , polTickLower :: Int
-  , polTickUpper :: Int
+    -- POL-specific state
+  , polAmount :: Number         -- POL's liquidity in this pool
+  , polTickLower :: Int         -- POL position lower bound
+  , polTickUpper :: Int         -- POL position upper bound
   }
 
 -- | Events emitted for off-chain indexing
@@ -130,21 +181,25 @@ data PoolEvent
     }
 
 --------------------------------------------------------------------------------
--- Tranche Value Management
+-- Leverage Value Management
 --------------------------------------------------------------------------------
 
--- | State tracking for each tranche's aggregate value
-type TrancheState =
-  { seniorValue :: Number      -- Total value in senior tranche
-  , juniorValue :: Number      -- Total value in junior tranche
-  , seniorShares :: Number     -- Total senior shares outstanding
-  , juniorShares :: Number     -- Total junior shares outstanding
+-- | State tracking for leverage groups' aggregate value
+type LeverageState =
+  { totalValue :: Number        -- Total pool value
+  , leverageGroups :: Array     -- Groups by leverage level
+      { leverage :: Number      -- Leverage multiplier (1.0, 2.0, 3.0, etc)
+      , value :: Number         -- Total value at this leverage
+      , shares :: Number        -- Total shares at this leverage
+      }
   }
 
--- | Individual tranche value calculation results
-type TrancheValues =
-  { senior :: Number           -- Value allocated to senior tranche
-  , junior :: Number           -- Value allocated to junior tranche
+-- | Leverage-based value calculation results
+type LeverageValues =
+  { values :: Array
+      { leverage :: Number
+      , value :: Number
+      }
   }
 
 --------------------------------------------------------------------------------
@@ -168,9 +223,9 @@ type SwapResult =
   , gasUsed :: Number               -- Estimated gas usage
   }
 
--- | Execute a swap
-swap :: PoolState -> SwapParams -> SwapResult
-swap pool params =
+-- | Execute a swap with pool value tracking
+swap :: PoolState -> SwapParams -> BlockNumber -> { result :: SwapResult, updatedPool :: PoolState }
+swap pool params currentBlock =
   let
     -- 1. Extract current reserves from sqrt price and liquidity
     -- Using x * y = L^2 and sqrt(y/x) = sqrtPrice
@@ -221,21 +276,35 @@ swap pool params =
                    then -amountOut              -- User receives token1
                    else params.amountSpecified  -- User provides token1
     
-  in if priceInBounds
-     then { amount0: finalAmount0
-          , amount1: finalAmount1
-          , sqrtPriceX96: newSqrtPriceX96
-          , liquidity: pool.liquidity
-          , tick: newTick
-          , gasUsed: 150000.0
-          }
-     else { amount0: 0.0
-          , amount1: 0.0
-          , sqrtPriceX96: pool.sqrtPriceX96  -- No change if price limit hit
-          , liquidity: pool.liquidity
-          , tick: pool.tick
-          , gasUsed: 50000.0  -- Less gas if swap fails
-          }
+    finalResult = if priceInBounds
+                  then { amount0: finalAmount0
+                       , amount1: finalAmount1
+                       , sqrtPriceX96: newSqrtPriceX96
+                       , liquidity: pool.liquidity
+                       , tick: newTick
+                       , gasUsed: 150000.0
+                       }
+                  else { amount0: 0.0
+                       , amount1: 0.0
+                       , sqrtPriceX96: pool.sqrtPriceX96  -- No change if price limit hit
+                       , liquidity: pool.liquidity
+                       , tick: pool.tick
+                       , gasUsed: 50000.0  -- Less gas if swap fails
+                       }
+    
+    -- Update pool state with new price and fees
+    updatedPool = if priceInBounds
+                  then pool { sqrtPriceX96 = newSqrtPriceX96
+                            , tick = newTick
+                            , feeGrowthGlobal0X128 = pool.feeGrowthGlobal0X128 + feeAmount
+                            , feeGrowthGlobal1X128 = pool.feeGrowthGlobal1X128 + feeAmount
+                            }
+                  else pool
+    
+    -- Update pool value and distribute PnL to leverage tiers
+    finalPool = updatePoolValue updatedPool currentBlock
+    
+  in { result: finalResult, updatedPool: finalPool }
 
 --------------------------------------------------------------------------------
 -- Liquidity Operations
@@ -257,9 +326,9 @@ type LiquidityResult =
   , amount1 :: Number               -- Token1 deposited
   }
 
--- | Add liquidity to pool
-addLiquidity :: PoolState -> LiquidityParams -> LiquidityResult
-addLiquidity pool params =
+-- | Add liquidity to pool with position tracking
+addLiquidity :: PoolState -> LiquidityParams -> Leverage -> BlockNumber -> { result :: LiquidityResult, updatedPool :: PoolState }
+addLiquidity pool params leverage currentBlock =
   let
     -- Calculate token amounts needed for liquidity
     amount0 = calculateAmount0ForLiquidity pool.sqrtPriceX96 params.tickLower params.tickUpper params.amount
@@ -269,11 +338,37 @@ addLiquidity pool params =
     -- For now, create a simple hash from tick range
     positionId = abs (params.tickLower * 1000 + params.tickUpper)
     
-  in { positionId: positionId
-     , liquidity: params.amount
-     , amount0: amount0
-     , amount1: amount1
-     }
+    -- Calculate shares based on leverage
+    leverageMultiplier' = leverageMultiplier leverage
+    shares = params.amount * leverageMultiplier'
+    
+    -- Update leverage state with new position
+    leverageIdx = if leverage == Senior then 0 else 1
+    updatedLeverageGroups = mapWithIndex updateGroup pool.leverageState.leverageGroups
+      where
+        updateGroup idx group = 
+          if idx == leverageIdx
+          then group { value = group.value + params.amount
+                     , shares = group.shares + shares
+                     }
+          else group
+    
+    -- Update pool state
+    updatedPool = pool { liquidity = pool.liquidity + params.amount
+                       , leverageState = pool.leverageState { leverageGroups = updatedLeverageGroups
+                                                            , totalValue = pool.leverageState.totalValue + params.amount
+                                                            }
+                       , totalValue = pool.totalValue + params.amount
+                       , lastUpdateBlock = currentBlock
+                       }
+    
+    result = { positionId: positionId
+             , liquidity: params.amount
+             , amount0: amount0
+             , amount1: amount1
+             }
+    
+  in { result: result, updatedPool: updatedPool }
 
 -- | Remove liquidity from pool
 removeLiquidity :: PoolState -> PositionId -> Number -> LiquidityResult
@@ -314,6 +409,9 @@ initializePool token0 token1 initialPrice config =
   , protocolFee: config.fee
   , unlocked: true
   , offering: Nothing
+  , leverageState: initializeLeverageState
+  , totalValue: 0.0
+  , lastUpdateBlock: 0
   }
 
 --------------------------------------------------------------------------------
@@ -327,6 +425,137 @@ getPoolPrice pool = sqrtPriceX96ToPrice pool.sqrtPriceX96
 -- | Get current pool liquidity
 getPoolLiquidity :: PoolState -> Number
 getPoolLiquidity pool = pool.liquidity
+
+--------------------------------------------------------------------------------
+-- Leverage State Management
+--------------------------------------------------------------------------------
+
+-- | Initialize empty leverage state
+initializeLeverageState :: LeverageState
+initializeLeverageState =
+  { totalValue: 0.0
+  , leverageGroups:
+    [ { leverage: 1.0   -- Senior (1x)
+      , value: 0.0
+      , shares: 0.0
+      }
+    , { leverage: 3.0   -- Junior (3x)
+      , value: 0.0
+      , shares: 0.0
+      }
+    ]
+  }
+
+-- | Update pool value and distribute PnL to leverage tiers
+updatePoolValue :: PoolState -> BlockNumber -> PoolState
+updatePoolValue pool currentBlock =
+  let
+    -- Calculate current pool value from reserves
+    currentSqrtPrice = pool.sqrtPriceX96 / 2.0 `pow` 48.0
+    reserve0 = pool.liquidity / currentSqrtPrice
+    reserve1 = pool.liquidity * currentSqrtPrice
+    currentValue = reserve0 + reserve1  -- Simplified: assumes 1:1 value
+    
+    -- Only update if there's been a change
+    hasValueChange = currentValue /= pool.totalValue && pool.totalValue > 0.0
+    
+    -- Calculate new leverage values if there's a change
+    newLeverageState = if hasValueChange
+      then
+        let leverageValues = calculateLeverageValues pool.totalValue currentValue pool.leverageState
+        in updateLeverageValues pool.leverageState leverageValues
+      else pool.leverageState
+  in
+    pool { totalValue = currentValue
+         , leverageState = newLeverageState
+         , lastUpdateBlock = currentBlock
+         }
+
+-- | Sync position value with current pool state and yield
+syncPositionValue :: Position -> PoolState -> BlockNumber -> Position
+syncPositionValue position pool currentBlock =
+  let
+    -- First update yield
+    positionWithYield = updatePositionYield position pool currentBlock
+    
+    -- Then update value based on leverage state
+    newLeverageValues = { values: map (\g -> { leverage: g.leverage, value: g.value }) pool.leverageState.leverageGroups }
+    
+    -- Apply pool PnL distribution
+    updatedPosition = distributePoolPnL positionWithYield pool.leverageState newLeverageValues
+  in
+    updatedPosition
+
+-- | Get all positions for a pool and update their values
+syncAllPositionValues :: Array Position -> PoolState -> BlockNumber -> Array Position
+syncAllPositionValues positions pool currentBlock = map (\pos -> syncPositionValue pos pool currentBlock) positions
+
+--------------------------------------------------------------------------------
+-- Yield Calculation and Distribution
+--------------------------------------------------------------------------------
+
+-- | Calculate yield earned by a position since last update
+calculatePositionYield :: Position -> PoolState -> BlockNumber -> Number
+calculatePositionYield position pool currentBlock =
+  let
+    -- Calculate blocks elapsed since last yield claim
+    blocksElapsed = toNumber (currentBlock - position.lastYieldClaim)
+    
+    -- Get fee growth delta since position's last update
+    feeGrowthDelta0 = pool.feeGrowthGlobal0X128 - position.feeGrowthInside0
+    feeGrowthDelta1 = pool.feeGrowthGlobal1X128 - position.feeGrowthInside1
+    
+    -- Calculate yield based on position's shares and fee growth
+    -- Positions earn fees proportional to their share of liquidity
+    yieldFromFees = position.shares * (feeGrowthDelta0 + feeGrowthDelta1) / 2.0
+    
+    -- Apply leverage multiplier - higher leverage earns more yield
+    leverageBonus = leverageMultiplier position.leverage
+    
+    -- Duration bonus - longer commitments earn higher yield
+    durationMultiplier = case position.duration of
+      Spot -> 1.0      -- Base rate
+      Monthly -> 1.2   -- 20% bonus for monthly commitment
+    
+    totalYield = yieldFromFees * leverageBonus * durationMultiplier
+  in
+    max 0.0 totalYield  -- Ensure non-negative yield
+
+-- | Update position with accumulated yield
+updatePositionYield :: Position -> PoolState -> BlockNumber -> Position
+updatePositionYield position pool currentBlock =
+  let
+    newYield = calculatePositionYield position pool currentBlock
+    
+    -- Update position with new yield and fee growth markers
+    updatedPosition = position 
+      { accumulatedYield = position.accumulatedYield + newYield
+      , value = position.value + newYield  -- Add yield to position value
+      , lastYieldClaim = currentBlock
+      , feeGrowthInside0 = pool.feeGrowthGlobal0X128
+      , feeGrowthInside1 = pool.feeGrowthGlobal1X128
+      }
+  in
+    updatedPosition
+
+-- | Calculate APY for a position class
+getAPY :: PoolState -> Duration -> Leverage -> Number
+getAPY pool duration leverage =
+  let
+    -- Base APY from pool fees (assuming 0.3% fee and average daily volume)
+    -- This is simplified - in production would use actual volume data
+    baseAPY = 0.05  -- 5% base APY
+    
+    -- Apply multipliers
+    leverageMultiplier' = leverageMultiplier leverage
+    durationMultiplier = case duration of
+      Spot -> 1.0
+      Monthly -> 1.2
+    
+    -- Calculate total APY
+    totalAPY = baseAPY * leverageMultiplier' * durationMultiplier
+  in
+    totalAPY
 
 --------------------------------------------------------------------------------
 -- Helper Functions
@@ -402,10 +631,47 @@ calculateAmount1ForLiquidity sqrtPrice tickLower tickUpper liquidity =
   in amount
 
 --------------------------------------------------------------------------------
+-- Pool State Conversions
+--------------------------------------------------------------------------------
+
+-- | Example: How to derive POLPool view from PoolState
+-- | In practice, this would be done by:
+-- | 1. Reading minimal fields from PoolState
+-- | 2. Computing metrics from indexed events
+-- | 3. Loading POL-specific position data
+-- |
+-- | derivePOLView :: PoolState -> Effect POLPool
+-- | derivePOLView poolState = do
+-- |   -- Get computed metrics from indexer
+-- |   volume24h <- getPoolVolume24h poolState.token0 poolState.token1
+-- |   twap <- calculateTWAP poolState
+-- |   polPosition <- getPOLPosition poolState.token0 poolState.token1
+-- |   
+-- |   pure {
+-- |     -- Direct fields from PoolState
+-- |     sqrtPrice: poolState.sqrtPriceX96 / pow 2.0 48.0,  -- Simplify format
+-- |     currentTick: poolState.tick,
+-- |     liquidity: poolState.liquidity,
+-- |     
+-- |     -- Computed metrics
+-- |     volume24h: volume24h,
+-- |     feeGrowthGlobal: (poolState.feeGrowthGlobal0X128 + 
+-- |                       poolState.feeGrowthGlobal1X128) / 2.0,
+-- |     twap: twap,
+-- |     lastUpdateSlot: currentSlot,
+-- |     
+-- |     -- POL position data
+-- |     polAmount: polPosition.liquidity,
+-- |     polTickLower: polPosition.tickLower,
+-- |     polTickUpper: polPosition.tickUpper
+-- |   }
+
+--------------------------------------------------------------------------------
 -- Efficient On-Chain Operations
 --------------------------------------------------------------------------------
 
 -- | Execute swap with minimal state updates for POL operations
+-- | This operates on the POLPool view for gas efficiency
 executeSwap :: POLPool -> Number -> Int -> { pool :: POLPool, event :: PoolEvent }
 executeSwap pool amountIn currentSlot =
   let
@@ -486,79 +752,81 @@ isTickInPOLRange tick pool =
   tick >= pool.polTickLower && tick < pool.polTickUpper && pool.polAmount > 0.0
 
 --------------------------------------------------------------------------------
--- Tranche Value Calculation Functions
+-- Leverage Value Calculation Functions
 --------------------------------------------------------------------------------
 
--- | Calculate current tranche values based on total pool value and PnL
--- | Implements the waterfall logic where Junior absorbs losses first
-calculateTrancheValues :: Number -> Number -> TrancheState -> TrancheValues
-calculateTrancheValues initialValue currentValue trancheState =
+-- | Calculate leverage-based values with PnL distribution
+-- | Higher leverage positions absorb losses first and gain more from profits
+calculateLeverageValues :: Number -> Number -> LeverageState -> LeverageValues
+calculateLeverageValues initialValue currentValue leverageState =
   let
     -- Calculate profit/loss
     pnl = currentValue - initialValue
     
-    -- Get initial tranche values
-    initialSenior = trancheState.seniorValue
-    initialJunior = trancheState.juniorValue
-    
-    -- Apply waterfall logic
+    -- Apply leverage-based distribution
     result = if pnl >= 0.0 then
-      -- Profits: Distribute based on exposure (Junior gets 3x weight)
-      let juniorWeight = 3.0  -- Junior has 3x exposure
-          seniorWeight = 1.0  -- Senior has 1x exposure
-          
-          -- Calculate weighted distribution
-          totalWeight = (initialJunior * juniorWeight) + (initialSenior * seniorWeight)
-          
-      in  -- Avoid division by zero
-          if totalWeight > 0.0 then
-            { senior: initialSenior + pnl * (initialSenior * seniorWeight / totalWeight)
-            , junior: initialJunior + pnl * (initialJunior * juniorWeight / totalWeight)
-            }
-          else
-            { senior: initialSenior, junior: initialJunior }
+      -- Profits: Distribute proportionally to leverage
+      let totalWeightedValue = sum $ map (\g -> g.value * g.leverage) leverageState.leverageGroups
+      in if totalWeightedValue > 0.0 then
+           { values: map (\g -> 
+               { leverage: g.leverage
+               , value: g.value + pnl * (g.value * g.leverage / totalWeightedValue)
+               }) leverageState.leverageGroups
+           }
+         else
+           { values: map (\g -> { leverage: g.leverage, value: g.value }) leverageState.leverageGroups }
     else
-      -- Losses: Junior absorbs first up to 90% of their capital
-      let absLoss = abs pnl
-          maxJuniorLoss = initialJunior * 0.9  -- Junior can lose up to 90%
-          
-          -- Calculate actual losses
-          juniorLoss = min maxJuniorLoss absLoss
-          seniorLoss = max 0.0 (absLoss - juniorLoss)
-          
-          -- Junior retains at least 10% of initial value
-          newJunior = max (initialJunior * 0.1) (initialJunior - juniorLoss)
-          newSenior = initialSenior - seniorLoss
-          
-      in { senior: newSenior, junior: newJunior }
+      -- Losses: Higher leverage absorbs first
+      distributeLosses (abs pnl) leverageState.leverageGroups
   
   in result
+  where
+    -- Helper to distribute losses starting from highest leverage
+    distributeLosses :: Number -> Array { leverage :: Number, value :: Number, shares :: Number } -> LeverageValues
+    distributeLosses _ [] = { values: [] }
+    distributeLosses remainingLoss groups =
+      let sorted = sortBy (\a b -> compare b.leverage a.leverage) groups
+          distributed = distributeToGroups remainingLoss sorted []
+      in { values: map (\g -> { leverage: g.leverage, value: g.value }) distributed }
+    
+    distributeToGroups :: Number -> Array { leverage :: Number, value :: Number, shares :: Number } -> Array { leverage :: Number, value :: Number, shares :: Number } -> Array { leverage :: Number, value :: Number, shares :: Number }
+    distributeToGroups _ [] acc = acc
+    distributeToGroups 0.0 remaining acc = acc <> remaining
+    distributeToGroups loss groups acc = case Array.uncons groups of
+      Nothing -> acc
+      Just { head: g, tail: gs } ->
+        let maxLoss = g.value * 0.9  -- Can lose up to 90%
+            actualLoss = min loss maxLoss
+            newValue = max (g.value * 0.1) (g.value - actualLoss)
+            remainingLoss = loss - actualLoss
+        in distributeToGroups remainingLoss gs (acc <> [g { value = newValue }])
 
--- | Update tranche state with new values and maintain share price consistency
-updateTrancheValues :: TrancheState -> TrancheValues -> TrancheState
-updateTrancheValues state newValues =
-  state
-    { seniorValue = newValues.senior
-    , juniorValue = newValues.junior
-    }
+-- | Update leverage state with new values
+updateLeverageValues :: LeverageState -> LeverageValues -> LeverageState
+updateLeverageValues state newValues =
+  state { leverageGroups = zipWith updateGroup state.leverageGroups newValues.values }
+  where
+    updateGroup g v = g { value = v.value }
 
--- | Distribute pool PnL to positions based on their shares and tranche
+-- | Distribute pool PnL to positions based on their shares and leverage
 -- | Returns updated position with new value
-distributePoolPnL :: Position -> TrancheState -> TrancheValues -> Position
+distributePoolPnL :: Position -> LeverageState -> LeverageValues -> Position
 distributePoolPnL position oldState newValues =
   let
-    -- Calculate per-share values for each tranche
-    seniorPerShare = if oldState.seniorShares > 0.0
-                     then newValues.senior / oldState.seniorShares
-                     else 0.0
-                     
-    juniorPerShare = if oldState.juniorShares > 0.0
-                     then newValues.junior / oldState.juniorShares
-                     else 0.0
+    -- Find the leverage group for this position
+    posLeverage = leverageMultiplier position.leverage
+    leverageGroup = find (\g -> g.leverage == posLeverage) oldState.leverageGroups
+    valueGroup = find (\v -> v.leverage == posLeverage) newValues.values
     
-    -- Update position value based on tranche and shares
-    newValue = case position.tranche of
-      Senior -> position.shares * seniorPerShare
-      Junior -> position.shares * juniorPerShare
+    -- Calculate per-share value for this leverage level
+    perShareValue = case { lg: leverageGroup, vg: valueGroup } of
+      { lg: Just lg', vg: Just vg' } -> 
+        if lg'.shares > 0.0 
+        then vg'.value / lg'.shares 
+        else 0.0
+      _ -> 0.0
+    
+    -- Update position value based on shares
+    newValue = position.shares * perShareValue
       
   in position { value = newValue }

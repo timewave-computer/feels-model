@@ -2,13 +2,10 @@
 -- Contains all render functions for different panels and UI elements
 module UI.Component
   ( renderSystemPanel
-  , renderFeelsSOLPanel
   , renderWalletPanel
   , renderTokenCreatorPanel
-  , renderUserTokensPanel
-  , renderCreatePositionPanel
+  , renderExchangePanel
   , renderLoanBookPanel
-  , renderPositionsPanel
   , renderSimulationPanel
   ) where
 
@@ -16,6 +13,7 @@ import Prelude
 import Data.Array (length, null)
 import Data.String.Common (trim)
 import Data.String as String
+import Data.String (contains, Pattern(..))
 import Data.Number as Number
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -28,7 +26,7 @@ import Unsafe.Coerce (unsafeCoerce)
 -- Import UI state and actions from State module
 import UI.State (UIState, Action(..), parseTokenType)
 import Protocol.Common (TokenMetadata, Position)
-import Protocol.Position (TermCommitment(..))
+import Protocol.Position (Duration(..))
 import Simulation.Analysis (SimulationResults)
 import Simulation.Market (MarketScenario(..))
 import Utils (formatAmount)
@@ -39,76 +37,77 @@ import Utils (formatAmount)
 
 -- System metrics panel
 renderSystemPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderSystemPanel _state =
+renderSystemPanel state =
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
     [ HH.h2_ [ HH.text "System Metrics" ]
-    , HH.div_ [ HH.text "System metrics temporarily unavailable" ]
+    , case state.protocolStats of
+        Nothing -> HH.div 
+          [ HP.class_ (HH.ClassName "loading-state") ]
+          [ HH.text "Loading system metrics..." ]
+        Just stats -> HH.div
+          [ HP.class_ (HH.ClassName "metrics-grid") ]
+          [ renderMetric "Total Value Locked" (formatAmount stats.totalValueLocked <> " FeelsSOL")
+          , renderMetric "Total Users" (show stats.totalUsers)
+          , renderMetric "Active Positions" (show stats.activePositions)
+          , renderMetric "Live Tokens" (show stats.liveTokens)
+          , renderMetric "Lender Offers" (show stats.totalLenderOffers)
+          , renderMetric "POL Balance" (formatAmount stats.polBalance <> " FeelsSOL")
+          , renderMetric "FeelsSOL Supply" (formatAmount stats.feelsSOLSupply)
+          , renderMetric "JitoSOL Locked" (formatAmount stats.jitoSOLLocked)
+          ]
     ]
-
---------------------------------------------------------------------------------
--- FeelsSOL Panel Components
---------------------------------------------------------------------------------
-
--- FeelsSOL minting/burning panel (always visible)
-renderFeelsSOLPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderFeelsSOLPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "FeelsSOL Minting" ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "jitosol-amount" ] [ HH.text "JitoSOL Amount (for entering):" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.id "jitosol-amount"
-            , HP.name "jitosol-amount"
-            , HP.value (formatAmount state.jitoSOLAmount)
-            , HE.onValueChange \v -> UpdateJitoSOLAmount (fromMaybe 0.0 (Number.fromString v))
-            , HP.class_ (HH.ClassName "form__input")
-            ]
+  where
+    renderMetric label value =
+      HH.div
+        [ HP.class_ (HH.ClassName "metric-item") ]
+        [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
+        , HH.div [ HP.class_ (HH.ClassName "metric-value") ] [ HH.text value ]
         ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "feelssol-amount" ] [ HH.text "FeelsSOL Amount (for exiting):" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.id "feelssol-amount"
-            , HP.name "feelssol-amount"
-            , HP.value (formatAmount state.feelsSOLAmount)
-            , HE.onValueChange \v -> UpdateFeelsSOLAmount (fromMaybe 0.0 (Number.fromString v))
-            , HP.class_ (HH.ClassName "form__input")
-            ]
-        ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "feelsSOL-actions") ]
-        [ HH.button
-            [ HE.onClick \_ -> EnterFeelsSOL
-            , HP.class_ (HH.ClassName "btn btn--primary")
-            ]
-            [ HH.text "JitoSOL →", HH.br_, HH.text "FeelsSOL" ]
-        , HH.button
-            [ HE.onClick \_ -> ExitFeelsSOL
-            , HP.class_ (HH.ClassName "btn btn--primary")
-            ]
-            [ HH.text "FeelsSOL →", HH.br_, HH.text "JitoSOL" ]
-        ]
-    ]
 
 --------------------------------------------------------------------------------
 -- Wallet Panel Components
 --------------------------------------------------------------------------------
 
--- Wallet panel
+-- Unified wallet panel (balances, tokens, and positions)
 renderWalletPanel :: forall m. UIState -> H.ComponentHTML Action () m
 renderWalletPanel state =
   HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
+    [ HP.class_ (HH.ClassName "panel wallet-panel") ]
     [ HH.h2_ [ HH.text "Your Wallet" ]
+    -- Balances section
     , HH.div
-        [ HP.class_ (HH.ClassName "form-fields") ]
-        [ renderBalance "JitoSOL" state.jitoBalance
-        , renderBalance "FeelsSOL" state.feelsBalance
+        [ HP.class_ (HH.ClassName "wallet-section") ]
+        [ HH.h3_ [ HH.text "Balances" ]
+        , HH.div
+            [ HP.class_ (HH.ClassName "form-fields") ]
+            [ renderBalance "JitoSOL" state.jitoBalance
+            , renderBalance "FeelsSOL" state.feelsBalance
+            ]
+        ]
+    -- Created tokens section
+    , HH.div
+        [ HP.class_ (HH.ClassName "wallet-section") ]
+        [ HH.h3_ [ HH.text "Your Tokens" ]
+        , if length state.userTokens == 0
+          then HH.p
+            [ HP.class_ (HH.ClassName "empty-state") ]
+            [ HH.text "No tokens created yet" ]
+          else HH.div
+            [ HP.class_ (HH.ClassName "token-list") ]
+            (map renderToken state.userTokens)
+        ]
+    -- Positions section
+    , HH.div
+        [ HP.class_ (HH.ClassName "wallet-section") ]
+        [ HH.h3_ [ HH.text "Your Positions" ]
+        , if length state.userPositions == 0
+          then HH.p
+            [ HP.class_ (HH.ClassName "empty-state") ]
+            [ HH.text "No active positions" ]
+          else HH.div
+            [ HP.class_ (HH.ClassName "position-list") ]
+            (map renderPosition state.userPositions)
         ]
     ]
   where
@@ -118,6 +117,50 @@ renderWalletPanel state =
         [ HH.div [ HP.class_ (HH.ClassName "label") ] [ HH.text label ]
         , HH.div [ HP.class_ (HH.ClassName "value") ] [ HH.text $ formatAmount amount ]
         ]
+    
+    renderToken foreignToken =
+      let token = unsafeCoerce foreignToken :: { ticker :: String, name :: String, live :: Boolean }
+      in HH.div
+        [ HP.class_ (HH.ClassName "list-item") ]
+        [ HH.div
+            [ HP.class_ (HH.ClassName "list-item__header") ]
+            [ HH.strong_ [ HH.text token.ticker ]
+            , HH.text $ " " <> token.name
+            ]
+        , HH.div
+            [ HP.class_ (HH.ClassName "token-status") ]
+            [ if token.live
+              then HH.span 
+                [ HP.class_ (HH.ClassName "status-live") ] 
+                [ HH.text "Live" ]
+              else HH.span 
+                [ HP.class_ (HH.ClassName "status-pending") ] 
+                [ HH.text "Pending" ]
+            ]
+        ]
+    
+    renderPosition foreignPos =
+      let pos = unsafeCoerce foreignPos :: { id :: Int, amount :: Number, leverage :: String, price :: Number, duration :: String, shares :: Number, value :: Number, accumulatedYield :: Number }
+      in HH.div
+        [ HP.class_ (HH.ClassName "list-item") ]
+        [ HH.div
+            [ HP.class_ (HH.ClassName "list-item__header") ]
+            [ HH.text $ "Position #" <> show pos.id
+            , HH.span
+                [ HP.class_ (HH.ClassName "status status-active") ]
+                [ HH.text "Active" ]
+            ]
+        , HH.div
+            [ HP.class_ (HH.ClassName "list-item__content") ]
+            [ HH.div_ [ HH.text $ "Initial: " <> formatAmount pos.amount <> " @ " <> formatPrice pos.price ]
+            , HH.div_ [ HH.text $ "Current Value: " <> formatAmount pos.value ]
+            , HH.div_ [ HH.text $ "Yield Earned: " <> formatAmount pos.accumulatedYield ]
+            , HH.div_ [ HH.text $ "Leverage: " <> pos.leverage <> " | Duration: " <> pos.duration ]
+            , HH.div_ [ HH.text $ "Shares: " <> formatAmount pos.shares ]
+            ]
+        ]
+    
+    formatPrice p = formatAmount p
 
 --------------------------------------------------------------------------------
 -- Token Creation Panel Components
@@ -137,21 +180,21 @@ renderTokenCreatorPanel state =
     [ HH.h2_ [ HH.text "Create Feels Token" ]
     , HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "token-ticker" ] [ HH.text "Token Ticker:" ]
+        [ HH.label [ HP.for "create-token-ticker" ] [ HH.text "Token Ticker:" ]
         , HH.input
             [ HP.type_ HP.InputText
-            , HP.id "token-ticker"
-            , HP.name "token-ticker"
+            , HP.id "create-token-ticker"
+            , HP.name "create-token-ticker"
             , HP.placeholder "e.g., ALPHA"
             , HP.class_ (HH.ClassName "form__input")
             , HP.value state.tokenTicker
             , HE.onValueChange \v -> UpdateTokenTicker (trim v)
             ]
-        , HH.label [ HP.for "token-name" ] [ HH.text "Token Name:" ]
+        , HH.label [ HP.for "create-token-name" ] [ HH.text "Token Name:" ]
         , HH.input
             [ HP.type_ HP.InputText
-            , HP.id "token-name"
-            , HP.name "token-name"
+            , HP.id "create-token-name"
+            , HP.name "create-token-name"
             , HP.placeholder "e.g., Alpha Protocol Token"
             , HP.class_ (HH.ClassName "form__input")
             , HP.value state.tokenName
@@ -185,127 +228,211 @@ renderTokenCreatorPanel state =
         [ HH.text error ]
 
 --------------------------------------------------------------------------------
--- User Tokens Panel Components
+-- Exchange Panel Components
 --------------------------------------------------------------------------------
 
--- User tokens panel
-renderUserTokensPanel :: forall m. Array TokenMetadata -> H.ComponentHTML Action () m
-renderUserTokensPanel tokens =
+-- Universal exchange panel
+renderExchangePanel :: forall m. UIState -> H.ComponentHTML Action () m
+renderExchangePanel state =
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Your Created Tokens" ]
-    , if length tokens == 0
-      then HH.p_ [ HH.text "No tokens created yet" ]
-      else HH.div
-        [ HP.class_ (HH.ClassName "token-list") ]
-        (map renderToken tokens)
-    ]
-  where
-    renderToken foreignToken =
-      let token = unsafeCoerce foreignToken :: { ticker :: String, name :: String, live :: Boolean }
-      in HH.div
-        [ HP.class_ (HH.ClassName "list-item") ]
-        [ HH.div
-            [ HP.class_ (HH.ClassName "list-item__header") ]
-            [ HH.strong_ [ HH.text token.ticker ]
-            , HH.text $ " " <> token.name
-            ]
-        , HH.div
-            [ HP.class_ (HH.ClassName "token-status") ]
-            [ if token.live
-              then HH.span 
-                [ HP.class_ (HH.ClassName "status-live") ] 
-                [ HH.text "Live" ]
-              else HH.span 
-                [ HP.class_ (HH.ClassName "status-pending") ] 
-                [ HH.text "Pending" ]
-            ]
-        ]
-
---------------------------------------------------------------------------------
--- Position Creation Panel Components
---------------------------------------------------------------------------------
-
--- Create position panel
-renderCreatePositionPanel :: forall m. UIState -> H.ComponentHTML Action () m
-renderCreatePositionPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Create Position" ]
-    , -- Position form
+    [ HH.h2_ [ HH.text "Exchange" ]
+    , -- Exchange form
       HH.div
-        [ HP.class_ (HH.ClassName "position-form") ]
-        [ -- Amount input
+        [ HP.class_ (HH.ClassName "exchange-form") ]
+        [ -- From section
           HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "amount" ] [ HH.text "Amount:" ]
-            , HH.input
-                [ HP.type_ HP.InputNumber
-                , HP.id "amount"
-                , HP.name "amount"
-                , HP.value (formatAmount state.inputAmount)
-                , HE.onValueChange \v -> UpdateInputAmount (fromMaybe 0.0 (Number.fromString v))
-                , HP.class_ (HH.ClassName "form__input")
+            [ HP.class_ (HH.ClassName "exchange-section") ]
+            [ HH.h3_ [ HH.text "From" ]
+            , HH.div
+                [ HP.class_ (HH.ClassName "form-group") ]
+                [ HH.label [ HP.for "from-asset" ] [ HH.text "Asset:" ]
+                , HH.select
+                    [ HP.id "from-asset"
+                    , HP.name "from-asset"
+                    , HE.onValueChange \v -> SelectFromAsset v
+                    , HP.class_ (HH.ClassName "form__select")
+                    ]
+                    [ HH.option [ HP.value "jitosol" ] [ HH.text "JitoSOL" ]
+                    , HH.option [ HP.value "feelssol" ] [ HH.text "FeelsSOL" ]
+                    , HH.option [ HP.value "position" ] [ HH.text "Existing Position" ]
+                    -- TODO: Add user tokens
+                    ]
+                ]
+            , HH.div
+                [ HP.class_ (HH.ClassName "form-group") ]
+                [ HH.label [ HP.for "from-amount" ] [ HH.text "Amount:" ]
+                , HH.input
+                    [ HP.type_ HP.InputNumber
+                    , HP.id "from-amount"
+                    , HP.name "from-amount"
+                    , HP.value (formatAmount state.inputAmount)
+                    , HE.onValueChange \v -> UpdateInputAmount (fromMaybe 0.0 (Number.fromString v))
+                    , HP.class_ (HH.ClassName "form__input")
+                    , HP.placeholder "Enter amount"
+                    ]
                 ]
             ]
-        , -- Collateral selector (moved above asset)
+        , -- Exchange arrow
           HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "collateral-asset" ] [ HH.text "Input Asset:" ]
-            , HH.select
-                [ HP.id "collateral-asset"
-                , HP.name "collateral-asset"
-                , HE.onValueChange \v -> SelectCollateralAsset (parseTokenType v)
-                , HP.class_ (HH.ClassName "form__select")
-                ]
-                [ HH.option [ HP.value "JitoSOL" ] [ HH.text "JitoSOL" ]
-                 , HH.option [ HP.value "FeelsSOL" ] [ HH.text "FeelsSOL" ]
-                 -- TODO: userTokens not in current state shape
-                 ]
-            ]
-        , -- Asset selector (moved below collateral)
+            [ HP.class_ (HH.ClassName "exchange-arrow") ]
+            [ HH.text "↓" ]
+        , -- To section
           HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "output-asset" ] [ HH.text "Output Asset:" ]
-            , HH.select
-                [ HP.id "output-asset"
-                , HP.name "output-asset"
-                , HE.onValueChange \v -> SelectAsset (parseTokenType v)
-                , HP.class_ (HH.ClassName "form__select")
+            [ HP.class_ (HH.ClassName "exchange-section") ]
+            [ HH.h3_ [ HH.text "To" ]
+            , HH.div
+                [ HP.class_ (HH.ClassName "form-group") ]
+                [ HH.label [ HP.for "to-asset" ] [ HH.text "Asset/Position:" ]
+                , HH.select
+                    [ HP.id "to-asset"
+                    , HP.name "to-asset"
+                    , HE.onValueChange \v -> SelectToAsset v
+                    , HP.class_ (HH.ClassName "form__select")
+                    ]
+                    [ HH.option [ HP.value "position-spot" ] [ HH.text "Spot Position" ]
+                    , HH.option [ HP.value "position-term" ] [ HH.text "Term Position" ]
+                    , HH.option [ HP.value "jitosol" ] [ HH.text "JitoSOL" ]
+                    , HH.option [ HP.value "feelssol" ] [ HH.text "FeelsSOL" ]
+                    -- TODO: Add user tokens
+                    ]
                 ]
-                [ HH.option [ HP.value "FeelsSOL" ] [ HH.text "FeelsSOL" ]
-                 , HH.option [ HP.value "JitoSOL" ] [ HH.text "JitoSOL" ]
-                 -- TODO: userTokens not in current state shape
-                 ]
+            , -- Show position options if converting to position
+              renderPositionOptions state
             ]
-        , -- Staking options
-          renderLendOptions state
-        , -- Create button
+        , -- Route preview
+          HH.div
+            [ HP.class_ (HH.ClassName "route-preview") ]
+            [ HH.h4_ [ HH.text "Route Preview" ]
+            , HH.p
+                [ HP.class_ (HH.ClassName "route-text") ]
+                [ HH.text $ generateRouteText state ]
+            ]
+        , -- Exchange button
           HH.button
-            [ HE.onClick \_ -> CreatePosition
+            [ HE.onClick \_ -> ExecuteExchange
             , HP.class_ (HH.ClassName "btn btn--primary btn--large")
             ]
-            [ HH.text "Create Position" ]
+            [ HH.text "Execute Exchange" ]
         ]
     ]
   where
-    renderLendOptions _state' =
-      HH.div_
-        [ -- Unbonding period
-          HH.div
-            [ HP.class_ (HH.ClassName "form-group") ]
-            [ HH.label [ HP.for "unbonding-period" ] [ HH.text "Unbonding Period:" ]
-            , HH.select
-                [ HP.id "unbonding-period"
-                , HP.name "unbonding-period"
-                , HE.onValueChange SetTermType
-                , HP.class_ (HH.ClassName "form__select")
-                ]
-                [ HH.option [ HP.value "spot", HP.selected true ] [ HH.text "Spot (No Lock)" ]
-                , HH.option [ HP.value "monthly" ] [ HH.text "Monthly (28 days)" ]
-                ]
+    -- Show position-specific options when converting to a position
+    renderPositionOptions state' =
+      if String.contains (String.Pattern "position") (state'.selectedToAsset)
+        then renderLendOptions state'
+        else HH.div_ []
+    
+    -- Generate human-readable route description
+    generateRouteText state' =
+      let from = case state'.selectedFromAsset of
+            "jitosol" -> "JitoSOL"
+            "feelssol" -> "FeelsSOL"
+            "position" -> "Position"
+            _ -> "Asset"
+          to = case state'.selectedToAsset of
+            "position-spot" -> "Spot Position"
+            "position-term" -> "Term Position"
+            "jitosol" -> "JitoSOL"
+            "feelssol" -> "FeelsSOL"
+            _ -> "Asset"
+      in from <> " → " <> to <> " (Atomic transaction)"
+
+-- Lending options component (shared between position creation panels)
+renderLendOptions :: forall m. UIState -> H.ComponentHTML Action () m
+renderLendOptions state =
+  HH.div_
+    [ -- Term selection
+      HH.div
+        [ HP.class_ (HH.ClassName "form-group") ]
+        [ HH.label [ HP.for "term-type" ] [ HH.text "Term Type:" ]
+        , HH.select
+            [ HP.id "term-type"
+            , HP.name "term-type"
+            , HE.onValueChange SetTermType
+            , HP.class_ (HH.ClassName "form__select")
+            ]
+            [ HH.option [ HP.value "spot", HP.selected true ] [ HH.text "Spot (Flexible)" ]
+            , HH.option [ HP.value "monthly" ] [ HH.text "Monthly Term (Join Current Cycle)" ]
             ]
         ]
+    , -- Leverage tier
+      HH.div
+        [ HP.class_ (HH.ClassName "form-group") ]
+        [ HH.label [ HP.for "leverage-tier" ] [ HH.text "Risk Level:" ]
+        , HH.select
+            [ HP.id "leverage-tier"
+            , HP.name "leverage-tier"
+            , HE.onValueChange SetLeverageType
+            , HP.class_ (HH.ClassName "form__select")
+            ]
+            [ HH.option [ HP.value "senior", HP.selected true ] [ HH.text "Senior (1x - Protected)" ]
+            , HH.option [ HP.value "junior" ] [ HH.text "Junior (3x - Higher Risk/Reward)" ]
+            ]
+        ]
+    -- Duration info
+    , renderDurationInfo state
+    -- APY display
+    , renderAPY state
+    ]
+  where
+    renderDurationInfo state' =
+      HH.div
+        [ HP.class_ (HH.ClassName "duration-info") ]
+        [ case state'.selectedTermType of
+            "monthly" -> 
+              let termInfo = calculateTermInfo state'
+              in HH.div_
+                [ HH.p_ 
+                    [ HH.text "Monthly Term: Join the current 28-day cycle. Your position will mature with all other monthly positions at the end of this term." ]
+                , HH.p
+                    [ HP.class_ (HH.ClassName "term-status") ]
+                    [ HH.text termInfo ]
+                ]
+            _ -> HH.p_ 
+              [ HH.text "Spot: No term commitment. Withdraw anytime with immediate liquidity. Lower yields than term positions." ]
+        ]
+    
+    -- Calculate current term information
+    calculateTermInfo state' =
+      case state'.api of
+        Nothing -> "Term information unavailable"
+        Just api -> 
+          -- Terms are 28 days (assuming ~5 blocks/minute = 201,600 blocks)
+          -- This is simplified - in production would use actual term schedule
+          let blocksPerTerm = 201600
+              currentBlock = 1000  -- TODO: Get from protocol state
+              currentTermNumber = Int.floor (Int.toNumber currentBlock / Int.toNumber blocksPerTerm) + 1
+              blocksIntoTerm = currentBlock `mod` blocksPerTerm
+              blocksRemaining = blocksPerTerm - blocksIntoTerm
+              daysRemaining = Int.floor (Int.toNumber blocksRemaining / 7200.0)  -- ~7200 blocks per day
+          in "Current term #" <> show currentTermNumber <> " - " <> show daysRemaining <> " days remaining"
+    
+    renderAPY state' =
+      let duration = case state'.selectedTermType of
+            "monthly" -> "Monthly Term"
+            _ -> "Spot"
+          leverage = case state'.selectedLeverage of
+            "junior" -> "Junior (3x)"
+            _ -> "Senior (1x)"
+          baseAPY = 5.0
+          leverageMultiplier = if state'.selectedLeverage == "junior" then 3.0 else 1.0
+          durationMultiplier = if state'.selectedTermType == "monthly" then 1.2 else 1.0
+          totalAPY = baseAPY * leverageMultiplier * durationMultiplier
+      in
+        HH.div_
+          [ HH.div 
+              [ HP.class_ (HH.ClassName "apy-row") ]
+              [ HH.span_ [ HH.text $ "Duration: " <> duration ]
+              , HH.span_ [ HH.text $ "Leverage: " <> leverage ]
+              ]
+          , HH.div 
+              [ HP.class_ (HH.ClassName "apy-total") ]
+              [ HH.text $ show totalAPY <> "% APY" ]
+          , HH.div
+              [ HP.class_ (HH.ClassName "apy-breakdown") ]
+              [ HH.text "(Base 5% × Leverage × Duration bonus)" ]
+          ]
 
 --------------------------------------------------------------------------------
 -- Lending Book Panel Components
@@ -336,7 +463,7 @@ renderLoanBookPanel offers =
     ]
   where
     renderOffer foreignOffer =
-      let offer = unsafeCoerce foreignOffer :: { id :: Int, owner :: String, tranche :: String, amount :: Number, lockedAmount :: Number }
+      let offer = unsafeCoerce foreignOffer :: { id :: Int, owner :: String, leverage :: String, amount :: Number, lockedAmount :: Number }
       in
       HH.div
         [ HP.class_ (HH.ClassName "offer__item") ]
@@ -345,10 +472,10 @@ renderLoanBookPanel offers =
             [ HH.text $ "#" <> show offer.id ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__owner") ]
-            [ HH.text $ formatAddress offer.owner ]
+            [ HH.text $ formatAddress (show offer.owner) ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__asset") ]
-            [ HH.text $ offer.tranche <> " tranche" ]
+            [ HH.text $ offer.leverage ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__amount") ]
             [ HH.text $ formatAmount offer.amount <> " shares" ]
@@ -372,6 +499,14 @@ renderLoanBookPanel offers =
         then String.take 6 addr <> "..." <> String.drop (String.length addr - 4) addr
         else addr
     
+    formatPrice p = 
+      formatAmount p
+    
+    formatDuration d = 
+      if d == 0 
+      then "Spot" 
+      else show (d / 40320) <> " months"
+    
     _formatCollateral offer = 
       -- Show the locked amount for position
       formatAmount offer.lockedAmount
@@ -393,74 +528,6 @@ renderLoanBookPanel offers =
                   else HH.span 
                          [ HP.class_ (HH.ClassName "status-available") ] 
                          [ HH.text "Available" ]
-
---------------------------------------------------------------------------------
--- Positions Panel Components
---------------------------------------------------------------------------------
-
--- Positions panel
-renderPositionsPanel :: forall m. Array Position -> H.ComponentHTML Action () m
-renderPositionsPanel positions =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Your Created Positions" ]
-    , if length positions == 0
-      then HH.p_ [ HH.text "No active positions" ]
-      else HH.div
-        [ HP.class_ (HH.ClassName "position-list") ]
-        (map renderPosition positions)
-    ]
-  where
-    renderPosition foreignPos =
-      let pos = unsafeCoerce foreignPos :: { id :: Int, amount :: Number, tranche :: String, shares :: Number }
-      in
-      HH.div
-        [ HP.class_ (HH.ClassName "list-item") ]
-        [ HH.div
-            [ HP.class_ (HH.ClassName "list-item__header") ]
-            [ HH.text $ "Position #" <> Int.show pos.id
-            , HH.span
-                [ HP.class_ (HH.ClassName "status status-active") ]
-                [ HH.text "Active" ]
-            ]
-        , HH.div
-            [ HP.class_ (HH.ClassName "list-item__content") ]
-            [ HH.div_ [ HH.text $ formatAmount pos.amount <> " " <> pos.tranche ]
-            , HH.div_ [ HH.text $ "Term: Spot" ]
-            , HH.div_ [ HH.text $ "Shares: " <> formatAmount pos.shares ]
-            ]
-        ]
-
-    formatPositionTerms position = 
-      -- Since position is a foreign type, we need to handle this carefully
-      "Spot" -- Simplified for now to avoid type errors
-    
-    -- Legacy function no longer needed
-  -- where
-  --   renderPosition pos =
-  --     HH.div
-  --       [ HP.class_ (HH.ClassName "list-item") ]
-  --       [ HH.div
-  --           [ HP.class_ (HH.ClassName "list-item__header") ]
-  --           [ HH.text $ "Position #" <> show pos.id <> " (" <> show pos.side <> ")"
-  --           , HH.span
-  --               [ HP.class_ (HH.ClassName $ "status " <> statusClass pos.status) ]
-  --               [ HH.text $ show pos.status ]
-  --           ]
-  --       , HH.div
-  --           [ HP.class_ (HH.ClassName "list-item__content") ]
-  --           [ HH.div_ [ HH.text $ formatAmount pos.lendAmount <> " " <> show pos.lendAsset ]
-  --           , HH.div_ [ HH.text $ "Collateral: " <> formatAmount pos.collateralAmount <> " " <> show pos.collateralAsset ]
-  --           , HH.div_ [ HH.text $ "Terms: " <> formatTerms pos.terms ]
-  --           ]
-  --       ]
-    
-    -- formatTerms = case _ of
-    --   SwapTerms -> "Swap"
-    --   StakingTerms period -> "Staking (" <> show period <> ")"
-
-    -- statusClass status = case status of
-    --   _ -> "status-active"  -- Simplified for now
 
 --------------------------------------------------------------------------------
 -- Simulation Panel Components

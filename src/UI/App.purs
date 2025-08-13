@@ -21,7 +21,7 @@ import Data.Maybe (Maybe(..))
 -- Import UI modules
 import UI.State (UIState, Action(..), initialUIState)
 import UI.Action (handleAction)
-import UI.Component (renderSystemPanel, renderFeelsSOLPanel, renderWalletPanel, renderTokenCreatorPanel, renderUserTokensPanel, renderCreatePositionPanel, renderLoanBookPanel, renderPositionsPanel, renderSimulationPanel)
+import UI.Component (renderSystemPanel, renderWalletPanel, renderTokenCreatorPanel, renderExchangePanel, renderLoanBookPanel, renderSimulationPanel)
 -- Removed unused import
 
 --------------------------------------------------------------------------------
@@ -59,13 +59,10 @@ render state =
         [ -- Left column
           HH.div
             [ HP.class_ (HH.ClassName "left-column") ]
-            [ renderWalletPanel state
-            , renderFeelsSOLPanel state
+            [ renderSimulationPanel state
+            , renderWalletPanel state
             , renderTokenCreatorPanel state
-            , renderUserTokensPanel state.userTokens
-            , renderCreatePositionPanel state
-            , renderPositionsPanel state.userPositions
-            , renderSimulationPanel state
+            , renderExchangePanel state
             , renderSystemPanel state
             ]
         , -- Right column

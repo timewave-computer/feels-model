@@ -17,7 +17,7 @@ import Data.Int (toNumber)
 -- Import types
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..))
-import Protocol.Position (Position, TermCommitment, Tranche(..), isExpired)
+import Protocol.Position (Position, Duration(..), Leverage(..), isExpired, leverageMultiplier, isSpot)
 import Protocol.Position as P
 import Data.Array ((:))
 import UI.PoolRegistry (getPosition, removePosition, addPosition)
@@ -29,9 +29,9 @@ import UI.Account (getFeelsAccountBalance, updateFeelsAccountBalance)
 -- Helper Functions
 --------------------------------------------------------------------------------
 
--- | Check if position is spot (no term commitment)
+-- | Check if position is spot (no duration)
 isSpotPosition :: Position -> Boolean
-isSpotPosition pos = pos.term == P.spotTerm
+isSpotPosition = isSpot
 
 --------------------------------------------------------------------------------
 -- Position Creation
@@ -44,12 +44,13 @@ createPosition ::
   Number ->           -- amount
   TokenType ->        -- collateral asset
   Number ->           -- collateral amount
-  TermCommitment ->   -- term commitment
+  Duration ->         -- duration (Spot or Monthly)
+  Leverage ->         -- leverage tier (Senior or Junior)
   Boolean ->          -- rollover
   Maybe String ->     -- target token for staking
   ProtocolState ->         -- current state
   Effect (Either ProtocolError { position :: Position, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
-createPosition user _lendAsset amount _collateralAsset _collateralAmount term rollover targetToken state = do
+createPosition user _lendAsset amount _collateralAsset _collateralAmount duration leverage rollover targetToken state = do
   -- Validate amount
   if amount <= 0.0
     then pure $ Left $ InvalidAmountError amount
@@ -61,26 +62,20 @@ createPosition user _lendAsset amount _collateralAsset _collateralAmount term ro
       let currentBlock = state.currentBlock
           poolId = "FeelsSOL/DEFAULT"  -- MVP: Single default pool
           
-          tranche = Senior  -- MVP: All positions use Senior tranche
+          -- Use the leverage parameter passed in
+          price = 1.0        -- MVP: Default to par price
           
-          -- Calculate shares based on tranche multiplier
-          -- Senior tranche: 1x shares per unit of capital
-          -- Junior tranche: 3x shares per unit of capital (higher risk/reward)
-          trancheMultiplier = case tranche of
-            Senior -> 1.0
-            Junior -> 3.0
-          
-          -- Calculate shares: amount * multiplier
-          -- This represents the proportional claim on pool profits
-          shares = amount * trancheMultiplier
+          -- Calculate shares based on leverage tier
+          -- Senior: 1x shares, Junior: 3x shares
+          shares = amount * leverageMultiplier leverage
           
           position = P.createPosition 
             nextId
-            poolId
             user
             amount
-            tranche
-            term
+            price
+            duration
+            leverage
             rollover
             shares
             currentBlock
@@ -140,10 +135,10 @@ getPositionValue positionId state = do
       -- 2. Calculate current value based on position type
       let baseValue = position.amount
       
-      -- 3. Apply tranche multiplier (simplified)
-      let trancheMultiplier = case position.tranche of
-            Senior -> 1.0    -- Senior tranche: no leverage, stable returns
-            Junior -> 1.2    -- Junior tranche: 20% bonus for risk (simplified)
+      -- 3. Apply leverage multiplier (simplified)
+      let leverageMult = case position.leverage of
+            Senior -> 1.0    -- Senior tier: no leverage, stable returns
+            Junior -> 1.2    -- Junior tier: 20% bonus for risk (simplified)
       
       -- 4. Apply time-based returns for term positions (simplified)
       currentBlock <- pure state.currentBlock
@@ -156,7 +151,7 @@ getPositionValue positionId state = do
                             in 1.0 + (annualReturn * (toNumber blocksHeld) / blocksPerYear)
       
       -- 5. Calculate final value
-      let currentValue = baseValue * trancheMultiplier * timeMultiplier
+      let currentValue = baseValue * leverageMult * timeMultiplier
       pure $ Right currentValue
 
 -- | Initiate unbonding for a position

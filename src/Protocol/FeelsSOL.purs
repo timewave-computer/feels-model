@@ -17,6 +17,7 @@ module Protocol.FeelsSOL
   , getSystemHealth
   , getBufferStatus
   , rebalanceBuffer
+  , checkSolvency
   ) where
 
 import Prelude
@@ -28,6 +29,7 @@ import Effect.Ref (Ref, read, write, new)
 import Protocol.Token (TokenType(..))
 import FFI (currentTime)
 import Protocol.Error (ProtocolError(..))
+import Effect.Console (log) -- Added import for log
 
 --------------------------------------------------------------------------------
 -- FeelsSOL Types
@@ -66,10 +68,10 @@ type FeelsSOLState =
   , priceOracle :: Effect Number           -- JitoSOL/SOL price oracle
   , lastOracleUpdate :: Ref Number         -- Last oracle update timestamp
   , cachedPrice :: Ref (Maybe OraclePrice) -- Cached oracle price
-  , entryFee :: Number                     -- Fee for entering (e.g., 0.001 = 0.1%)
-  , exitFee :: Number                      -- Fee for exiting (e.g., 0.002 = 0.2%)
-  , polAllocationRate :: Number            -- Portion of fees going to POL (e.g., 0.25 = 25%)
-  , bufferTargetRatio :: Number            -- Target buffer as % of backing (e.g., 0.10 = 10%)
+  , entryFee :: Number                     -- Fee for entering (e.0.001 = 0.1%)
+  , exitFee :: Number                      -- Fee for exiting (e.0.002 = 0.2%)
+  , polAllocationRate :: Number            -- Portion of fees going to POL (e.0.25 = 25%)
+  , bufferTargetRatio :: Number            -- Target buffer as % of backing (e.0.10 = 10%)
   }
 
 --------------------------------------------------------------------------------
@@ -139,6 +141,9 @@ mintFeelsSOL state jitoSOLAmount = do
           _ <- write (currentBacking + backingAddition) state.totalJitoSOLBacking
           _ <- write (currentBuffer + bufferAddition) state.jitoSOLBuffer
           
+          -- Check solvency after minting
+          _ <- checkSolvency state
+          
           -- Return result
           timestamp <- currentTime
           pure $ Right
@@ -181,6 +186,9 @@ burnFeelsSOL state feelsSOLAmount = do
               _ <- write (currentSupply - feelsSOLAmount) state.totalFeelsSOLSupply
               _ <- write (currentBacking - fromBacking) state.totalJitoSOLBacking
               _ <- write (currentBuffer - fromBuffer) state.jitoSOLBuffer
+              
+              -- Check solvency after burning
+              _ <- checkSolvency state
               
               -- Return result
               timestamp <- currentTime
@@ -262,7 +270,7 @@ enterSystem state _user jitoAmount = do
       mintResult <- mintFeelsSOL state netJitoAmount
       
       case mintResult of
-        Left err -> pure $ Left $ InvalidCommandError err
+        Left err -> pure $ Left (InvalidCommandError err)
         Right result -> do
           pure $ Right 
             { feelsSOLMinted: result.feelsSOLMinted
@@ -291,7 +299,7 @@ exitSystem state _user feelsAmount = do
       burnResult <- burnFeelsSOL state feelsAmount
       
       case burnResult of
-        Left err -> pure $ Left $ InvalidCommandError err
+        Left err -> pure $ Left (InvalidCommandError err)
         Right result -> do
           -- Calculate fee on JitoSOL output
           let feeAmount = result.jitoSOLReleased * state.exitFee
@@ -384,3 +392,24 @@ rebalanceBuffer state = do
             , newBuffer: bufferStatus.target
             , adjustment: adjustment
             }
+
+--------------------------------------------------------------------------------
+-- SOLVENCY INVARIANT CHECK
+--------------------------------------------------------------------------------
+
+-- | Checks the core solvency invariant: Total JitoSOL backing >= FeelsSOL supply * exchange rate
+checkSolvency :: FeelsSOLState -> Effect Boolean
+checkSolvency state = do
+  totalFeelsSOL <- read state.totalFeelsSOLSupply
+  totalJitoSOLBacking <- read state.totalJitoSOLBacking
+  currentBuffer <- read state.jitoSOLBuffer
+  oraclePrice <- getOraclePrice state
+
+  let totalJitoSOLAvailable = totalJitoSOLBacking + currentBuffer
+      requiredJitoSOL = totalFeelsSOL / oraclePrice.price -- FeelsSOL / (JitoSOL/FeelsSOL) = JitoSOL
+
+  if totalJitoSOLAvailable >= requiredJitoSOL
+    then pure true
+    else do
+      log $ "SOLVENCY ALERT: JitoSOL available (" <> show totalJitoSOLAvailable <> ") < Required JitoSOL (" <> show requiredJitoSOL <> ")"
+      pure false

@@ -15,7 +15,7 @@ module Protocol.Token
   , unwrapFeelsSOL
   -- Token types
   , TokenType(..)
-  , TokenAmount
+  , TokenSupply
   , TokenMetadata
   , TokenCreationParams
   , ValidationResult
@@ -82,10 +82,10 @@ unwrapFeelsSOL (FeelsSOLAmount n) = n
 -- TokenType is now imported from Protocol.Common to avoid duplication
 -- All instances (Eq, Ord, Show) are defined in Protocol.Common
 
--- | Token amount representation combining type and quantity
-type TokenAmount = 
-  { tokenType :: TokenType   -- Which token this amount refers to
-  , amount :: Number         -- Quantity of tokens
+-- | Token supply representation combining type and quantity
+type TokenSupply = 
+  { tokenType :: TokenType   -- Which token this supply refers to
+  , supply :: Number         -- Quantity of tokens
   }
 
 --------------------------------------------------------------------------------
@@ -132,7 +132,7 @@ createToken params = do
     , creator: params.creator
     , createdAt: timestamp
     , live: true                        -- Live immediately via launch system
-    , totalSupply: 1000000.0           -- Default 1M supply
+    , totalSupply: 1000000000.0        -- Default 1B supply
     }
 
 --------------------------------------------------------------------------------

@@ -678,6 +678,10 @@ h3 {
 
 .chart-container {
   padding-bottom: $space-5;
+  height: 550px;
+  max-height: 550px;
+  width: 100%;
+  overflow: hidden;
 }
 
 .no-price-data {
@@ -701,9 +705,11 @@ h3 {
 
 #price-chart {
   width: 100%;
-  height: 500px;
+  height: 500px !important;
+  max-height: 500px !important;
   background: $color-bg-tertiary;
   border-radius: $radius-sm;
+  display: block;
 }
 
 .chart-data {

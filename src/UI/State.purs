@@ -27,15 +27,13 @@ type UIState =
     currentUser :: String
   -- Protocol API runtime
   , api :: Maybe AppRuntime
-  -- Position Creation Form
+  -- Exchange Form
   , inputAmount :: Number
-  , selectedAsset :: TokenType
-  , collateralAsset :: TokenType
-  , selectedTermType :: String  -- "spot", "monthly"
-  -- FeelsSOL Form
-  , showFeelsSOL :: Boolean
-  , jitoSOLAmount :: Number
-  , feelsSOLAmount :: Number
+  , selectedFromAsset :: String  -- "jitosol", "feelssol", "position", etc.
+  , selectedToAsset :: String    -- "position-spot", "position-term", "jitosol", etc.
+  , selectedTermType :: String   -- "spot", "monthly"
+  , selectedLeverage :: String   -- "senior", "junior"
+  , selectedTargetToken :: Maybe String  -- Target token ticker for position
   -- Simulation Form
   , simulationConfig :: SimulationConfig
   , simulationResults :: Maybe SimulationResults
@@ -88,22 +86,18 @@ data Action
   = Initialize
   | RefreshData
   | RenderChart
-  -- Position Management
+  -- Exchange/Position Management
   | UpdateInputAmount Number
-  | SelectAsset TokenType
-  | SelectCollateralAsset TokenType
+  | SelectFromAsset String
+  | SelectToAsset String
+  | SelectTargetToken (Maybe String)
   | SetTermType String
-  | CreatePosition
+  | SetLeverageType String
+  | ExecuteExchange
   -- Token Creation
   | CreateTokenUI
   | UpdateTokenTicker String
   | UpdateTokenName String
-  -- FeelsSOL
-  | ToggleFeelsSOL
-  | UpdateJitoSOLAmount Number
-  | UpdateFeelsSOLAmount Number
-  | EnterFeelsSOL
-  | ExitFeelsSOL
   -- Launch System
   | SelectLaunch String
   | UpdateLaunchBidAmount Number
@@ -123,15 +117,13 @@ initialUIState :: UIState
 initialUIState =
   { currentUser: "main-user"
   , api: Nothing
-  -- Position Creation Form
+  -- Exchange Form
   , inputAmount: 100.0
-  , selectedAsset: FeelsSOL
-  , collateralAsset: JitoSOL
+  , selectedFromAsset: "jitosol"
+  , selectedToAsset: "position-spot"
   , selectedTermType: "spot"
-  -- FeelsSOL Form
-  , showFeelsSOL: true
-  , jitoSOLAmount: 100.0
-  , feelsSOLAmount: 100.0
+  , selectedLeverage: "senior"
+  , selectedTargetToken: Nothing
   -- Simulation Form
   , simulationConfig: defaultSimulationConfig
   , simulationResults: Nothing
@@ -168,7 +160,7 @@ defaultSimulationConfig =
   , priceVolatility: 0.02
   , accountProfiles: [Whale, Aggressive, Conservative]
   , actionFrequency: 1.0  -- Reduced from 2.0
-  , juniorTranchePreference: 0.3
+  , juniorTranchePreference: 0.5  -- 50% preference for junior positions
   }
 
 --------------------------------------------------------------------------------

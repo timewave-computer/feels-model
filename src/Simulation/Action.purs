@@ -36,7 +36,7 @@ import Data.Enum (toEnum)
 
 -- Core protocol system imports
 import Protocol.Token (TokenType(..))
-import Protocol.Position (TermCommitment(..), monthlyTerm)
+import Protocol.Position (Duration(..), monthlyDuration, spotDuration)
 import Utils (formatAmount)
 
 -- Import simulation subsystem dependencies
@@ -66,8 +66,8 @@ data TradingAction
   = EnterProtocol String Number TokenType        -- Protocol entry: User converts assets to FeelsSOL
   | ExitProtocol String Number TokenType         -- Protocol exit: User converts FeelsSOL back to assets
   | CreateToken String String String              -- Token creation: User launches new token with ticker/name
-  | CreateLendOffer String TokenType Number TokenType Number TermCommitment (Maybe String)  -- Lending: User offers liquidity with terms
-  | TakeLoan String TokenType Number TokenType Number TermCommitment         -- Borrowing: User takes loan against collateral
+  | CreateLendOffer String TokenType Number TokenType Number Duration (Maybe String)  -- Lending: User offers liquidity with terms
+  | TakeLoan String TokenType Number TokenType Number Duration         -- Borrowing: User takes loan against collateral
   | ClosePosition String Int                      -- Position management: User closes existing position
   | WaitBlocks Int                               -- Timing control: Simulate realistic action pacing
 
@@ -236,7 +236,7 @@ generateTokenSwapAction config state account = do
               -- Market making spread: 5-15% above market price for buy orders
               priceWithSpread = currentMarketPrice * (1.05 + priceRand * 0.1)
           
-          pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread Spot Nothing
+          pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread spotDuration Nothing
           
         -- Execute sell orders (Token → FeelsSOL)
         else if account.feelsSOLBalance >= 20.0
@@ -255,7 +255,7 @@ generateTokenSwapAction config state account = do
                 -- Market making spread: 5-15% below market price for sell orders
                 priceWithSpread = currentMarketPrice * (0.95 - priceRand * 0.1)
             
-            pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread Spot Nothing
+            pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread spotDuration Nothing
           else pure $ WaitBlocks 1  -- Insufficient balance for trading
 
 --------------------------------------------------------------------------------
@@ -349,7 +349,7 @@ generateRandomAction config state = do
                   if account.feelsSOLBalance >= 100.0
                     then do
                       -- Standard 100 FeelsSOL stake for token launch support
-                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 (monthlyTerm state.currentBlock) (Just tokenTicker)
+                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 Monthly (Just tokenTicker)
                     else pure $ WaitBlocks 1  -- Insufficient balance for staking
                 Nothing -> pure $ WaitBlocks 1  -- Token selection failed
         else pure $ WaitBlocks 1  -- Default wait action for pacing

@@ -26,6 +26,7 @@ foreign import setInnerHTML :: Element -> String -> Effect Unit
 foreign import addEventListener :: Element -> String -> Effect Unit -> Effect Unit
 foreign import removeAllEventListeners :: Element -> String -> Effect Unit
 foreign import getValue :: Element -> Effect String
+foreign import getTextContent :: Element -> Effect String
 foreign import parseFloat :: String -> Number
 foreign import floor :: Number -> Int     -- Use Data.Int.floor instead
 -- Note: In actual usage, these are typed specifically in each module

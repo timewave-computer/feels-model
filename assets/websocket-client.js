@@ -285,26 +285,35 @@
                                 error: error.toString()
                             }));
                         }
+                    } else if (message.type === 'console') {
+                        // This is a console message forwarded from another client - ignore
+                        // We don't need to process console messages as commands
+                        return;
                     } else {
-                        // Legacy format - assume it's an action command
-                        try {
-                            const result = await window.remoteControl.executeAction(message.action, message.params);
-                            
-                            // Send success response
-                            ws.send(JSON.stringify({
-                                type: 'response',
-                                commandId: message.id,
-                                status: 'success',
-                                result: result
-                            }));
-                        } catch (error) {
-                            // Send error response
-                            ws.send(JSON.stringify({
-                                type: 'response',
-                                commandId: message.id,
-                                status: 'error',
-                                error: error.toString()
-                            }));
+                        // Legacy format - assume it's an action command only if it has an action field
+                        if (message.action) {
+                            try {
+                                const result = await window.remoteControl.executeAction(message.action, message.params);
+                                
+                                // Send success response
+                                ws.send(JSON.stringify({
+                                    type: 'response',
+                                    commandId: message.id,
+                                    status: 'success',
+                                    result: result
+                                }));
+                            } catch (error) {
+                                // Send error response
+                                ws.send(JSON.stringify({
+                                    type: 'response',
+                                    commandId: message.id,
+                                    status: 'error',
+                                    error: error.toString()
+                                }));
+                            }
+                        } else {
+                            // Unknown message type without action - just log and ignore
+                            console.log('Received unknown message type:', message);
                         }
                     }
                 } catch (e) {

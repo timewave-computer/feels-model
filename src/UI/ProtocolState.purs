@@ -32,7 +32,7 @@ import Protocol.Common (CommandResult(..), QueryResult(..))
 -- Import domain types needed for state
 import Protocol.Token (TokenType(..), TokenMetadata)
 import UI.TokenRegistry (TokenRegistry, initTokenRegistry)
-import Protocol.Position (Position, TermCommitment)
+import Protocol.Position (Position, Duration, Leverage)
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry, addPool)
 import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
 import Protocol.POL (POLState, initPOL, contribute)
@@ -40,7 +40,6 @@ import Protocol.Oracle (Oracle, initOracle)
 import Protocol.Incentive (MarketDynamics, initMarketDynamics)
 import UI.Account (AccountRegistry, initAccountRegistry)
 import Protocol.Offering (OfferingState)
-import Protocol.Tick (createTick)
 import Protocol.Error (ProtocolError)
 import FFI (currentTime)
 -- Commands module will be imported by consumers to avoid circular dependency
@@ -53,8 +52,8 @@ import FFI (currentTime)
 data ProtocolCommand
   = CreateToken String String String  
     -- ^ creator, ticker, name
-  | CreatePosition String TokenType Number TokenType Number TermCommitment Boolean (Maybe String)  
-    -- ^ user, lendAsset, amount, collateralAsset, collateralAmount, term, rollover, targetToken
+  | CreatePosition String TokenType Number TokenType Number Duration Leverage Boolean (Maybe String)  
+    -- ^ user, lendAsset, amount, collateralAsset, collateralAmount, term, leverage, rollover, targetToken
   | TransferTokens String String TokenType Number  
     -- ^ from, to, token, amount
   | EnterFeelsSOL String Number  
@@ -179,6 +178,21 @@ initStateImpl = do
     , protocolFee: 30.0
     , unlocked: true
     , offering: Nothing
+    , leverageState: 
+      { totalValue: 10000.0
+      , leverageGroups:
+        [ { leverage: 1.0   -- Senior
+          , value: 0.0
+          , shares: 0.0
+          }
+        , { leverage: 3.0   -- Junior
+          , value: 0.0
+          , shares: 0.0
+          }
+        ]
+      }
+    , totalValue: 10000.0
+    , lastUpdateBlock: 0
     }
     poolRegistry
   

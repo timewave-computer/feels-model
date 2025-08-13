@@ -40,7 +40,7 @@ import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
 import UI.Account (initAccountRegistry)
 import Utils (formatAmount)
 import Protocol.POL (initPOL)
-import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot)
+import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot, updatePrice)
 
 -- Import simulation subsystem modules
 import Simulation.Agent (SimulatedAccount, generateAccounts)
@@ -219,7 +219,10 @@ executeSimulationBlock config state blockNum = do
   newState <- foldl executeAction (pure marketInfluencedState) actions
   
   -- Update oracle with current market activity and price discovery
-  _ <- takeMarketSnapshot newState.oracle  -- Record market snapshot
+  -- First update the oracle's price to record it in history
+  _ <- updatePrice marketInfluencedState.currentPrice newState.oracle
+  
+  -- Then take the market snapshot
   marketSnapshot <- takeMarketSnapshot newState.oracle
   
   -- Extract official price from market snapshot for state consistency

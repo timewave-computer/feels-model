@@ -1,8 +1,8 @@
-# Feels Protocol MVP: Unified Tick-Based Market
+# Feels Protocol MVP: Tick-Based Market
 
 ## Overview
 
-The Feels Protocol MVP implements a unified tick-based market system where all three monetary functions (exchange, lending, and redenomination) are parameters of a single position type. By treating duration and leverage as optional dimensions alongside price ticks, the protocol creates a seamless continuum across spot trading, lending, and leveraged positions.
+The Feels Protocol MVP implements a tick-based market system where the three core monetary functions (exchange, lending, and leverage) are expressed through orthogonal position parameters. Each position is fully defined by `price` (the tick level), `duration` (time commitment in blocks), and `leverage` (exposure multiplier). This creates a three-dimensional continuum where any combination of spot trading, time-locked lending, and leveraged exposure can be expressed as a single position type.
 
 ## System Architecture
 
@@ -21,7 +21,7 @@ The Feels Protocol MVP implements a unified tick-based market system where all t
 └─────────────────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────┐
-│        Unified Tick Market                      │
+│              Tick Market                        │
 │  • Single position type with 3 parameters       │
 │  • Price tick + Duration + Leverage             │
 │  • Synthetic SOL ↔ Feels asset pairs            │
@@ -45,160 +45,162 @@ Isolates SOL/jitoSOL exchange rate risk from the core market mechanics while all
 - Clean separation between deposit risk and market risk
 - Synthetic SOL provides stable internal unit of account
 
-## Unified Tick Market
+## Tick Market
 
 ### Core Concept
-Every position is a tick with three orthogonal parameters that activate different monetary functions:
-- **tickRate**: Activates exchange function (liquidity at price level)
-- **duration**: Activates lending function (0 = spot, >0 = time-locked)
-- **leverageRate**: Activates redenomination function (0 = no leverage, >0 = leveraged)
+Every position is defined by three orthogonal parameters that activate different monetary functions:
+- **Price**: The specific price level for liquidity provision, activating the exchange function.
+- **Duration**: The time commitment for the position, activating the lending function (0 = spot/perpetual, >0 = time-locked).
+- **Leverage**: The exposure multiplier, activating the leverage function (1.0 = base exposure, >1.0 = amplified exposure).
 
-### Unified Position Type
+### Position Type
 ```purescript
--- Unified position parameters
-type UnifiedTick =
-  { amount :: Number          -- Size of position
-  , pair :: TokenType         -- Must be Synthetic SOL ↔ Feels Asset
-  , tickRate :: Number        -- Price level (exchange function)
-  , duration :: Int           -- 0 = spot, >0 = lending (lending function)
-  , leverageRate :: Number    -- 0 = no leverage, >0 = leveraged (redenomination function)
+-- Position with three orthogonal parameters
+type Position =
+  { id :: PositionId               -- Unique identifier for the position
+  , owner :: String                -- Owner of the position
+  , amount :: Number               -- Initial capital invested
+  , price :: Number                -- Price level for liquidity (tick rate)
+  , duration :: Number             -- Time lock in blocks (0 = spot)
+  , leverage :: Number             -- Exposure multiplier (1.0 = base)
+  , rollover :: Boolean            -- Whether position auto-rolls to next term
+  , shares :: ShareAmount          -- Share-based accounting within pool
+  , createdAt :: BlockNumber       -- Creation block number
+  , value :: Number                -- Current value (never liquidated)
+  , lockedAmount :: Number         -- Amount locked below floor
   }
 ```
 
 ### Functional Activation
-- **Pure Exchange**: `{duration: 0, leverageRate: 0}` - Simple spot liquidity
-- **Pure Lending**: `{duration: 30, leverageRate: 0, tickRate: market}` - Time-locked position
-- **Pure Leverage**: `{duration: 0, leverageRate: 0.5, tickRate: market}` - Leveraged exposure
-- **Edge Combinations**: Any two parameters active create edge positions
-- **Center Position**: All three parameters active create the complete position
+- **Pure Exchange**: `{price: 1.25, duration: 0, leverage: 1.0}` - Spot liquidity at specific price.
+- **Pure Lending**: `{price: 1.0, duration: 40320, leverage: 1.0}` - 28-day time lock at par.
+- **Pure Leverage**: `{price: 1.0, duration: 0, leverage: 3.0}` - 3x leveraged exposure at par.
+- **Edge Combinations**: Any two parameters active create hybrid positions.
+- **Complete Position**: All three parameters active create maximum complexity.
 
 ### Mechanics
-- **Price Discovery**: Orders aggregate at discrete price levels
-- **Execution**: Ticks with duration = 0 can be filled immediately
-- **Time Value**: Duration > 0 earns additional fees and locks liquidity
-- **Leverage**: Amplifies exposure to price movements at the tick
-- **Asset Creation**: Only ticks with duration > 0 using Synthetic SOL can mint feels assets
+- **Price Discovery**: Positions specify exact price levels for liquidity provision.
+- **Execution**: Positions with `duration: 0` can be filled immediately.
+- **Time Value**: `duration > 0` earns additional fees proportional to lock time.
+- **Exposure**: `leverage > 1.0` amplifies both gains and losses.
+- **Asset Creation**: Only positions with `duration > 0` can create synthetic assets.
 
 ## Position Examples
+
+These examples illustrate how different combinations of `price`, `duration`, and `leverage` parameters activate various monetary functions. The examples show simplified position data with key parameters.
 
 ### Pure Positions (Single Function Active)
 
 #### 1. Pure Exchange (Spot Liquidity)
 ```purescript
 { amount: 100.0
-, pair: TokenA           -- Paired with Synthetic SOL
-, tickRate: 0.98         -- Specific price level
-, duration: 0            -- No time lock
-, leverageRate: 0.0      -- No leverage
+, price: 1.25        -- Liquidity at 1.25 FeelsSOL per token
+, duration: 0        -- No time lock (spot)
+, leverage: 1.0      -- Base exposure
 }
 ```
-- **Function**: Simple spot market order
-- **Risk**: Liquidity risk only
-- **Fee**: Base exchange fees
+- **Function**: Provides liquidity at a specific price point.
+- **Risk**: Impermanent loss from price movements.
+- **Fee**: Base exchange fee (~0.3%).
 
 #### 2. Pure Lending (Time-Locked)
 ```purescript
 { amount: 100.0
-, pair: TokenB           -- Paired with Synthetic SOL
-, tickRate: 1.0          -- At market rate
-, duration: 30           -- 30-day lock
-, leverageRate: 0.0      -- No leverage
+, price: 1.0         -- At par (no price risk)
+, duration: 40320    -- 28-day lock (40320 blocks)
+, leverage: 1.0      -- Base exposure
 }
 ```
-- **Function**: Creates feels assets, earns time premium
-- **Risk**: Credit risk only
-- **Fee**: Base lending fees
-- **Creates**: 75 TokenB (at 75% collateral ratio)
+- **Function**: Time-locked liquidity earning duration premium.
+- **Risk**: Opportunity cost from locked capital.
+- **Fee**: Duration-based fee (~1% for 28 days).
+- **Creates**: Synthetic assets at 75% collateral ratio.
 
-#### 3. Pure Leverage (Redenominated)
+#### 3. Pure Leverage
 ```purescript
 { amount: 100.0
-, pair: TokenA           -- Paired with Synthetic SOL
-, tickRate: 1.0          -- At market rate
-, duration: 0            -- No time lock
-, leverageRate: 0.5      -- 1.5x total exposure
+, price: 1.0         -- At current market price
+, duration: 0        -- No time lock
+, leverage: 3.0      -- 3x exposure
 }
 ```
-- **Function**: Leveraged price exposure
-- **Risk**: Price risk only
-- **Fee**: Base leverage fees
+- **Function**: Amplified price exposure without liquidation risk.
+- **Risk**: Magnified gains and losses (capped at 100%).
+- **Fee**: Leverage fee proportional to multiplier (~0.5% * leverage).
 
 ### Edge Positions (Two Functions Active)
 
 #### 4. Staked Liquidity (Exchange + Lending)
 ```purescript
 { amount: 100.0
-, pair: TokenA           -- Paired with Synthetic SOL
-, tickRate: 1.02         -- Above market
-, duration: 60           -- 60-day lock
-, leverageRate: 0.0      -- No leverage
+, price: 1.25        -- Liquidity above market
+, duration: 40320    -- 28-day lock
+, leverage: 1.0      -- Base exposure
 }
 ```
-- **Function**: Time-locked liquidity provision
-- **Risk**: Liquidity + Credit risk
-- **Fee**: Weighted average of exchange and lending fees
+- **Function**: Time-locked liquidity provision at specific price.
+- **Risk**: Impermanent loss + opportunity cost.
+- **Fee**: Combined exchange + duration fees (~1.3%).
 
-#### 5. Leveraged Lending (Lending + Leverage)
+#### 5. Leveraged Lending (Duration + Leverage)
 ```purescript
 { amount: 100.0
-, pair: TokenB           -- Paired with Synthetic SOL
-, tickRate: 1.0          -- At market
-, duration: 90           -- 90-day lock
-, leverageRate: 1.0      -- 2x total exposure
+, price: 1.0         -- At par
+, duration: 40320    -- 28-day lock
+, leverage: 3.0      -- 3x exposure
 }
 ```
-- **Function**: Leveraged time-locked position
-- **Risk**: Credit + Price risk
-- **Fee**: Weighted average of lending and leverage fees
+- **Function**: Amplified returns on time-locked capital.
+- **Risk**: Magnified opportunity cost and price risk.
+- **Fee**: Duration fee + leverage fee (~2.5%).
 
-### Center Position (All Functions Active)
+### Complete Position (All Functions Active)
 
-#### 6. Complete Position
+#### 6. Complete Position (All Parameters Active)
 ```purescript
 { amount: 100.0
-, pair: TokenA           -- Paired with Synthetic SOL
-, tickRate: 0.95         -- Below market
-, duration: 30           -- 30-day lock
-, leverageRate: 0.5      -- 1.5x exposure
+, price: 1.25        -- Above market liquidity
+, duration: 40320    -- 28-day lock
+, leverage: 3.0      -- 3x exposure
 }
 ```
-- **Function**: All three monetary functions combined
-- **Risk**: Liquidity + Credit + Price risk
-- **Fee**: `(exchange_fee + lending_fee + leverage_fee) / 3 × 1.2`
-- **Complexity Premium**: 20% additional fee for maximum complexity
+- **Function**: Maximum capital efficiency with all three functions.
+- **Risk**: Compound risks from all parameters.
+- **Fee**: Multiplicative fees (~3.9% = 0.3% * 1.3 * 3.0).
+- **Complexity Premium**: Additional fee for multi-parameter positions.
 
 ## Asset Hierarchy
 
 ```
 External Layer:    jitoSOL (user deposits)
         ↓
-Base Layer:        Synthetic SOL (internal currency)
+Base Layer:        FeelsSOL (internal currency, synthetic SOL)
         ↓
-Feels Token Layer:       TokenA, TokenB, PositionA, PositionB (created via ticks) 
+Feels Token Layer:       User-Created Tokens (e.g., TokenA, TokenB, created via offerings)
 ```
 
 ### Asset Rules
 1. **Entry/Exit**: All users enter with jitoSOL, exit with jitoSOL
-2. **Internal Operations**: All use Synthetic SOL as base currency
-3. **Feels Creation**: Only locked Synthetic SOL ticks create feels assets
-4. **Pairing Rule**: All operations must be Synthetic SOL ↔ Feels pairs
-5. **No Cross-Feels**: No direct TokenA ↔ TokenB operations
+2. **Internal Operations**: All use FeelsSOL as base currency
+3. **Feels Creation**: Only positions with `duration > 0` can create synthetic assets.
+4. **Pairing Rule**: All operations must be FeelsSOL ↔ User-Created Token pairs
+5. **No Cross-Feels**: No direct User-Created Token ↔ User-Created Token operations
 
 ## Fee Structure
 
-### Unified Fee Model
+### Fee Model
 Fees are calculated based on which parameters are active, with each function contributing to the total:
 
 ```purescript
--- Calculate unified fee based on active parameters
-calculateFee :: UnifiedTick -> SystemParams -> Number
+-- Calculate fee based on active parameters
+calculateFee :: TickParams -> SystemParams -> Number
 calculateFee params sysParams =
   let baseFee = 0.001
-      exchangeMult = if params.tickRate /= 1.0 then 1.0 else 0.0
+      exchangeMult = if params.price /= 1.0 then 1.0 else 0.0
       lendingMult = if params.duration > 0 
                     then toNumber params.duration / 180.0 
                     else 0.0
-      leverageMult = params.leverageRate
+      leverageMult = params.leverage
       complexityMult = case countActiveParams params of
         1 -> 1.0   -- Single function
         2 -> 1.1   -- Edge position
@@ -210,11 +212,11 @@ calculateFee params sysParams =
      complexityMult
 
 -- Count active parameters
-countActiveParams :: UnifiedTick -> Int
+countActiveParams :: TickParams -> Int
 countActiveParams params =
-  (if params.tickRate /= 1.0 then 1 else 0) +
+  (if params.price /= 1.0 then 1 else 0) +
   (if params.duration > 0 then 1 else 0) +
-  (if params.leverageRate > 0.0 then 1 else 0)
+  (if params.leverage > 1.0 then 1 else 0)
 ```
 
 Where `complexityMultiplier`:
@@ -226,9 +228,9 @@ Where `complexityMultiplier`:
 
 | Active Parameters | Risk Types | Fee Calculation |
 |------------------|------------|-----------------|
-| tickRate only | Liquidity Risk | `base × (1 + 1/tick_depth) × utilization` |
+| price only | Liquidity Risk | `base × (1 + |price - 1.0|) × utilization` |
 | duration only | Credit Risk | `base × (1 + duration/180) × (1/total_staked)` |
-| leverageRate only | Price Risk | `base × (1 + volatility) × leverage_ratio` |
+| leverage only | Price Risk | `base × (1 + volatility) × leverage` |
 | Two parameters | Combined Risks | Weighted average of components |
 | All three | All Risks | Average of all three × 1.2 |
 
@@ -250,121 +252,133 @@ Where `complexityMultiplier`:
 - **Deposit Buffer**: Maintains jitoSOL reserves
 - **No Liquidations**: Positions cannot be forcibly closed
 - **Bounded Loss**: Maximum loss is initial deposit
-- **Over-collateralization**: 75% ratio provides safety margin
+- **Over-collateralization**: Provides safety margin
 
 ## Example User Flows
 
+These examples illustrate user interactions with the protocol using the actual UI action functions and `Position` parameters.
+
 ### Conservative Yield Seeker
 ```purescript
--- 1. Deposit 100 jitoSOL → receive 102 synthetic SOL
-deposit 100.0 depositState
+-- Assuming 'user' and 'protocolState' are available in scope
 
--- 2. Create position
-let position = 
-      { amount: 102.0
-      , pair: TokenA
-      , tickRate: 1.05
-      , duration: 30       -- Pure lending
-      , leverageRate: 0.0
-      }
-      
--- 3. Receive: 76.5 TokenA (created at 75% collateral)
-createPosition syntheticSOL position systemParams
+-- 1. Deposit 100 jitoSOL → receive FeelsSOL
+_ <- enterFeelsSOL user 100.0 protocolState
 
--- 4. Earn: jitoSOL staking yield + duration fees
--- 5. After 30 days: withdraw → receive jitoSOL back + profits
-withdraw syntheticAmount depositState
+-- 2. Create a Senior, Monthly position (Pure Lending)
+_ <- createPosition
+       user
+       FeelsSOL          -- lend asset
+       100.0             -- amount
+       JitoSOL           -- collateral asset (simplified)
+       150.0             -- collateral amount (simplified, 1.5x)
+       (monthlyTerm protocolState.currentBlock) -- term: Monthly
+       false             -- rollover
+       Nothing           -- target token for staking
+       protocolState
+
+-- 3. Earn: jitoSOL staking yield + duration fees (conceptual)
+-- 4. After expiry: withdraw → receive jitoSOL back + profits
+_ <- exitFeelsSOL user 100.0 protocolState -- Simplified: burning 100 FeelsSOL
 ```
 
 ### Active Trader
 ```purescript
--- 1. Deposit 100 jitoSOL → receive 102 synthetic SOL
-deposit 100.0 depositState
+-- Assuming 'user' and 'protocolState' are available in scope
+
+-- 1. Deposit 100 jitoSOL → receive FeelsSOL
+_ <- enterFeelsSOL user 100.0 protocolState
 
 -- 2. Create two positions:
--- a) Spot liquidity:
-let spotPosition = 
-      { amount: 50.0
-      , pair: TokenB
-      , tickRate: 0.98
-      , duration: 0        -- Pure exchange
-      , leverageRate: 0.0
-      }
-      
--- b) Leveraged position:
-let leveragedPosition = 
-      { amount: 52.0
-      , pair: TokenB
-      , tickRate: 1.0
-      , duration: 0
-      , leverageRate: 1.0  -- Pure leverage (2x exposure)
-      }
-      
-createPosition syntheticSOL spotPosition systemParams
-createPosition syntheticSOL leveragedPosition systemParams
+-- a) Spot liquidity (Senior, Spot):
+_ <- createPosition
+       user
+       FeelsSOL
+       50.0
+       JitoSOL
+       75.0
+       spotTerm          -- term: Spot
+       false
+       Nothing
+       protocolState
 
--- 3. Manage positions based on market movements
+-- b) Leveraged position (Junior, Spot):
+_ <- createPosition
+       user
+       FeelsSOL
+       52.0
+       JitoSOL
+       78.0
+       spotTerm          -- term: Spot
+       false
+       Nothing
+       protocolState
+
+-- 3. Manage positions based on market movements (conceptual)
 -- 4. Exit when profitable → receive jitoSOL
+_ <- exitFeelsSOL user 100.0 protocolState -- Simplified
 ```
 
 ### Yield Farmer Maximalist
 ```purescript
--- 1. Deposit 100 jitoSOL → receive 102 synthetic SOL
-deposit 100.0 depositState
+-- Assuming 'user' and 'protocolState' are available in scope
 
--- 2. Create center position:
-let centerPosition = 
-      { amount: 102.0
-      , pair: TokenA
-      , tickRate: 0.95     -- Below market
-      , duration: 90       -- Long lock
-      , leverageRate: 0.5  -- 1.5x exposure
-      }
-      
--- 3. All three functions active = maximum fees + complexity premium
-createPosition syntheticSOL centerPosition systemParams
+-- 1. Deposit 100 jitoSOL → receive FeelsSOL
+_ <- enterFeelsOL user 100.0 protocolState
 
--- 4. Compound rewards over time
+-- 2. Create a comprehensive position (Junior, Monthly):
+_ <- createPosition
+       user
+       FeelsSOL
+       102.0
+       JitoSOL
+       153.0
+       (monthlyTerm protocolState.currentBlock) -- term: Monthly
+       false
+       Nothing
+       protocolState
+
+-- 3. All three functions active = maximum fees + complexity premium (conceptual)
+-- 4. Compound rewards over time (conceptual)
 -- 5. Unwind → exit to jitoSOL
+_ <- exitFeelsSOL user 100.0 protocolState -- Simplified
 ```
 
 ## Technical Implementation
 
 ### Smart Contract Architecture
-1. **DepositVault**: Handles jitoSOL ↔ synthetic SOL conversions (implemented in Deposit.purs)
-2. **Oracle**: SOL/jitoSOL price feed + volatility for leverage calculations (implemented in FFI.js)
-3. **UnifiedTickMarket**: Single market with three-parameter positions (implemented in Pool.purs)
-4. **PositionManager**: Creates and manages unified tick positions (implemented in Position.purs with leverage functions)
-5. **FeeCalculator**: Dynamic fee computation based on active parameters (implemented in Risk.purs)
-6. **ValidationSystem**: Input validation and formatting utilities (implemented in Utils.purs)
+1. **DepositVault**: Handles jitoSOL ↔ FeelsSOL conversions (implemented in Protocol.FeelsSOL.purs)
+2. **Oracle**: SOL/jitoSOL price feed + volatility for risk calculations (implemented in Protocol.Oracle.purs; FFI.js provides JavaScript interop for core math functions and external calls).
+3. **TickMarket**: Single market with position parameters (implemented in Protocol.Pool.purs)
+4. **PositionManager**: Creates and manages positions (implemented in Protocol.Position.purs)
+5. **FeeCalculator**: Dynamic fee computation based on active parameters (planned feature, currently basic fees are in Protocol.Pool.purs and Protocol.FeelsSOL.purs)
+6. **ValidationSystem**: Input validation and formatting utilities (validation logic is distributed across relevant modules like Protocol.Token.purs and UI.Action.purs)
 
 ### Key Invariants
-- Total synthetic SOL ≤ Total jitoSOL deposited × exchange rate
-- Total feels assets ≤ Total locked synthetic SOL × effective_collateral_ratio
-- Effective collateral ratio = 0.75 × (1 / (1 + leverageRate))
+- Total FeelsSOL ≤ Total jitoSOL deposited × exchange rate
 - All positions have non-negative value
 - Fee revenue is strictly positive
 - Leverage does not create systemic risk (no liquidations)
 
-## Benefits of Unified Design
+## Benefits of the Design
 
-1. **Capital Efficiency**: One liquidity pool serves all functions (exchange, lending, leverage)
-2. **Natural Pricing**: Each parameter contributes independently to fees
-3. **True Composability**: Parameters combine mathematically without special cases
-4. **User Experience**: One interface, toggle parameters to access any function
-5. **Risk Clarity**: Each parameter maps to exactly one risk type
-6. **No Liquidations**: Leverage is bounded by collateral, positions cannot be forcibly closed
+1. **Capital Efficiency**: One liquidity pool serves all functions (exchange, lending, exposure).
+2. **Natural Pricing**: (Conceptual - detailed fee model is a planned feature) Each parameter is intended to contribute independently to fees.
+3. **Composability**: The three parameters (`price`, `duration`, `leverage`) combine orthogonally.
+4. **User Experience**: A single interface allows users to dial in exact exposure across all three dimensions.
+5. **Risk Clarity**: Each parameter conceptually maps to a specific risk type.
+6. **No Liquidations**: Exposure is bounded by collateral, positions cannot be forcibly closed.
 
 ## Mathematical Properties
 
-The unified tick system exhibits several elegant properties:
+The tick system exhibits several elegant properties:
 
 1. **Parameter Independence**: Each parameter affects exactly one monetary function
-2. **Risk Orthogonality**: `tickRate` → liquidity risk, `duration` → credit risk, `leverageRate` → price risk
+2. **Risk Orthogonality**: `price` → liquidity risk, `duration` → credit risk, `leverage` → price risk
 3. **Fee Additivity**: Total fee is a product of individual parameter contributions
 4. **Collateral Scaling**: Leverage inversely affects effective collateral ratio
 5. **Bounded Loss**: Maximum loss = initial deposit (no liquidations possible)
 
 ## Conclusion
 
-The Feels Protocol MVP achieves true unification by reducing all financial positions to a single type with three parameters. This design perfectly maps the theoretical triangle model (exchange, lending, redenomination) to practical implementation parameters (tickRate, duration, leverageRate). The addition of the jitoSOL deposit layer provides baseline staking yields while the unified tick system offers unprecedented composability and capital efficiency. Users can access any combination of DeFi primitives through a single, intuitive interface where complexity emerges from simplicity.
+The Feels Protocol MVP reduces all financial positions to a single type with three orthogonal parameters. This design maps the theoretical triangle model (exchange, lending, leverage) to practical implementation parameters (price, duration, leverage). The addition of the jitoSOL deposit layer provides baseline staking yields while the tick-based position system offers unprecedented composability and capital efficiency. Users can access any combination of DeFi primitives through a single interface.

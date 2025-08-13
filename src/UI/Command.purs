@@ -24,7 +24,7 @@ import Protocol.Common (CommandResult(..))
 import Protocol.Token (TokenType(..))
 
 -- Import domain modules
-import Protocol.Position (TermCommitment)
+import Protocol.Position (Duration, Leverage)
 import Protocol.FeelsSOL (getTotalSupply)
 import Protocol.POL (contribute, getTotalPOL)
 import Protocol.Oracle (takeMarketSnapshot)
@@ -111,9 +111,9 @@ handleCreateToken creator ticker name state = do
       pure $ Right $ Tuple newState (TokenCreated convertedToken)
 
 -- | Handle position creation command
-handleCreatePosition :: String -> TokenType -> Number -> TokenType -> Number -> TermCommitment -> Boolean -> Maybe String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleCreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state = do
-  result <- PositionActions.createPosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state
+handleCreatePosition :: String -> TokenType -> Number -> TokenType -> Number -> Duration -> Leverage -> Boolean -> Maybe String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleCreatePosition user lendAsset amount collateralAsset collateralAmount term leverage rollover targetToken state = do
+  result <- PositionActions.createPosition user lendAsset amount collateralAsset collateralAmount term leverage rollover targetToken state
   case result of
     Left err -> pure $ Left err
     Right { position, positionTokenMap } -> do
@@ -148,6 +148,7 @@ handleEnterFeelsSOL user jitoAmount state = do
     Right mintResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
+      -- TODO: Add solvency check
       pure $ Right $ Tuple newState (FeelsSOLMinted mintResult)
 
 -- | Handle FeelsSOL exit command
@@ -159,6 +160,7 @@ handleExitFeelsSOL user feelsAmount state = do
     Right burnResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
+      -- TODO: Add solvency check
       pure $ Right $ Tuple newState (FeelsSOLBurned burnResult)
 
 -- | Handle unbonding initiation
@@ -267,8 +269,8 @@ executeCommand :: ProtocolCommand -> ProtocolState -> Effect (Either ProtocolErr
 executeCommand cmd state = case cmd of
   CreateToken creator ticker name -> 
     handleCreateToken creator ticker name state
-  CreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken ->
-    handleCreatePosition user lendAsset amount collateralAsset collateralAmount term rollover targetToken state
+  CreatePosition user lendAsset amount collateralAsset collateralAmount term leverage rollover targetToken ->
+    handleCreatePosition user lendAsset amount collateralAsset collateralAmount term leverage rollover targetToken state
   TransferTokens from to token amount ->
     handleTransferTokens from to token amount state
   EnterFeelsSOL user amount ->

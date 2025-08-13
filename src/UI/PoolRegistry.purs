@@ -15,7 +15,7 @@ module UI.PoolRegistry
   , getPosition
   , getUserPositions
   , getAllPositions
-  , getPoolPositions
+  -- , getPoolPositions -- TODO: Need to track pool-position relationship
   ) where
 
 import Prelude
@@ -144,10 +144,11 @@ getAllPositions registryRef = do
   pure $ fromFoldable $ Map.values registry.positions
 
 -- | Get all positions in a specific pool
-getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
-getPoolPositions poolId registryRef = do
-  registry <- read registryRef
-  -- Filter all positions to find ones belonging to this pool
-  let allPositions = fromFoldable $ Map.values registry.positions
-      poolPositions = filter (\pos -> pos.poolId == poolId) allPositions
-  pure poolPositions
+-- TODO: Position no longer has poolId field - need to track pool-position relationship separately
+-- getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
+-- getPoolPositions poolId registryRef = do
+--   registry <- read registryRef
+--   -- Filter all positions to find ones belonging to this pool
+--   let allPositions = fromFoldable $ Map.values registry.positions
+--       poolPositions = filter (\pos -> pos.poolId == poolId) allPositions
+--   pure poolPositions

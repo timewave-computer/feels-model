@@ -27,8 +27,9 @@ import Unsafe.Coerce (unsafeCoerce)
 
 -- Import protocol modules for data access
 import UI.TokenRegistry (getAllTokens)
-import UI.PoolRegistry (getUserPositions, getAllPositions)
+import UI.PoolRegistry (getUserPositions, getAllPositions, getPool)
 import Protocol.POL (getTotalPOL, getPOLMetrics, calculateGrowthRate24h)
+import Protocol.Pool (syncPositionValue)
 import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
 import Protocol.Error (ProtocolError(..))
 import Protocol.Offering as Offering
@@ -90,8 +91,16 @@ handleGetAllTokens state = do
 handleGetUserPositions :: String -> ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetUserPositions user state = do
   positions <- getUserPositions user state.poolRegistry
+  
+  -- Sync position values with current pool state
+  -- For MVP, using default pool
+  poolResult <- getPool "FeelsSOL/DEFAULT" state.poolRegistry
+  let syncedPositions = case poolResult of
+        Just pool -> map (\pos -> syncPositionValue pos pool state.currentBlock) positions
+        Nothing -> positions  -- No pool found, return positions as-is
+  
   -- Convert from P.Position to foreign Position type
-  let convertedPositions = unsafeCoerce positions :: Array Position
+  let convertedPositions = unsafeCoerce syncedPositions :: Array Position
   pure $ Right $ PositionList convertedPositions
 
 -- | Handle user balance query

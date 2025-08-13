@@ -50,7 +50,7 @@ import Data.Foldable (sum, find)
 import Data.Array ((:))
 
 import Protocol.Token (TokenType(..))
-import Protocol.Position (TermCommitment(..), monthlyTerm, spotTerm, createPosition, Position, Tranche(..))
+import Protocol.Position (Duration(..), Leverage(..), createPosition, Position)
 import Protocol.Pool (PoolState, addLiquidity, LiquidityParams, SwapParams, SwapResult, swap)
 import Protocol.Common (PoolId, BlockNumber, PositionId)
 import Protocol.Error (ProtocolError(..))
@@ -94,7 +94,7 @@ type PhaseConfig =
 -- | Complete offering configuration defining all phases and parameters
 -- | Contains all information needed to execute a full token launch
 type OfferingConfig =
-  { tokenTicker :: String           -- Token symbol/ticker (e.g., "BONK")
+  { tokenTicker :: String           -- Token symbol/ticker (e.g., "FEELS")
   , totalTokens :: Number           -- Total tokens available for launch (T_launch)
   , phases :: Array PhaseConfig     -- Sequential phase configurations
   , treasuryAddress :: String       -- Address receiving FeelsSOL proceeds
@@ -135,7 +135,7 @@ type OfferingResult =
 type GatedSwapParams =
   { swapParams :: SwapParams        -- Standard AMM swap parameters
   , user :: String                  -- User address performing the swap
-  , termCommitment :: TermCommitment -- User's chosen position term commitment
+  , duration :: Duration              -- User's chosen position duration
   , poolId :: String                -- Pool identifier for the swap
   }
 
@@ -252,9 +252,9 @@ completeOffering offeringRef = do
 
 -- | Validate whether a user can participate in a specific phase with their term commitment
 -- | Different phases have different commitment requirements for fair access
-canParticipate :: OfferingPhase -> TermCommitment -> Boolean
-canParticipate phase term = case phase, term of
-  MonthlyPhase, Monthly _ -> true   -- Monthly phase requires monthly commitment
+canParticipate :: OfferingPhase -> Duration -> Boolean
+canParticipate phase duration = case phase, duration of
+  MonthlyPhase, Monthly -> true     -- Monthly phase requires monthly commitment
   SpotPhase, _ -> true              -- Spot phase open to all commitment types
   Completed, _ -> false             -- No participation after completion
   _, _ -> false                     -- All other combinations invalid
@@ -300,7 +300,8 @@ gatedSwap pool maybeOffering params currentBlock = do
   case maybeOffering of
     -- No active offering - execute standard AMM swap
     Nothing -> do
-      let swapResult = swap pool params.swapParams
+      let swapResultWithPool = swap pool params.swapParams currentBlock
+          swapResult = swapResultWithPool.result
       pure $ Right { swapResult, position: Nothing }
       
     -- Offering exists - check activation and eligibility
@@ -310,7 +311,8 @@ gatedSwap pool maybeOffering params currentBlock = do
       if not offering.isActive
         then do
           -- Offering exists but phase inactive - standard swap
-          let swapResult = swap pool params.swapParams
+          let swapResultWithPool = swap pool params.swapParams currentBlock
+              swapResult = swapResultWithPool.result
           pure $ Right { swapResult, position: Nothing }
         else do
           -- Active offering phase - validate user eligibility
@@ -333,10 +335,10 @@ validateSwapEligibility offering params = do
     then pure $ Right unit  -- Token selling unrestricted
     else
       -- Validate term commitment meets phase requirements
-      if canParticipate offering.currentPhase params.termCommitment
+      if canParticipate offering.currentPhase params.duration
         then pure $ Right unit
         else pure $ Left $ InvalidCommandError $ 
-          "Term commitment " <> show params.termCommitment <> 
+          "Duration " <> show params.duration <> 
           " not eligible for " <> show offering.currentPhase <> " phase"
 
 -- | Process swap execution during active offering with position creation
@@ -349,7 +351,9 @@ processOfferingSwap ::
   Effect (Either ProtocolError GatedSwapResult)
 processOfferingSwap pool offeringRef params currentBlock = do
   -- Execute AMM swap with standard mechanics
-  let swapResult = swap pool params.swapParams
+  let swapResultWithPool = swap pool params.swapParams currentBlock
+      swapResult = swapResultWithPool.result
+      updatedPool = swapResultWithPool.updatedPool
   
   -- Create position for token purchases (FeelsSOL → Token swaps)
   if params.swapParams.zeroForOne && swapResult.amount1 > 0.0
@@ -358,13 +362,13 @@ processOfferingSwap pool offeringRef params currentBlock = do
       let positionId = 1  -- Would be derived from Program Derived Addresses in Solana
           position = createPosition
             positionId
-            params.poolId
-            params.user
-            swapResult.amount1        -- Tokens received from swap
-            Junior                    -- Junior tranche for offering participants
-            params.termCommitment     -- User's chosen commitment term
-            false                     -- No rollover for offering positions
-            swapResult.amount1        -- Initial shares equal token amount
+            params.user              -- Position owner
+            swapResult.amount1       -- Initial investment amount
+            1.0                      -- Price level (default for offerings)
+            params.duration          -- Time commitment
+            Junior                   -- Junior leverage for offering participants
+            false                    -- No rollover for offering positions
+            swapResult.amount1       -- Initial shares equal token amount
             currentBlock
       
       -- Update offering progress tracking

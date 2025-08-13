@@ -120,6 +120,13 @@ export const getValue = function(element) {
   };
 };
 
+// Get text content from any element
+export const getTextContent = function(element) {
+  return function() {
+    return element.textContent || '';
+  };
+};
+
 // Parse string to float
 export const parseFloat = (str) => globalThis.parseFloat(str);
 
@@ -607,6 +614,12 @@ function renderChartJS(canvas, data) {
   console.log('Canvas element:', canvas);
   console.log('Canvas width:', canvas.width, 'height:', canvas.height);
   
+  // Force canvas to have reasonable dimensions - fit container width but fixed height
+  const containerWidth = canvas.parentElement ? canvas.parentElement.clientWidth : 800;
+  canvas.width = Math.max(containerWidth - 40, 400); // Leave some padding, minimum 400px
+  canvas.height = 500;
+  console.log('Set canvas dimensions to', canvas.width, 'x', canvas.height);
+  
   // Destroy existing chart if it exists
   if (chartInstance) {
     console.log('Destroying existing chart instance');
@@ -657,16 +670,17 @@ function renderSingleTokenChart(ctx, data) {
     }
     
     // Convert data to Chart.js format for line charts
-    const priceData = validData.map(point => ({
-      x: Number(point.block) || 0,  // Use block number for x-axis
+    // Use timestamp for x-axis since block numbers are all 0 in simulation
+    const priceData = validData.map((point, index) => ({
+      x: point.timestamp ? Number(point.timestamp) : index,  // Use timestamp or index for x-axis
       y: Number(point.price)
     }));
     
     console.log('Price data sample:', priceData.slice(0, 3));
   
   // POL floor data as a line
-  const polData = validData.map(point => ({
-    x: Number(point.block) || 0,  // Use block number for x-axis
+  const polData = validData.map((point, index) => ({
+    x: point.timestamp ? Number(point.timestamp) : index,  // Use timestamp or index for x-axis
     y: point.nfvValue != null && !isNaN(point.nfvValue) && isFinite(point.nfvValue) ? Number(point.nfvValue) : 0
   }));
   
@@ -713,7 +727,7 @@ function renderSingleTokenChart(ctx, data) {
         }]
       },
     options: {
-      responsive: true,
+      responsive: false,
       maintainAspectRatio: false,
       animation: false,
       plugins: {
@@ -749,14 +763,14 @@ function renderSingleTokenChart(ctx, data) {
           type: 'linear',
           title: {
             display: true,
-            text: 'Block Number',
+            text: 'Time',
             color: '#000000',
             font: {
               family: 'monospace'
             }
           },
-          min: validData.length > 0 ? Math.min(...validData.map(d => d.block || 0)) : 0,
-          max: validData.length > 0 ? Math.max(...validData.map(d => d.block || 0)) : 100,
+          min: validData.length > 0 ? Math.min(...validData.map((d, i) => d.timestamp || i)) : 0,
+          max: validData.length > 0 ? Math.max(...validData.map((d, i) => d.timestamp || i)) : 100,
           grid: {
             color: '#1f2937',
             drawBorder: false
@@ -836,9 +850,15 @@ function renderSingleTokenChart(ctx, data) {
 function renderMultiTokenChart(ctx, data) {
   console.log('Rendering multi-token chart');
   
-  // Extract unique token tickers
-  const tokenTickers = data.length > 0 && data[0].tokens 
-    ? Object.keys(data[0].tokens).filter(ticker => ticker !== 'JitoSOL')
+  // Force canvas to have reasonable dimensions - fit container width but fixed height
+  const containerWidth = ctx.canvas.parentElement ? ctx.canvas.parentElement.clientWidth : 800;
+  ctx.canvas.width = Math.max(containerWidth - 40, 400); // Leave some padding, minimum 400px
+  ctx.canvas.height = 500;
+  console.log('Set canvas dimensions to', ctx.canvas.width, 'x', ctx.canvas.height, '(multi-token)');
+  
+  // Extract unique token tickers from the array format
+  const tokenTickers = data.length > 0 && Array.isArray(data[0].tokens) 
+    ? data[0].tokens.map(t => t.ticker).filter(ticker => ticker !== 'JitoSOL')
     : [];
   
   // Color palette for different tokens
@@ -856,12 +876,12 @@ function renderMultiTokenChart(ctx, data) {
   const datasets = [];
   
   // Add JitoSOL/FeelsSOL as line chart
-  const jitoData = data.map((point) => {
-    const block = Number(point.block) || 0;  // Use block number
+  const jitoData = data.map((point, index) => {
+    const x = point.timestamp ? Number(point.timestamp) : index;  // Use timestamp or index
     const price = point.price || 1.22; // Default JitoSOL/FeelsSOL price (current market rate)
     
     return {
-      x: block,  // Use block number for x-axis
+      x: x,  // Use timestamp for x-axis
       y: price
     };
   });
@@ -880,10 +900,15 @@ function renderMultiTokenChart(ctx, data) {
   
   // Add each feels token as a line
   tokenTickers.forEach((ticker, index) => {
-    const tokenData = data.map(point => ({
-      x: Number(point.block) || 0,  // Use block number
-      y: point.tokens && point.tokens[ticker] ? point.tokens[ticker].price : 0
-    }));
+    const tokenData = data.map((point, idx) => {
+      const tokenInfo = point.tokens && Array.isArray(point.tokens) 
+        ? point.tokens.find(t => t.ticker === ticker) 
+        : null;
+      return {
+        x: point.timestamp ? Number(point.timestamp) : idx,  // Use timestamp or index
+        y: tokenInfo ? tokenInfo.price : 0
+      };
+    });
     
     datasets.push({
       label: `${ticker}/FeelsSOL`,
@@ -897,10 +922,15 @@ function renderMultiTokenChart(ctx, data) {
     });
     
     // Add POL floor for this token
-    const polData = data.map(point => ({
-      x: Number(point.block) || 0,  // Use block number
-      y: point.tokens && point.tokens[ticker] ? point.tokens[ticker].nfvFloor : 0
-    }));
+    const polData = data.map((point, idx) => {
+      const tokenInfo = point.tokens && Array.isArray(point.tokens) 
+        ? point.tokens.find(t => t.ticker === ticker) 
+        : null;
+      return {
+        x: point.timestamp ? Number(point.timestamp) : idx,  // Use timestamp or index
+        y: tokenInfo ? tokenInfo.polFloor : 0
+      };
+    });
     
     datasets.push({
       label: `${ticker} POL Floor`,
@@ -923,7 +953,7 @@ function renderMultiTokenChart(ctx, data) {
       datasets: datasets
     },
     options: {
-      responsive: true,
+      responsive: false,
       maintainAspectRatio: false,
       animation: false,
       interaction: {
@@ -970,14 +1000,14 @@ function renderMultiTokenChart(ctx, data) {
           type: 'linear',
           title: {
             display: true,
-            text: 'Block Number',
+            text: 'Time',
             color: '#000000',
             font: {
               family: 'monospace'
             }
           },
-          min: data.length > 0 ? Math.min(...data.map(d => d.block || 0)) : 0,
-          max: data.length > 0 ? Math.max(...data.map(d => d.block || 0)) : 100,
+          min: data.length > 0 ? Math.min(...data.map((d, i) => d.timestamp || i)) : 0,
+          max: data.length > 0 ? Math.max(...data.map((d, i) => d.timestamp || i)) : 100,
           grid: {
             color: '#1f2937',
             drawBorder: false
@@ -1064,54 +1094,7 @@ export const removeElementAttribute = function(elementId) {
   };
 };
 
-// Register getChartData action when DOM is ready
-if (typeof window !== 'undefined') {
-  window.addEventListener('DOMContentLoaded', function() {
-    setTimeout(function() {
-      if (window.remoteControl && window.remoteControl.registerAction) {
-        window.remoteControl.registerAction('getChartData', function() {
-          console.log('Remote action: getChartData triggered');
-          const chart = window.currentChartInstance || chartInstance;
-          
-          if (chart && chart.data && chart.data.datasets) {
-            const datasets = chart.data.datasets.map(ds => ({
-              label: ds.label,
-              data: ds.data ? ds.data.slice(0, 20) : [], // Limit to first 20 points
-              type: ds.type || chart.config.type
-            }));
-            
-            // Log analysis for each dataset
-            datasets.forEach(ds => {
-              if (ds.data && ds.data.length > 0) {
-                const values = ds.data.map(d => {
-                  // Handle different data formats
-                  if (typeof d === 'number') return d;
-                  if (d.y !== undefined) return d.y;
-                  if (d.close !== undefined) return d.close;
-                  if (d.c !== undefined) return d.c;
-                  return 0;
-                }).filter(v => !isNaN(v));
-                
-                if (values.length > 0) {
-                  const min = Math.min(...values);
-                  const max = Math.max(...values);
-                  const avg = values.reduce((a, b) => a + b, 0) / values.length;
-                  console.log(`${ds.label}: ${ds.data.length} points, range: ${min.toFixed(4)} - ${max.toFixed(4)}, avg: ${avg.toFixed(4)}`);
-                }
-              }
-            });
-            
-            return { success: true, datasets: datasets };
-          } else {
-            console.log('Chart data element not found');
-            return { success: false, error: 'No chart data available' };
-          }
-        });
-        console.log('Registered getChartData action');
-      }
-    }, 1000); // Give time for remote control to initialize
-  });
-}
+// getChartData action is handled by websocket-client.js
 // Global access for debugging
 if (typeof window !== 'undefined') {
   window.checkAndInitializeChart = checkAndInitializeChart;

@@ -30,7 +30,7 @@ import Protocol.Common (QueryResult(..), CommandResult(..), TokenMetadata)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
 import Protocol.Token (TokenType(..))
-import Protocol.Position (spotTerm, monthlyTerm)
+import Protocol.Position (spotDuration, monthlyDuration, Leverage(..))
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
 import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
 
@@ -121,18 +121,23 @@ handleAction = case _ of
   UpdateInputAmount amount -> do
     H.modify_ _ { inputAmount = amount }
   
-  SelectAsset asset -> do
-    H.modify_ _ { selectedAsset = asset }
+  SelectFromAsset asset -> do
+    H.modify_ _ { selectedFromAsset = asset }
 
-  SelectCollateralAsset asset -> do
-    H.modify_ _ { collateralAsset = asset }
+  SelectToAsset asset -> do
+    H.modify_ _ { selectedToAsset = asset }
+  
+  SelectTargetToken token -> do
+    H.modify_ _ { selectedTargetToken = token }
   
   SetTermType termType -> do
     H.modify_ _ { selectedTermType = termType }
+  
+  SetLeverageType leverageType -> do
+    H.modify_ _ { selectedLeverage = leverageType }
 
-
-  CreatePosition -> do
-    handleCreatePosition
+  ExecuteExchange -> do
+    handleExecuteExchange
 
   -- Token Creation Actions
   UpdateTokenTicker ticker -> do
@@ -156,21 +161,6 @@ handleAction = case _ of
   CreateTokenUI -> do
     handleCreateToken
 
-  -- FeelsSOL Actions
-  ToggleFeelsSOL -> do
-    H.modify_ \s -> s { showFeelsSOL = not s.showFeelsSOL }
-
-  UpdateJitoSOLAmount amount -> do
-    H.modify_ _ { jitoSOLAmount = amount }
-
-  UpdateFeelsSOLAmount amount -> do
-    H.modify_ _ { feelsSOLAmount = amount }
-
-  EnterFeelsSOL -> do
-    handleEnterFeelsSOL
-
-  ExitFeelsSOL -> do
-    handleExitFeelsSOL
 
   -- Simulation Actions
   UpdateSimulationConfig updater -> do
@@ -197,49 +187,6 @@ handleAction = case _ of
 
   ProcessLaunchBatch launchId -> do
     H.liftEffect $ log $ "Processing batch for launch: " <> launchId
-
---------------------------------------------------------------------------------
--- Position Management Handlers
---------------------------------------------------------------------------------
-
-handleCreatePosition :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
-handleCreatePosition = do
-  state <- H.get
-  case state.api of
-    Nothing -> pure unit
-    Just protocol -> do
-      -- Get current block from protocol state for term creation
-      protocolState <- H.liftEffect $ read protocol.state
-      let currentBlock = protocolState.currentBlock
-          term = case state.selectedTermType of
-            "monthly" -> monthlyTerm currentBlock
-            _ -> spotTerm
-          
-          collateralAmount = state.inputAmount * 1.5  -- Simplified
-      
-      -- Execute create position command
-      protocolState <- H.liftEffect $ read protocol.state
-      result <- H.liftEffect $ executeCommand
-        (PS.CreatePosition 
-          state.currentUser
-          state.selectedAsset
-          state.inputAmount
-          state.collateralAsset
-          collateralAmount
-          term
-          false  -- rollover: default to false for now
-          Nothing) protocolState
-      
-      case result of
-        Right (Tuple newState (PositionCreated pos)) -> do
-          H.liftEffect $ write newState protocol.state
-          H.liftEffect $ log $ "Position created successfully"
-          -- Refresh all data
-          handleAction RefreshData
-        Right _ ->
-          H.modify_ _ { error = Just "Unexpected result from position creation" }
-        Left err ->
-          H.modify_ _ { error = Just $ show err }
 
 --------------------------------------------------------------------------------
 -- Token Creation Handlers
@@ -282,49 +229,35 @@ handleCreateToken = do
           H.modify_ _ { error = Just "Please fix validation errors before creating token" }
 
 --------------------------------------------------------------------------------
--- FeelsSOL Handlers
+-- Universal Exchange Handler
 --------------------------------------------------------------------------------
 
-handleEnterFeelsSOL :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
-handleEnterFeelsSOL = do
+handleExecuteExchange :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
+handleExecuteExchange = do
   state <- H.get
   case state.api of
     Nothing -> pure unit
     Just protocol -> do
+      -- Get protocol state
       protocolState <- H.liftEffect $ read protocol.state
-      result <- H.liftEffect $ executeCommand
-        (PS.EnterFeelsSOL state.currentUser state.jitoSOLAmount) protocolState
       
-      case result of
-        Right (Tuple newState (FeelsSOLMinted info)) -> do
-          H.liftEffect $ write newState protocol.state
-          H.liftEffect $ log $ "Entered FeelsSOL: " <> show info.feelsSOLMinted <> " FeelsSOL minted"
-          handleAction RefreshData
-        Right _ ->
-          H.modify_ _ { error = Just "Unexpected result from FeelsSOL entry" }
-        Left err ->
-          H.modify_ _ { error = Just $ show err }
-
-handleExitFeelsSOL :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
-handleExitFeelsSOL = do
-  state <- H.get
-  case state.api of
-    Nothing -> pure unit
-    Just protocol -> do
-      -- For exit, we use the input amount as FeelsSOL amount to convert
-      protocolState <- H.liftEffect $ read protocol.state
-      result <- H.liftEffect $ executeCommand
-        (PS.ExitFeelsSOL state.currentUser state.feelsSOLAmount) protocolState
-      
-      case result of
-        Right (Tuple newState (FeelsSOLBurned info)) -> do
-          H.liftEffect $ write newState protocol.state
-          H.liftEffect $ log $ "Exited FeelsSOL: " <> show info.jitoSOLReceived <> " JitoSOL received"
-          handleAction RefreshData
-        Right _ ->
-          H.modify_ _ { error = Just "Unexpected result from FeelsSOL exit" }
-        Left err ->
-          H.modify_ _ { error = Just $ show err }
+      -- Route based on from/to selection
+      case { from: state.selectedFromAsset, to: state.selectedToAsset } of
+        -- JitoSOL -> Position
+        { from: "jitosol", to: "position-spot" } -> do
+          H.liftEffect $ log $ "Exchange: JitoSOL -> Spot Position"
+          -- TODO: Implement atomic JitoSOL -> Position conversion
+          H.modify_ _ { error = Just "JitoSOL to Position exchange coming soon!" }
+        
+        -- JitoSOL -> Term Position
+        { from: "jitosol", to: "position-term" } -> do
+          H.liftEffect $ log $ "Exchange: JitoSOL -> Term Position"
+          -- TODO: Implement atomic JitoSOL -> Term Position conversion
+          H.modify_ _ { error = Just "JitoSOL to Term Position exchange coming soon!" }
+        
+        -- TODO: Implement other routes
+        _ -> do
+          H.modify_ _ { error = Just "This exchange route is not yet implemented" }
 
 --------------------------------------------------------------------------------
 -- Simulation Handlers
@@ -354,13 +287,13 @@ handleRunSimulation = do
         -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
         -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
         state1 <- read protocol.state
-        result1 <- executeCommand (PS.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotTerm false Nothing) state1
+        result1 <- executeCommand (PS.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotDuration Senior false Nothing) state1
         _ <- case result1 of
           Right (Tuple newState1 _) -> write newState1 protocol.state
           _ -> pure unit
         -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
         state2 <- read protocol.state
-        result2 <- executeCommand (PS.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotTerm false Nothing) state2
+        result2 <- executeCommand (PS.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotDuration Senior false Nothing) state2
         _ <- case result2 of
           Right (Tuple newState2 _) -> write newState2 protocol.state
           _ -> pure unit
