@@ -15,11 +15,14 @@ module Protocol.FeelsSOL
   , getOraclePrice
   , getTotalSupply
   , getSystemHealth
+  , getBufferStatus
+  , rebalanceBuffer
   ) where
 
 import Prelude
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
+import Data.Number (abs)
 import Effect (Effect)
 import Effect.Ref (Ref, read, write, new)
 import Protocol.Token (TokenType(..))
@@ -56,16 +59,18 @@ type BurnResult =
   }
 
 
--- FeelsSOL state for managing the synthetic SOL system
+-- FeelsSOL state for managing the synthetic SOL system with withdrawal buffer
 type FeelsSOLState =
   { totalFeelsSOLSupply :: Ref Number      -- Total FeelsSOL in circulation
   , totalJitoSOLBacking :: Ref Number      -- Total JitoSOL backing the synthetics
+  , jitoSOLBuffer :: Ref Number            -- JitoSOL buffer for withdrawals
   , priceOracle :: Effect Number           -- JitoSOL/SOL price oracle
   , lastOracleUpdate :: Ref Number         -- Last oracle update timestamp
   , cachedPrice :: Ref (Maybe OraclePrice) -- Cached oracle price
   , entryFee :: Number                     -- Fee for entering (e.g., 0.001 = 0.1%)
   , exitFee :: Number                      -- Fee for exiting (e.g., 0.002 = 0.2%)
   , polAllocationRate :: Number            -- Portion of fees going to POL (e.g., 0.25 = 25%)
+  , bufferTargetRatio :: Number            -- Target buffer as % of backing (e.g., 0.10 = 10%)
   }
 
 --------------------------------------------------------------------------------
@@ -120,11 +125,21 @@ mintFeelsSOL state jitoSOLAmount = do
           -- Calculate FeelsSOL to mint
           let feelsSOLAmount = jitoSOLAmount * exchangeRate
           
-          -- Update state
+          -- Update state and manage buffer
           currentSupply <- read state.totalFeelsSOLSupply
           currentBacking <- read state.totalJitoSOLBacking
+          currentBuffer <- read state.jitoSOLBuffer
+          
+          -- Allocate portion to buffer based on target ratio
+          let bufferTarget = (currentBacking + jitoSOLAmount) * state.bufferTargetRatio
+              bufferAddition = if bufferTarget > currentBuffer 
+                              then min jitoSOLAmount (bufferTarget - currentBuffer)
+                              else 0.0
+              backingAddition = jitoSOLAmount - bufferAddition
+          
           _ <- write (currentSupply + feelsSOLAmount) state.totalFeelsSOLSupply
-          _ <- write (currentBacking + jitoSOLAmount) state.totalJitoSOLBacking
+          _ <- write (currentBacking + backingAddition) state.totalJitoSOLBacking
+          _ <- write (currentBuffer + bufferAddition) state.jitoSOLBuffer
           
           -- Return result
           timestamp <- currentTime
@@ -152,14 +167,22 @@ burnFeelsSOL state feelsSOLAmount = do
           let exchangeRate = oraclePrice.price
               jitoSOLToRelease = feelsSOLAmount / exchangeRate
           
-          -- Check if enough backing exists
+          -- Check buffer and backing availability
           currentBacking <- read state.totalJitoSOLBacking
-          if jitoSOLToRelease > currentBacking
-            then pure $ Left "Insufficient JitoSOL backing"
+          currentBuffer <- read state.jitoSOLBuffer
+          let totalAvailable = currentBacking + currentBuffer
+          
+          if jitoSOLToRelease > totalAvailable
+            then pure $ Left "Insufficient JitoSOL backing and buffer"
             else do
+              -- Use buffer first, then backing
+              let fromBuffer = min jitoSOLToRelease currentBuffer
+                  fromBacking = jitoSOLToRelease - fromBuffer
+              
               -- Update state
               _ <- write (currentSupply - feelsSOLAmount) state.totalFeelsSOLSupply
-              _ <- write (currentBacking - jitoSOLToRelease) state.totalJitoSOLBacking
+              _ <- write (currentBacking - fromBacking) state.totalJitoSOLBacking
+              _ <- write (currentBuffer - fromBuffer) state.jitoSOLBuffer
               
               -- Return result
               timestamp <- currentTime
@@ -171,11 +194,6 @@ burnFeelsSOL state feelsSOLAmount = do
                 , timestamp: timestamp
                 }
 
--- Get collateral value in FeelsSOL terms
-getCollateralValue :: TokenType -> Number -> Number -> Either String Number
-getCollateralValue JitoSOL amount exchangeRate = Right (amount * exchangeRate)
-getCollateralValue FeelsSOL amount _ = Right amount
-getCollateralValue token _ _ = Left $ "Cannot value unsupported collateral: " <> show token
 
 -- Get total FeelsSOL supply
 getTotalSupply :: FeelsSOLState -> Effect Number
@@ -198,7 +216,7 @@ getCollateralRatio state = do
 -- FeelsSOL Initialization
 --------------------------------------------------------------------------------
 
--- Initialize the FeelsSOL system with oracle and fee parameters
+-- Initialize the FeelsSOL system with oracle, fee parameters, and buffer management
 initFeelsSOL :: 
   (Effect Number) ->    -- Price oracle function
   Number ->             -- Entry fee
@@ -207,17 +225,20 @@ initFeelsSOL ::
 initFeelsSOL oracle entryFee exitFee = do
   totalSupply <- new 0.0
   totalBacking <- new 0.0
+  buffer <- new 0.0
   lastUpdate <- new 0.0
   cachedPrice <- new Nothing
   
   pure { totalFeelsSOLSupply: totalSupply
        , totalJitoSOLBacking: totalBacking
+       , jitoSOLBuffer: buffer
        , priceOracle: oracle
        , lastOracleUpdate: lastUpdate
        , cachedPrice: cachedPrice
        , entryFee: entryFee
        , exitFee: exitFee
        , polAllocationRate: 0.25  -- Default 25% to POL
+       , bufferTargetRatio: 0.01  -- Default 1% buffer target (can be DAO managed)
        }
 
 --------------------------------------------------------------------------------
@@ -303,12 +324,65 @@ getTotalLocked state = read state.totalJitoSOLBacking
 getTotalMinted :: FeelsSOLState -> Effect Number
 getTotalMinted state = getTotalSupply state
 
--- | Get system health metrics
+-- | Get system health metrics including buffer status
 -- | Provides a high-level view of the FeelsSOL system's status
-getSystemHealth :: FeelsSOLState -> Effect { collateralRatio :: Number, totalLocked :: Number, totalMinted :: Number, isHealthy :: Boolean }
+getSystemHealth :: FeelsSOLState -> Effect { collateralRatio :: Number, totalLocked :: Number, totalMinted :: Number, bufferRatio :: Number, isHealthy :: Boolean }
 getSystemHealth state = do
   ratio <- getCollateralRatio state
   locked <- getTotalLocked state
   minted <- getTotalMinted state
-  let isHealthy = ratio >= 1.0  -- System is healthy if fully collateralized
-  pure { collateralRatio: ratio, totalLocked: locked, totalMinted: minted, isHealthy }
+  bufferStatus <- getBufferStatus state
+  let isHealthy = ratio >= 1.0 && bufferStatus.isHealthy  -- System healthy if collateralized and buffer adequate
+  pure { collateralRatio: ratio, totalLocked: locked, totalMinted: minted, bufferRatio: bufferStatus.ratio, isHealthy }
+
+--------------------------------------------------------------------------------
+-- BUFFER MANAGEMENT FUNCTIONS
+--------------------------------------------------------------------------------
+-- Functions for managing jitoSOL withdrawal buffer
+
+-- | Get current buffer status
+-- | Provides detailed information about buffer health and recommendations
+getBufferStatus :: FeelsSOLState -> Effect { current :: Number, target :: Number, ratio :: Number, isHealthy :: Boolean, needsRebalancing :: Boolean }
+getBufferStatus state = do
+  currentBuffer <- read state.jitoSOLBuffer
+  totalBacking <- read state.totalJitoSOLBacking
+  
+  let target = totalBacking * state.bufferTargetRatio
+      ratio = if totalBacking > 0.0 then currentBuffer / totalBacking else 0.0
+      minRatio = 0.005  -- 0.5% minimum buffer (could be configurable)
+      isHealthy = ratio >= minRatio
+      needsRebalancing = abs (ratio - state.bufferTargetRatio) > 0.005  -- 0.5% threshold
+  
+  pure 
+    { current: currentBuffer
+    , target: target
+    , ratio: ratio
+    , isHealthy: isHealthy
+    , needsRebalancing: needsRebalancing
+    }
+
+-- | Rebalance buffer to target ratio
+-- | Can be called algorithmically or by DAO governance
+rebalanceBuffer :: FeelsSOLState -> Effect (Either String { oldBuffer :: Number, newBuffer :: Number, adjustment :: Number })
+rebalanceBuffer state = do
+  bufferStatus <- getBufferStatus state
+  
+  if not bufferStatus.needsRebalancing
+    then pure $ Left "Buffer rebalancing not needed"
+    else do
+      currentBacking <- read state.totalJitoSOLBacking
+      let adjustment = bufferStatus.target - bufferStatus.current
+      
+      -- Check if we have enough backing to increase buffer
+      if adjustment > 0.0 && adjustment > currentBacking
+        then pure $ Left "Insufficient backing to increase buffer"
+        else do
+          -- Adjust buffer and backing
+          _ <- write bufferStatus.target state.jitoSOLBuffer
+          _ <- write (currentBacking - adjustment) state.totalJitoSOLBacking
+          
+          pure $ Right 
+            { oldBuffer: bufferStatus.current
+            , newBuffer: bufferStatus.target
+            , adjustment: adjustment
+            }
