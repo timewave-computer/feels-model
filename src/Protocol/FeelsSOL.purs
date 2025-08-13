@@ -37,7 +37,6 @@ import Protocol.Error (ProtocolError(..))
 type OraclePrice =
   { price :: Number      -- JitoSOL/SOL exchange rate
   , timestamp :: Number  -- When price was fetched
-  , confidence :: Number -- Price confidence (0.0-1.0)
   }
 
 -- Result of minting FeelsSOL
@@ -99,7 +98,6 @@ getOraclePrice state = do
       price <- state.priceOracle
       let newPrice = { price: price
                      , timestamp: currentTime'
-                     , confidence: 0.99  -- High confidence for JitoSOL
                      }
       
       -- Update cache
