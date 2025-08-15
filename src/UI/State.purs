@@ -14,7 +14,7 @@ import Data.Maybe (Maybe(..))
 
 import Protocol.Token (TokenType(..))
 import Protocol.Common (Position, TokenMetadata)
-import Simulation.Sim (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
+import Simulation.Engine (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
 import UI.ProtocolState (AppRuntime)
 
 --------------------------------------------------------------------------------

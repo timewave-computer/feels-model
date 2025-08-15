@@ -17,7 +17,7 @@ import Test.QuickCheck (Result(..), quickCheck)
 -- Core system imports
 import Protocol.Token (TokenCreationParams, TokenMetadata, createToken)
 -- import Protocol.POL (getTotalPOL)
-import Simulation.Sim (AccountProfile(..), MarketScenario(..), SimulationConfig, SimulationState, initSimulation, runSimulation, executeSimulation, TradingAction(..))
+import Simulation.Engine (AccountProfile(..), MarketScenario(..), SimulationConfig, SimulationState, initSimulation, runSimulation, executeSimulation, TradingAction(..))
 import Utils (formatAmount)
 import FFI (currentTime)
 

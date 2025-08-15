@@ -18,9 +18,8 @@
 -- | - Position Management: Creation, modification, and closure of positions
 -- | - Timing Actions: Wait blocks for realistic pacing and sequencing
 module Simulation.Action
-  ( TradingAction(..)
+  ( module Simulation.Types
   , generateTradingSequence
-  , getRecentlyCreatedTokens
   ) where
 
 import Prelude
@@ -40,8 +39,10 @@ import Protocol.Position (Duration(..), monthlyDuration, spotDuration)
 import Utils (formatAmount)
 
 -- Import simulation subsystem dependencies
+import Simulation.Types (TradingAction(..))
 import Simulation.Agent (AccountProfile(..), SimulatedAccount)
-import Simulation.Market (SimulationConfig, MarketScenario(..), generateMarketScenario)
+import Simulation.Scenario (SimulationConfig, MarketScenario(..), generateMarketScenario, getVolatilityMultiplier, getMarketTradingBias, getActionFrequencyMultiplier, getSizingMultiplier, getMarketExitBias, getOpportunityMultiplier, getPanicMultiplier)
+import Simulation.Analysis (getRecentlyCreatedTokens)
 
 -- Oracle integration for market data
 import Protocol.Oracle (Oracle, takeMarketSnapshot)
@@ -55,40 +56,7 @@ type ActionSimulationState =
   , oracle :: Oracle                     -- Price oracle for market data
   }
 
---------------------------------------------------------------------------------
--- TRADING ACTION TYPE DEFINITIONS
---------------------------------------------------------------------------------
--- Comprehensive action types representing all possible protocol interactions
-
--- | Complete set of trading actions representing all protocol interactions
--- | Each action type captures specific user behavior patterns and economic activity
-data TradingAction
-  = EnterProtocol String Number TokenType        -- Protocol entry: User converts assets to FeelsSOL
-  | ExitProtocol String Number TokenType         -- Protocol exit: User converts FeelsSOL back to assets
-  | CreateToken String String String              -- Token creation: User launches new token with ticker/name
-  | CreateLendOffer String TokenType Number TokenType Number Duration (Maybe String)  -- Lending: User offers liquidity with terms
-  | TakeLoan String TokenType Number TokenType Number Duration         -- Borrowing: User takes loan against collateral
-  | ClosePosition String Int                      -- Position management: User closes existing position
-  | WaitBlocks Int                               -- Timing control: Simulate realistic action pacing
-
-derive instance eqTradingAction :: Eq TradingAction
-
--- | Human-readable action descriptions for logging and analysis
-instance showTradingAction :: Show TradingAction where
-  show (EnterProtocol user amount asset) = user <> " enters protocol with " <> formatAmount amount <> " " <> show asset
-  show (ExitProtocol user amount asset) = user <> " exits protocol with " <> formatAmount amount <> " " <> show asset
-  show (CreateToken user ticker name) = user <> " creates token " <> ticker <> " (" <> name <> ")"
-  show (CreateLendOffer user lendAsset amount collAsset ratio term targetToken) = 
-    user <> " offers " <> formatAmount amount <> " " <> show lendAsset <> 
-    " @ " <> formatAmount ratio <> " " <> show collAsset <> " (" <> show term <> ")" <>
-    case targetToken of
-      Just ticker -> " for token " <> ticker
-      Nothing -> ""
-  show (TakeLoan user borrowAsset amount collAsset collAmount term) = 
-    user <> " borrows " <> formatAmount amount <> " " <> show borrowAsset <> 
-    " with " <> formatAmount collAmount <> " " <> show collAsset <> " (" <> show term <> ")"
-  show (ClosePosition user posId) = user <> " closes position #" <> show posId
-  show (WaitBlocks blocks) = "Wait " <> show blocks <> " blocks for realistic pacing"
+-- TradingAction type now imported from Simulation.Types
 
 --------------------------------------------------------------------------------
 -- COMPREHENSIVE TRADING SEQUENCE GENERATION ENGINE
@@ -104,13 +72,7 @@ generateTradingSequence config state = do
   let baseNumActions = Int.floor $ config.actionFrequency * (0.5 + baseActions)
   
   -- Market volatility multiplier - volatile markets trigger more trading
-  let volatilityMultiplier = case config.scenario of
-        VolatileMarket -> 3.0   -- 3x more trades in volatile markets
-        CrashScenario -> 2.5    -- 2.5x panic selling/buying
-        BearMarket -> 1.8       -- 1.8x increased exit activity
-        RecoveryMarket -> 1.5   -- 1.5x opportunity buying
-        BullMarket -> 1.2       -- 1.2x moderate increase
-        SidewaysMarket -> 1.0   -- Normal activity
+  let volatilityMultiplier = getVolatilityMultiplier config.scenario
   
   -- Ensure realistic minimum activity levels for protocol viability
   let numActions = max 3 (Int.floor $ Int.toNumber baseNumActions * volatilityMultiplier)
@@ -220,10 +182,7 @@ generateTokenSwapAction config state account = do
           isAggressiveTrader = profile == Aggressive || profile == Whale
           
           -- Market scenario influences trading bias
-          marketBias = case config.scenario of
-            BullMarket -> 0.7    -- 70% buy probability in bull markets
-            BearMarket -> 0.3    -- 30% buy probability in bear markets
-            _ -> 0.5             -- Neutral 50/50 in other scenarios
+          marketBias = getMarketTradingBias config.scenario
           
           -- Aggressive traders amplify market bias by 20%
           shouldBuy = swapRoll < (marketBias + if isAggressiveTrader then 0.2 else 0.0)
@@ -234,12 +193,8 @@ generateTokenSwapAction config state account = do
           amountRand <- random
           
           -- Market volatility amplifies trading sizes
-          let volatilityMultiplier = case config.scenario of
-                VolatileMarket -> 3.0   -- 3x for arbitrage opportunities
-                CrashScenario -> 2.5    -- 2.5x panic trading
-                BearMarket -> 2.0       -- 2x defensive repositioning
-                RecoveryMarket -> 1.8   -- 1.8x opportunity trading
-                _ -> 1.0                -- Normal size
+          let sizingMultipliers = getSizingMultiplier config.scenario
+              volatilityMultiplier = sizingMultipliers.buy
                 
           -- Profile-based position sizing for realistic market behavior
           let baseSwapAmount = case profile of
@@ -267,11 +222,8 @@ generateTokenSwapAction config state account = do
             amountRand <- random
             
             -- Market volatility amplifies sell sizes too
-            let volatilityMultiplier = case config.scenario of
-                  VolatileMarket -> 3.0   -- 3x for arbitrage opportunities
-                  CrashScenario -> 3.5    -- 3.5x panic selling is stronger
-                  BearMarket -> 2.5       -- 2.5x risk reduction
-                  _ -> 1.0                -- Normal size
+            let sizingMultipliers = getSizingMultiplier config.scenario
+                volatilityMultiplier = sizingMultipliers.sell
                   
             -- Profile-based sell sizing with more conservative amounts
             let baseSwapAmount = case profile of
@@ -339,13 +291,7 @@ generateRandomAction config state = do
   actionRoll <- random
   
   -- Market condition influences action probabilities
-  let marketBias = case config.scenario of
-        BearMarket -> { exitBias: 0.7, entryBias: 0.1 }      -- 70% exit, 10% entry
-        CrashScenario -> { exitBias: 0.8, entryBias: 0.05 }  -- 80% panic exit, 5% entry
-        VolatileMarket -> { exitBias: 0.5, entryBias: 0.3 }  -- 50% exit, 30% entry (arb)
-        RecoveryMarket -> { exitBias: 0.2, entryBias: 0.6 }  -- 20% exit, 60% buy the dip
-        BullMarket -> { exitBias: 0.2, entryBias: 0.5 }      -- 20% profit taking, 50% FOMO
-        SidewaysMarket -> { exitBias: 0.3, entryBias: 0.3 }  -- 30% each, balanced
+  let marketBias = getMarketExitBias config.scenario
   
   -- Prioritize token trading when tokens exist and account has sufficient balance
   let existingTokens = getRecentlyCreatedTokens state.actionHistory
@@ -363,11 +309,7 @@ generateRandomAction config state = do
         amountRand <- random
         
         -- Exit amounts vary by market conditions and profile
-        let panicMultiplier = case config.scenario of
-              CrashScenario -> 0.8  -- 80% of holdings in panic
-              BearMarket -> 0.6     -- 60% risk reduction
-              VolatileMarket -> 0.4 -- 40% partial exit
-              _ -> 0.3              -- 30% normal profit taking
+        let panicMultiplier = getPanicMultiplier config.scenario
               
         let exitAmount = account.feelsSOLBalance * panicMultiplier * (0.5 + amountRand * 0.5)
         
@@ -378,11 +320,7 @@ generateRandomAction config state = do
         amountRand <- random
         
         -- Entry amounts influenced by market opportunity
-        let opportunityMultiplier = case config.scenario of
-              RecoveryMarket -> 2.0  -- 2x buying the dip
-              VolatileMarket -> 1.5  -- 1.5x arbitrage capital
-              BullMarket -> 1.2      -- 1.2x FOMO buying
-              _ -> 1.0               -- Normal entry
+        let opportunityMultiplier = getOpportunityMultiplier config.scenario
               
         -- Profile-based entry amounts reflecting realistic user behavior
         let baseAmount = case account.profile of
@@ -422,19 +360,3 @@ generateRandomAction config state = do
                     else pure $ WaitBlocks 1  -- Insufficient balance for staking
                 Nothing -> pure $ WaitBlocks 1  -- Token selection failed
         else pure $ WaitBlocks 1  -- Default wait action for pacing
-
---------------------------------------------------------------------------------
--- ACTION ANALYSIS AND UTILITY FUNCTIONS
---------------------------------------------------------------------------------
--- Supporting functions for action history analysis and ecosystem tracking
-
--- | Extract all token tickers created during the simulation
--- | Used for tracking token ecosystem development and trading opportunities
-getRecentlyCreatedTokens :: Array TradingAction -> Array String
-getRecentlyCreatedTokens actions = 
-  foldl extractToken [] actions
-  where
-    -- | Extract token ticker from CreateToken actions
-    extractToken acc action = case action of
-      CreateToken _ ticker _ -> ticker : acc  -- Accumulate all created token tickers
-      _ -> acc                                -- Ignore non-creation actions

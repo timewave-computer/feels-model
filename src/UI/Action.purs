@@ -33,8 +33,8 @@ import UI.Query (executeQuery)
 import Protocol.Token (TokenType(..))
 import Protocol.Position (spotDuration, monthlyDuration, Leverage(..))
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
-import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
-import Simulation.ProtocolEngine (executeSimulationWithProtocol, getProtocolMetrics)
+import Simulation.Engine (initSimulationWithPoolRegistry, executeSimulation, calculateResults, runProtocolSimulation)
+import Protocol.Metrics (getProtocolMetrics)
 
 --------------------------------------------------------------------------------
 -- Main Action Handler
@@ -326,8 +326,8 @@ handleRunSimulation = do
           pure unit
       
         -- Execute simulation through the actual protocol with proper event loop
-        H.liftEffect $ log "About to call executeSimulationWithProtocol..."
-        executionResult <- H.liftEffect $ executeSimulationWithProtocol 
+        H.liftEffect $ log "Starting simulation..."
+        executionResult <- H.liftEffect $ runProtocolSimulation 
           protocol.state 
           state.simulationConfig 
           simState

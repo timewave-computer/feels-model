@@ -18,13 +18,27 @@
 -- | 4. Update protocol state and capture market snapshots
 -- | 5. Calculate comprehensive results and performance metrics
 module Simulation.Engine
-  ( SimulationState
+  ( -- Re-exports from Types module
+    module Simulation.Types
+  -- Re-exports from Agent module
+  , module Simulation.Agent
+  -- Re-exports from Scenario module  
+  , module Simulation.Scenario
+  -- Re-exports from Action module
+  , module Simulation.Action
+  -- Re-exports from Analysis module
+  , module Simulation.Analysis
+  -- Core simulation types and functions
+  , SimulationState
   , initSimulation
   , initSimulationWithPoolRegistry
   , executeSimulation
   , runSimulation
   , runSimulationWithPoolRegistry
   , getSimulationStats
+  -- Protocol engine functions
+  , runProtocolSimulation
+  , executeAgentOrders
   ) where
 
 import Prelude
@@ -44,10 +58,49 @@ import Protocol.POL (initPOL)
 import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot, updatePrice)
 
 -- Import simulation subsystem modules
-import Simulation.Agent (SimulatedAccount, generateAccounts)
-import Simulation.Market (SimulationConfig, generateMarketScenario)
-import Simulation.Action (TradingAction(..), generateTradingSequence)
+import Simulation.Types (TradingAction(..))
+import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
+import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
+import Simulation.Action (generateTradingSequence)
+import Simulation.Analysis (SimulationResults, calculateResults, getRecentlyCreatedTokens)
+
+-- Re-export from Agent module
+import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
+
+-- Re-export from Types module
+import Simulation.Types (TradingAction(..))
+
+-- Re-export from Scenario module  
+import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
+
+-- Re-export from Action module
+import Simulation.Action (generateTradingSequence)
+
+-- Re-export from Analysis module
 import Simulation.Analysis (SimulationResults, calculateResults)
+
+-- Additional imports for protocol engine functionality
+import Data.Either (Either(..))
+import Data.Tuple (Tuple(..), fst, snd)
+import Data.Traversable (traverse_)
+import Data.Maybe (Maybe(..))
+import Data.Int (toNumber)
+import Data.Ord (abs, min)
+import Effect.Ref (Ref, read, write)
+import Control.Monad (when)
+
+-- Import protocol types and functions for protocol engine
+import Protocol.Common (CommandResult(..))
+import Protocol.Error (ProtocolError)
+import Protocol.Position (Duration(..), Leverage(..))
+import UI.ProtocolState (ProtocolState)
+import UI.Command (executeCommand)
+import UI.ProtocolState as PS
+import Protocol.POL (getAllAllocations)
+import Protocol.Pool (PoolState, swap, SwapParams)
+import UI.PoolRegistry (getAllPools, getPool, updatePool)
+import UI.Account (AccountRegistry, updateChainAccountBalance, getChainAccountBalance)
+import Protocol.Clock (runProtocolBlock)
 
 --------------------------------------------------------------------------------
 -- SIMULATION STATE DATA STRUCTURES
@@ -333,3 +386,243 @@ getSimulationStats state = do
               "Next Position ID: " <> show state.nextPositionId
   
   pure stats
+
+--------------------------------------------------------------------------------
+-- PROTOCOL ENGINE INTEGRATION
+--------------------------------------------------------------------------------
+-- Agent behavior simulation engine that runs alongside the protocol
+
+-- | Run the complete protocol simulation with agent behaviors
+-- | This coordinates the simulation and protocol event loops
+runProtocolSimulation :: 
+  Ref ProtocolState -> 
+  SimulationConfig -> 
+  SimulationState -> 
+  Effect { finalSimState :: SimulationState, finalProtocolState :: ProtocolState }
+runProtocolSimulation protocolRef config initialSimState = do
+  log "\n=== Starting Protocol Simulation ==="
+  log $ "Simulating " <> show config.simulationBlocks <> " blocks with " <> show (length initialSimState.accounts) <> " agents"
+  
+  -- Initialize agent accounts in the protocol
+  protocolState <- read protocolRef
+  traverse_ (initializeAgentAccount protocolState.accounts) initialSimState.accounts
+  
+  -- Run simulation loop
+  finalState <- foldl (runProtocolSimulationBlock protocolRef config) 
+    (pure initialSimState) 
+    (range 1 config.simulationBlocks)
+    
+  -- Get final states
+  finalProtocolState <- read protocolRef
+  
+  log "\n=== Protocol Simulation Complete ==="
+  pure { finalSimState: finalState, finalProtocolState: finalProtocolState }
+
+-- | Initialize a single agent's chain account
+initializeAgentAccount :: AccountRegistry -> SimulatedAccount -> Effect Unit
+initializeAgentAccount accounts account = do
+  log $ "Initializing account " <> account.id <> " with " <> show account.jitoSOLBalance <> " JitoSOL"
+  result <- updateChainAccountBalance accounts account.id account.jitoSOLBalance
+  case result of
+    Right _ -> do
+      balance <- getChainAccountBalance accounts account.id
+      log $ "Account " <> account.id <> " initialized with " <> show balance <> " JitoSOL"
+    Left err -> log $ "Failed to initialize account " <> account.id <> ": " <> err
+
+-- | Execute a single protocol simulation block
+-- | This runs one iteration of the simulation loop:
+-- | 1. Generate market conditions for this block
+-- | 2. Run the protocol block (advances blockchain state)
+-- | 3. Read updated protocol state
+-- | 4. Generate agent decisions based on new state
+-- | 5. Submit agent orders to the protocol
+runProtocolSimulationBlock :: 
+  Ref ProtocolState -> 
+  SimulationConfig -> 
+  Effect SimulationState -> 
+  Int -> 
+  Effect SimulationState
+runProtocolSimulationBlock protocolRef config simStateEffect blockNum = do
+  simState <- simStateEffect
+  log $ "\n--- Protocol Simulation Block " <> show blockNum <> " ---"
+  
+  -- Step 1: Generate market price for this block
+  priceMovement <- generateMarketScenario config blockNum
+  let newPrice = simState.currentPrice * (1.0 + priceMovement)
+  log $ "Market conditions: price " <> show simState.currentPrice <> " -> " <> show newPrice
+  
+  -- Step 2: Run protocol block (this advances the blockchain)
+  polSnapshot <- runProtocolBlock protocolRef newPrice config.scenario blockNum
+  
+  -- Step 3: Read updated protocol state
+  protocolState <- read protocolRef
+  
+  -- Step 4: Generate agent orders based on current state
+  log "\nAgent Decision Phase:"
+  tradingActions <- generateTradingSequence config 
+    { accounts: simState.accounts
+    , currentBlock: blockNum
+    , actionHistory: simState.actionHistory
+    , oracle: protocolState.oracle  -- Use protocol's oracle
+    }
+  
+  log $ "Agents generated " <> show (length tradingActions) <> " orders"
+  
+  -- Step 5: Execute agent orders (submit to protocol)
+  log "\nOrder Execution Phase:"
+  updatedSimState <- executeAgentOrders protocolRef simState tradingActions
+  
+  -- Step 6: Take market snapshot from protocol
+  marketSnapshot <- takeMarketSnapshot protocolState.oracle
+  
+  -- Update simulation state
+  pure $ updatedSimState 
+    { currentBlock = blockNum
+    , currentPrice = newPrice
+    , priceHistory = { price: marketSnapshot.spot, timestamp: polSnapshot.timestamp } : updatedSimState.priceHistory
+    , actionHistory = updatedSimState.actionHistory <> tradingActions
+    , polAllocationHistory = { block: blockNum, timestamp: polSnapshot.timestamp, allocations: polSnapshot.allocations } : updatedSimState.polAllocationHistory
+    }
+
+-- | Execute a batch of agent orders
+executeAgentOrders :: 
+  Ref ProtocolState -> 
+  SimulationState -> 
+  Array TradingAction -> 
+  Effect SimulationState
+executeAgentOrders protocolRef simState actions = 
+  foldl (executeAgentOrder protocolRef) (pure simState) actions
+
+-- | Execute a single agent order through the protocol
+executeAgentOrder :: 
+  Ref ProtocolState -> 
+  Effect SimulationState -> 
+  TradingAction -> 
+  Effect SimulationState
+executeAgentOrder protocolRef simStateEffect action = do
+  simState <- simStateEffect
+  protocolState <- read protocolRef
+  
+  case action of
+    -- Agent enters protocol: Convert JitoSOL to FeelsSOL
+    EnterProtocol userId amount _ -> do
+      result <- executeCommand (PS.EnterFeelsSOL userId amount) protocolState
+      case result of
+        Right (Tuple newProtocolState (FeelsSOLMinted _)) -> do
+          write newProtocolState protocolRef
+          -- Update agent balances in simulation
+          let updatedAccounts1 = updateProtocolAccountBalances simState.accounts userId (-amount) JitoSOL
+              updatedAccounts2 = updateProtocolAccountBalances updatedAccounts1 userId amount FeelsSOL
+          pure simState { accounts = updatedAccounts2 }
+        _ -> do
+          log $ "Agent " <> userId <> " failed to enter protocol"
+          pure simState
+              
+    -- Agent exits protocol: Convert FeelsSOL to JitoSOL
+    ExitProtocol userId amount _ -> do
+      result <- executeCommand (PS.ExitFeelsSOL userId amount) protocolState
+      case result of
+        Right (Tuple newProtocolState (FeelsSOLBurned _)) -> do
+          write newProtocolState protocolRef
+          -- Calculate actual JitoSOL received after fees
+          let jitoAmount = amount * 0.998  -- 0.2% exit fee
+              updatedAccounts1 = updateProtocolAccountBalances simState.accounts userId (-amount) FeelsSOL
+              updatedAccounts2 = updateProtocolAccountBalances updatedAccounts1 userId jitoAmount JitoSOL
+          pure simState { accounts = updatedAccounts2 }
+        _ -> do
+          log $ "Agent " <> userId <> " failed to exit protocol"
+          pure simState
+              
+    -- Agent creates lending position
+    CreateLendOffer userId lendAsset amount collateralAsset collateralAmount duration _targetToken -> do
+      let protocolLeverage = Senior  -- Default leverage for simulation
+      
+      result <- executeCommand 
+        (PS.CreatePosition userId lendAsset amount collateralAsset collateralAmount 
+          duration protocolLeverage false Nothing) 
+        protocolState
+        
+      case result of
+        Right (Tuple newProtocolState (PositionCreated _)) -> do
+          write newProtocolState protocolRef
+          log $ "Agent " <> userId <> " created lending position"
+          -- Update agent balances
+          let updatedAccounts = updateProtocolAccountBalances simState.accounts userId (-amount) lendAsset
+          pure simState { accounts = updatedAccounts }
+        _ -> do
+          log $ "Agent " <> userId <> " failed to create position"
+          pure simState
+              
+    -- Agent takes loan (executes swap through pool)
+    TakeLoan userId lendAsset amount collateralAsset _collateralAmount _duration -> do
+      -- Determine pool for this token pair
+      let poolId = case Tuple lendAsset collateralAsset of
+            Tuple (Token ticker) FeelsSOL -> ticker <> "/FeelsSOL"
+            Tuple FeelsSOL (Token ticker) -> ticker <> "/FeelsSOL"
+            _ -> "Unknown/FeelsSOL"
+      
+      -- Execute swap through the pool
+      maybePool <- getPool poolId protocolState.poolRegistry
+      case maybePool of
+        Just pool -> do
+          -- Determine swap direction
+          let zeroForOne = case lendAsset of
+                FeelsSOL -> false  -- Selling token for FeelsSOL
+                _ -> true          -- Selling FeelsSOL for token
+              
+              swapParams = 
+                { zeroForOne: zeroForOne
+                , amountSpecified: amount  -- Positive = exact input
+                , sqrtPriceLimitX96: 0.0   -- No price limit
+                }
+          
+          -- Execute swap
+          protocolState' <- read protocolRef
+          let currentBlock = protocolState'.currentBlock + 1
+          let swapResult = swap pool swapParams currentBlock
+          
+          -- Update pool state
+          updatePool poolId swapResult.updatedPool protocolState.poolRegistry
+          
+          log $ "Agent " <> userId <> " swapped in pool " <> poolId
+          
+          -- Update agent balances based on swap result
+          let amountOut = if zeroForOne 
+                then abs swapResult.result.amount1
+                else abs swapResult.result.amount0
+              
+              updatedAccounts1 = updateProtocolAccountBalances simState.accounts userId (-amount) collateralAsset
+              updatedAccounts2 = updateProtocolAccountBalances updatedAccounts1 userId amountOut lendAsset
+              
+          pure simState { accounts = updatedAccounts2 }
+          
+        Nothing -> do
+          log $ "Pool " <> poolId <> " not found for agent " <> userId
+          pure simState
+      
+    -- Agent creates new token
+    CreateToken userId ticker name -> do
+      result <- executeCommand (PS.CreateToken userId ticker name) protocolState
+      case result of
+        Right (Tuple newProtocolState (TokenCreated _)) -> do
+          write newProtocolState protocolRef
+          log $ "Agent " <> userId <> " created token " <> ticker
+          pure simState
+        _ -> do
+          log $ "Agent " <> userId <> " failed to create token " <> ticker
+          pure simState
+          
+    -- Other agent actions
+    _ -> pure simState
+
+-- | Update agent account balances in simulation state (for protocol integration)
+updateProtocolAccountBalances :: Array SimulatedAccount -> String -> Number -> TokenType -> Array SimulatedAccount
+updateProtocolAccountBalances accounts userId amount token =
+  map updateAccount accounts
+  where
+    updateAccount acc
+      | acc.id == userId = case token of
+          JitoSOL -> acc { jitoSOLBalance = max 0.0 (acc.jitoSOLBalance + amount) }
+          FeelsSOL -> acc { feelsSOLBalance = max 0.0 (acc.feelsSOLBalance + amount) }
+          Token _ -> acc
+      | otherwise = acc

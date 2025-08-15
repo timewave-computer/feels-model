@@ -28,7 +28,7 @@ import UI.State (UIState, Action(..), parseTokenType)
 import Protocol.Common (TokenMetadata, Position)
 import Protocol.Position (Duration(..))
 import Simulation.Analysis (SimulationResults)
-import Simulation.Market (MarketScenario(..))
+import Simulation.Scenario (MarketScenario(..))
 import Utils (formatAmount)
 
 --------------------------------------------------------------------------------

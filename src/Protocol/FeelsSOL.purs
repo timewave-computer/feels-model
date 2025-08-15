@@ -59,7 +59,6 @@ type BurnResult =
   , timestamp :: Number
   }
 
-
 -- FeelsSOL state for managing the synthetic SOL system with withdrawal buffer
 type FeelsSOLState =
   { totalFeelsSOLSupply :: Ref Number      -- Total FeelsSOL in circulation

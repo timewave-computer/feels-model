@@ -19,11 +19,13 @@
 module Simulation.Analysis
   ( SimulationResults
   , calculateResults
+  -- Action analysis utilities
+  , getRecentlyCreatedTokens
   ) where
 
 import Prelude
-import Data.Array (length, filter)
-import Data.Foldable (sum)
+import Data.Array (length, filter, (:))
+import Data.Foldable (sum, foldl)
 import Data.Int as Int
 import Effect (Effect)
 
@@ -31,8 +33,8 @@ import Effect (Effect)
 import FFI (sqrt) as FFI
 
 -- Import dependencies for analysis processing
-import Simulation.Market (SimulationConfig)
-import Simulation.Action (TradingAction(..))
+import Simulation.Scenario (SimulationConfig)
+import Simulation.Types (TradingAction(..))
 import UI.PoolRegistry (PoolRegistry)
 import UI.PoolRegistry as PR
 
@@ -128,3 +130,19 @@ calculateResults config finalState = do
       CreateLendOffer _ _ amount _ _ _ _ -> amount  -- Use offer amount as volume
       TakeLoan _ _ amount _ _ _ -> amount           -- Use loan amount as volume
       _ -> 0.0                                    -- Non-trading actions have no volume
+
+--------------------------------------------------------------------------------
+-- ACTION ANALYSIS AND UTILITY FUNCTIONS
+--------------------------------------------------------------------------------
+-- Supporting functions for action history analysis and ecosystem tracking
+
+-- | Extract all token tickers created during the simulation
+-- | Used for tracking token ecosystem development and trading opportunities
+getRecentlyCreatedTokens :: Array TradingAction -> Array String
+getRecentlyCreatedTokens actions = 
+  foldl extractToken [] actions
+  where
+    -- | Extract token ticker from CreateToken actions
+    extractToken acc action = case action of
+      CreateToken _ ticker _ -> ticker : acc  -- Accumulate all created token tickers
+      _ -> acc                                -- Ignore non-creation actions

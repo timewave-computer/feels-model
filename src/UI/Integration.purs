@@ -33,8 +33,8 @@ import UI.Command (executeCommand)
 import UI.Query (executeQuery)
 import FFI (setTimeout, getElementById, getValue, getTextContent, triggerUIAction, registerRemoteAction, sin, exp)
 import Data.Nullable (toMaybe)
-import Simulation.Sim (SimulationResults)
-import Simulation.Sim as S
+import Simulation.Engine (SimulationResults)
+import Simulation.Engine as S
 import Utils (formatAmount)
 
 --------------------------------------------------------------------------------

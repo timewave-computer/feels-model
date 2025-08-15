@@ -32,6 +32,7 @@ module Protocol.POL
   , getUnallocatedPOL
   , getAllAllocations
   , calculateGrowthRate24h
+  , distributePOL
   -- POL deployment types and functions
   , POLTrigger
   , POLTriggerType(..)
@@ -42,15 +43,19 @@ module Protocol.POL
 import Prelude
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
+import Effect.Console (log)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Array (fromFoldable, filter, length, drop)
 import Data.Maybe (Maybe(..))
-import Data.Foldable (foldl, sum)
+import Data.Tuple (Tuple(..), snd)
+import Data.Foldable (foldl, sum, traverse_)
 import FFI (currentTime)
 import Data.Int (toNumber)
-import Data.Ord (abs, min)
+import Data.Ord (abs, min, max)
 import FFI (sqrt)
+import Control.Monad (when)
+import Simulation.Scenario (MarketScenario(..))
 
 --------------------------------------------------------------------------------
 -- POL STATE MANAGEMENT TYPES
@@ -382,3 +387,61 @@ deployPOL polRef poolId amount tickLower tickUpper triggerType = do
             { poolAllocations = Map.insert poolId updatedAlloc p.poolAllocations
             }) polRef
           pure true
+
+--------------------------------------------------------------------------------
+-- POL DISTRIBUTION
+--------------------------------------------------------------------------------
+
+-- | Pool metrics for POL distribution decisions
+type PoolMetric = 
+  { poolId :: String
+  , liquidity :: Number
+  , volume :: Number  -- Recent volume activity
+  }
+
+-- | Distribute POL to pools based on market conditions and pool metrics
+-- | This function determines optimal POL allocation across pools
+distributePOL :: POLState -> MarketScenario -> Array PoolMetric -> Int -> Effect Unit
+distributePOL polRef scenario poolMetrics blockNum = do
+  -- Only update distribution every 10 blocks to avoid excessive rebalancing
+  let shouldDistribute = blockNum `mod` 10 == 0
+  when shouldDistribute do
+    log $ "POL Distribution check at block " <> show blockNum
+    unallocated <- getUnallocatedPOL polRef
+    log $ "Unallocated POL: " <> show unallocated
+    
+    when (unallocated > 100.0) do  -- Only distribute if we have meaningful POL
+      log $ "Found " <> show (length poolMetrics) <> " pools for POL distribution"
+      
+      -- Calculate allocation amounts based on market scenario
+      let baseAllocation = case scenario of
+            VolatileMarket -> unallocated * 0.3  -- Allocate 30% in volatile markets
+            CrashScenario -> unallocated * 0.4   -- Allocate 40% during crashes for stability
+            BearMarket -> unallocated * 0.2      -- Allocate 20% in bear markets
+            RecoveryMarket -> unallocated * 0.25 -- Allocate 25% during recovery
+            _ -> unallocated * 0.1               -- Allocate 10% in normal conditions
+      
+      -- Distribute to pools based on their volume and liquidity
+      when (length poolMetrics > 0) do
+        let poolsWithScores = map (\pool -> 
+              -- Ensure minimum score even for pools with no liquidity yet
+              let score = max 1.0 (pool.liquidity * (1.0 + min pool.volume 1.0))
+              in Tuple pool.poolId score
+            ) poolMetrics
+            
+            totalScore = sum (map snd poolsWithScores)
+            
+        log $ "POL allocation scores: " <> show poolsWithScores
+        log $ "Total score: " <> show totalScore
+            
+        -- Allocate proportionally to top performing pools
+        traverse_ (\(Tuple poolId score) -> do
+          let proportion = if totalScore > 0.0 then score / totalScore else 0.0
+              allocationAmount = baseAllocation * proportion
+          
+          when (allocationAmount > 10.0) do  -- Minimum allocation threshold
+            success <- allocateToPool polRef poolId allocationAmount
+            when success do
+              log $ "Allocated " <> show allocationAmount <> " POL to pool " <> poolId
+        ) poolsWithScores
+
