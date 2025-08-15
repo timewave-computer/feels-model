@@ -21,7 +21,6 @@ module Protocol.POL
   , POLAllocation
   , AllocationStrategy(..)
   , initPOL
-  , getPOLMetrics
   , contribute
   , borrowFromStakers
   , returnToStakers
@@ -31,7 +30,6 @@ module Protocol.POL
   , getTotalPOL
   , getUnallocatedPOL
   , getAllAllocations
-  , calculateGrowthRate24h
   , distributePOL
   -- POL deployment types and functions
   , POLTrigger
@@ -49,13 +47,12 @@ import Data.Map as Map
 import Data.Array (fromFoldable, filter, length, drop)
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..), snd)
-import Data.Foldable (foldl, sum, traverse_)
+import Data.Foldable (foldl, sum, traverse_, foldM)
 import FFI (currentTime)
 import Data.Int (toNumber)
 import Data.Ord (abs, min, max)
 import FFI (sqrt)
 import Control.Monad (when)
-import Simulation.Scenario (MarketScenario(..))
 
 --------------------------------------------------------------------------------
 -- POL STATE MANAGEMENT TYPES
@@ -295,21 +292,6 @@ getUnallocatedPOL polRef = do
   pol <- read polRef
   pure pol.unallocated
 
--- | Calculate comprehensive POL system metrics
--- | Provides utilization rates, allocation status, and pool distribution
-getPOLMetrics :: POLState -> Effect POLMetrics
-getPOLMetrics polRef = do
-  pol <- read polRef
-  let allocations = fromFoldable $ Map.values pol.poolAllocations
-      allocated = foldl (\acc alloc -> acc + alloc.allocated) 0.0 allocations
-      utilization = if pol.totalPOL > 0.0 then allocated / pol.totalPOL else 0.0
-  pure
-    { totalValue: pol.totalPOL
-    , utilizationRate: utilization
-    , allocated: allocated
-    , unallocated: pol.unallocated
-    , poolCount: Map.size pol.poolAllocations
-    }
 
 -- | Get allocation details for a specific pool
 getPoolAllocation :: POLState -> String -> Effect (Maybe POLAllocation)
@@ -322,20 +304,6 @@ getAllAllocations :: POLState -> Effect (Array POLAllocation)
 getAllAllocations polRef = do
   pol <- read polRef
   pure $ fromFoldable $ Map.values pol.poolAllocations
-
--- | Calculate POL growth rate over the last 24 hours
--- | Returns percentage growth based on contribution history
-calculateGrowthRate24h :: POLState -> Effect Number
-calculateGrowthRate24h polRef = do
-  pol <- read polRef
-  now <- currentTime
-  let dayAgo = now - 86400000.0  -- 24 hours in milliseconds
-      recentContributions = filter (\c -> c.timestamp > dayAgo) pol.contributionHistory
-      totalGrowth = sum $ map _.amount recentContributions
-  -- Return growth as percentage of total POL
-  pure $ if pol.totalPOL > 0.0 
-         then (totalGrowth / pol.totalPOL) * 100.0
-         else 0.0
 
 --------------------------------------------------------------------------------
 -- POL DEPLOYMENT AND TRIGGER EVALUATION
@@ -399,10 +367,10 @@ type PoolMetric =
   , volume :: Number  -- Recent volume activity
   }
 
--- | Distribute POL to pools based on market conditions and pool metrics
+-- | Distribute POL to pools based on pool performance metrics
 -- | This function determines optimal POL allocation across pools
-distributePOL :: POLState -> MarketScenario -> Array PoolMetric -> Int -> Effect Unit
-distributePOL polRef scenario poolMetrics blockNum = do
+distributePOL :: POLState -> Array PoolMetric -> Int -> Effect Unit
+distributePOL polRef poolMetrics blockNum = do
   -- Only update distribution every 10 blocks to avoid excessive rebalancing
   let shouldDistribute = blockNum `mod` 10 == 0
   when shouldDistribute do
@@ -413,13 +381,9 @@ distributePOL polRef scenario poolMetrics blockNum = do
     when (unallocated > 100.0) do  -- Only distribute if we have meaningful POL
       log $ "Found " <> show (length poolMetrics) <> " pools for POL distribution"
       
-      -- Calculate allocation amounts based on market scenario
-      let baseAllocation = case scenario of
-            VolatileMarket -> unallocated * 0.3  -- Allocate 30% in volatile markets
-            CrashScenario -> unallocated * 0.4   -- Allocate 40% during crashes for stability
-            BearMarket -> unallocated * 0.2      -- Allocate 20% in bear markets
-            RecoveryMarket -> unallocated * 0.25 -- Allocate 25% during recovery
-            _ -> unallocated * 0.1               -- Allocate 10% in normal conditions
+      -- Calculate allocation amounts based on current utilization
+      -- Conservative default: allocate 15% of unallocated POL per distribution
+      let baseAllocation = unallocated * 0.15
       
       -- Distribute to pools based on their volume and liquidity
       when (length poolMetrics > 0) do

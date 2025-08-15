@@ -7,11 +7,11 @@
 -- | We maintain two complementary pool representations for different use cases:
 -- |
 -- |     ┌─────────────────────────────────────────┐
--- |     │           PoolState (Full State)         │
--- |     │  - Complete AMM state                    │
--- |     │  - All position tracking                 │
--- |     │  - Fee growth per token                  │
--- |     │  - Leverage tier tracking                │
+-- |     │           PoolState (Full State)        │
+-- |     │  - Complete AMM state                   │
+-- |     │  - All position tracking                │
+-- |     │  - Fee growth per token                 │
+-- |     │  - Leverage tier tracking               │
 -- |     │  - Used for: swaps, liquidity ops       │
 -- |     └─────────────────────────────────────────┘
 -- |                         │
@@ -32,7 +32,7 @@
 -- | a single source of truth in PoolState.
 module Protocol.Pool
   ( PoolState
-  , OfferingId
+  , LaunchId
   , PoolConfig
   , SwapParams
   , SwapResult
@@ -42,6 +42,8 @@ module Protocol.Pool
   , PoolEvent(..)
   , LeverageState
   , LeverageValues
+  , FlashLoanParams
+  , FlashLoanResult
   , initializePool
   , swap
   , addLiquidity
@@ -51,6 +53,7 @@ module Protocol.Pool
   , executeSwap
   , updateTWAP
   , isTickInPOLRange
+  , flashLoan
   -- Leverage value functions
   , calculateLeverageValues
   , updateLeverageValues
@@ -60,6 +63,7 @@ module Protocol.Pool
   , updatePositionYield
   , getAPY
   , syncPositionValue
+  , updatePoolHealthMetrics
   ) where
 
 import Prelude
@@ -75,6 +79,7 @@ import Protocol.Tick (Tick)
 import Protocol.Position (Position, Duration(..), Leverage(..), leverageMultiplier)
 import Protocol.Common (PositionId, BlockNumber)
 import Protocol.POL (POLTriggerType(..))
+import Protocol.Incentive (calculateFeeForDuration, getFlashLoanFeeRate)
 
 --------------------------------------------------------------------------------
 -- On-Chain Pool State
@@ -99,14 +104,14 @@ type PoolState =
   , feeGrowthGlobal1X128 :: Number  -- Global fee growth token1
   , protocolFee :: Number           -- Protocol fee share (basis points)
   , unlocked :: Boolean             -- Reentrancy guard
-  , offering :: Maybe OfferingId    -- Active offering (if any)
+  , launch :: Maybe LaunchId        -- Active launch (if any)
   , leverageState :: LeverageState  -- Tracks value by leverage tier
   , totalValue :: Number            -- Total pool value
   , lastUpdateBlock :: BlockNumber  -- Last value update block
   }
 
 -- | Offering identifier
-type OfferingId = String
+type LaunchId = String
 
 -- | Pool configuration parameters
 type PoolConfig =
@@ -184,22 +189,19 @@ data PoolEvent
 -- Leverage Value Management
 --------------------------------------------------------------------------------
 
--- | State tracking for leverage groups' aggregate value
+-- | State tracking for Senior and Junior leverage tiers
 type LeverageState =
   { totalValue :: Number        -- Total pool value
-  , leverageGroups :: Array     -- Groups by leverage level
-      { leverage :: Number      -- Leverage multiplier (1.0, 2.0, 3.0, etc)
-      , value :: Number         -- Total value at this leverage
-      , shares :: Number        -- Total shares at this leverage
-      }
+  , seniorValue :: Number       -- Total value in Senior (1x) tier
+  , seniorShares :: Number      -- Total shares in Senior tier
+  , juniorValue :: Number       -- Total value in Junior (3x) tier  
+  , juniorShares :: Number      -- Total shares in Junior tier
   }
 
 -- | Leverage-based value calculation results
 type LeverageValues =
-  { values :: Array
-      { leverage :: Number
-      , value :: Number
-      }
+  { seniorValue :: Number       -- New value for Senior tier
+  , juniorValue :: Number       -- New value for Junior tier
   }
 
 --------------------------------------------------------------------------------
@@ -233,10 +235,12 @@ swap pool params currentBlock =
     reserve0 = pool.liquidity / currentSqrtPrice
     reserve1 = pool.liquidity * currentSqrtPrice
     
-    -- 2. Apply fee to input amount (0.3% = 30 basis points)
-    feeRate = pool.protocolFee / 10000.0  -- Convert basis points to decimal
-    amountInAfterFee = abs params.amountSpecified * (1.0 - feeRate)
-    feeAmount = abs params.amountSpecified * feeRate
+    -- 2. Apply fee to input amount based on duration (default to Spot for swaps)
+    -- Note: In a real implementation, duration would be part of SwapParams
+    feeComponents = calculateFeeForDuration Spot (abs params.amountSpecified)
+    feeRate = feeComponents.totalFee / abs params.amountSpecified
+    amountInAfterFee = abs params.amountSpecified - feeComponents.totalFee
+    feeAmount = feeComponents.totalFee
     
     -- 3. Calculate output using constant product formula: x * y = k
     -- For zeroForOne (token0 -> token1): dy = y * dx / (x + dx)
@@ -343,21 +347,21 @@ addLiquidity pool params leverage currentBlock =
     shares = params.amount * leverageMultiplier'
     
     -- Update leverage state with new position
-    leverageIdx = if leverage == Senior then 0 else 1
-    updatedLeverageGroups = mapWithIndex updateGroup pool.leverageState.leverageGroups
-      where
-        updateGroup idx group = 
-          if idx == leverageIdx
-          then group { value = group.value + params.amount
-                     , shares = group.shares + shares
-                     }
-          else group
+    updatedLeverageState = if leverage == Senior
+      then pool.leverageState 
+        { seniorValue = pool.leverageState.seniorValue + params.amount
+        , seniorShares = pool.leverageState.seniorShares + shares
+        , totalValue = pool.leverageState.totalValue + params.amount
+        }
+      else pool.leverageState
+        { juniorValue = pool.leverageState.juniorValue + params.amount
+        , juniorShares = pool.leverageState.juniorShares + shares
+        , totalValue = pool.leverageState.totalValue + params.amount
+        }
     
     -- Update pool state
     updatedPool = pool { liquidity = pool.liquidity + params.amount
-                       , leverageState = pool.leverageState { leverageGroups = updatedLeverageGroups
-                                                            , totalValue = pool.leverageState.totalValue + params.amount
-                                                            }
+                       , leverageState = updatedLeverageState
                        , totalValue = pool.totalValue + params.amount
                        , lastUpdateBlock = currentBlock
                        }
@@ -393,6 +397,81 @@ removeLiquidity pool positionId amount =
      }
 
 --------------------------------------------------------------------------------
+-- Flash Loan Operations
+--------------------------------------------------------------------------------
+
+-- | Parameters for flash loan request
+type FlashLoanParams =
+  { token :: TokenType              -- Token to borrow (token0 or token1)
+  , amount :: Number                -- Amount to borrow
+  , borrower :: String              -- Address of borrower
+  , data :: String                  -- Callback data for borrower
+  }
+
+-- | Result of flash loan operation
+type FlashLoanResult =
+  { success :: Boolean              -- Whether loan was repaid
+  , fee :: Number                   -- Fee charged (0.05% of amount)
+  , gasUsed :: Number               -- Gas consumed
+  }
+
+-- | Execute a flash loan - must be repaid in same transaction
+-- | Flash loans charge a 0.05% fee to incentivize POL growth
+flashLoan :: PoolState -> FlashLoanParams -> BlockNumber -> { result :: FlashLoanResult, updatedPool :: PoolState }
+flashLoan pool params currentBlock =
+  let
+    -- Flash loan fee calculation using dedicated fee module
+    feeComponents = calculateFeeForDuration Flash params.amount
+    feeAmount = feeComponents.totalFee
+    totalRepayment = params.amount + feeAmount
+    
+    -- Check if pool has sufficient liquidity
+    availableLiquidity = if params.token == pool.token0
+                         then getToken0Balance pool
+                         else getToken1Balance pool
+    
+    canLend = availableLiquidity >= params.amount
+    
+    -- In a real implementation, this would:
+    -- 1. Transfer tokens to borrower
+    -- 2. Call borrower's callback function
+    -- 3. Verify repayment + fee was returned
+    -- 4. Revert entire transaction if not repaid
+    
+    -- For simulation, assume successful repayment
+    repaymentSuccess = canLend  -- Simplified for simulation
+    
+    -- Update fee growth if successful
+    updatedPool = if repaymentSuccess
+                  then if params.token == pool.token0
+                       then pool { feeGrowthGlobal0X128 = pool.feeGrowthGlobal0X128 + feeAmount
+                                 , lastUpdateBlock = currentBlock
+                                 }
+                       else pool { feeGrowthGlobal1X128 = pool.feeGrowthGlobal1X128 + feeAmount
+                                 , lastUpdateBlock = currentBlock
+                                 }
+                  else pool
+    
+    result = { success: repaymentSuccess
+             , fee: if repaymentSuccess then feeAmount else 0.0
+             , gasUsed: 200000.0  -- Estimated gas for flash loan
+             }
+    
+  in { result: result, updatedPool: updatedPool }
+
+-- | Helper to estimate token0 balance from pool state
+getToken0Balance :: PoolState -> Number
+getToken0Balance pool = 
+  -- Simplified calculation - in reality would sum all liquidity in range
+  pool.liquidity * sqrt pool.sqrtPriceX96
+
+-- | Helper to estimate token1 balance from pool state  
+getToken1Balance :: PoolState -> Number
+getToken1Balance pool =
+  -- Simplified calculation - in reality would sum all liquidity in range
+  pool.liquidity / sqrt pool.sqrtPriceX96
+
+--------------------------------------------------------------------------------
 -- Pool Initialization
 --------------------------------------------------------------------------------
 
@@ -408,7 +487,7 @@ initializePool token0 token1 initialPrice config =
   , feeGrowthGlobal1X128: 0.0
   , protocolFee: config.fee
   , unlocked: true
-  , offering: Nothing
+  , launch: Nothing
   , leverageState: initializeLeverageState
   , totalValue: 0.0
   , lastUpdateBlock: 0
@@ -434,16 +513,10 @@ getPoolLiquidity pool = pool.liquidity
 initializeLeverageState :: LeverageState
 initializeLeverageState =
   { totalValue: 0.0
-  , leverageGroups:
-    [ { leverage: 1.0   -- Senior (1x)
-      , value: 0.0
-      , shares: 0.0
-      }
-    , { leverage: 3.0   -- Junior (3x)
-      , value: 0.0
-      , shares: 0.0
-      }
-    ]
+  , seniorValue: 0.0
+  , seniorShares: 0.0
+  , juniorValue: 0.0
+  , juniorShares: 0.0
   }
 
 -- | Update pool value and distribute PnL to leverage tiers
@@ -479,7 +552,9 @@ syncPositionValue position pool currentBlock =
     positionWithYield = updatePositionYield position pool currentBlock
     
     -- Then update value based on leverage state
-    newLeverageValues = { values: map (\g -> { leverage: g.leverage, value: g.value }) pool.leverageState.leverageGroups }
+    newLeverageValues = { seniorValue: pool.leverageState.seniorValue
+                        , juniorValue: pool.leverageState.juniorValue 
+                        }
     
     -- Apply pool PnL distribution
     updatedPosition = distributePoolPnL positionWithYield pool.leverageState newLeverageValues
@@ -514,6 +589,7 @@ calculatePositionYield position pool currentBlock =
     
     -- Duration bonus - longer commitments earn higher yield
     durationMultiplier = case position.duration of
+      Flash -> 0.1     -- Minimal yield for flash loans (single block)
       Spot -> 1.0      -- Base rate
       Monthly -> 1.2   -- 20% bonus for monthly commitment
     
@@ -549,6 +625,7 @@ getAPY pool duration leverage =
     -- Apply multipliers
     leverageMultiplier' = leverageMultiplier leverage
     durationMultiplier = case duration of
+      Flash -> 0.5    -- Flash loans have lower APY due to single-block duration
       Spot -> 1.0
       Monthly -> 1.2
     
@@ -756,7 +833,7 @@ isTickInPOLRange tick pool =
 --------------------------------------------------------------------------------
 
 -- | Calculate leverage-based values with PnL distribution
--- | Higher leverage positions absorb losses first and gain more from profits
+-- | Junior (3x) positions absorb losses first and gain more from profits
 calculateLeverageValues :: Number -> Number -> LeverageState -> LeverageValues
 calculateLeverageValues initialValue currentValue leverageState =
   let
@@ -766,67 +843,89 @@ calculateLeverageValues initialValue currentValue leverageState =
     -- Apply leverage-based distribution
     result = if pnl >= 0.0 then
       -- Profits: Distribute proportionally to leverage
-      let totalWeightedValue = sum $ map (\g -> g.value * g.leverage) leverageState.leverageGroups
+      let seniorWeighted = leverageState.seniorValue * 1.0  -- 1x leverage
+          juniorWeighted = leverageState.juniorValue * 3.0  -- 3x leverage
+          totalWeightedValue = seniorWeighted + juniorWeighted
       in if totalWeightedValue > 0.0 then
-           { values: map (\g -> 
-               { leverage: g.leverage
-               , value: g.value + pnl * (g.value * g.leverage / totalWeightedValue)
-               }) leverageState.leverageGroups
+           { seniorValue: leverageState.seniorValue + pnl * (seniorWeighted / totalWeightedValue)
+           , juniorValue: leverageState.juniorValue + pnl * (juniorWeighted / totalWeightedValue)
            }
          else
-           { values: map (\g -> { leverage: g.leverage, value: g.value }) leverageState.leverageGroups }
+           { seniorValue: leverageState.seniorValue
+           , juniorValue: leverageState.juniorValue
+           }
     else
-      -- Losses: Higher leverage absorbs first
-      distributeLosses (abs pnl) leverageState.leverageGroups
+      -- Losses: Junior absorbs first (up to 90%), then Senior
+      let absLoss = abs pnl
+          maxJuniorLoss = leverageState.juniorValue * 0.9  -- Can lose up to 90%
+          juniorLoss = min absLoss maxJuniorLoss
+          remainingLoss = absLoss - juniorLoss
+          
+          maxSeniorLoss = leverageState.seniorValue * 0.9  -- Can lose up to 90%
+          seniorLoss = min remainingLoss maxSeniorLoss
+      in
+        { seniorValue: leverageState.seniorValue - seniorLoss
+        , juniorValue: leverageState.juniorValue - juniorLoss
+        }
   
   in result
-  where
-    -- Helper to distribute losses starting from highest leverage
-    distributeLosses :: Number -> Array { leverage :: Number, value :: Number, shares :: Number } -> LeverageValues
-    distributeLosses _ [] = { values: [] }
-    distributeLosses remainingLoss groups =
-      let sorted = sortBy (\a b -> compare b.leverage a.leverage) groups
-          distributed = distributeToGroups remainingLoss sorted []
-      in { values: map (\g -> { leverage: g.leverage, value: g.value }) distributed }
-    
-    distributeToGroups :: Number -> Array { leverage :: Number, value :: Number, shares :: Number } -> Array { leverage :: Number, value :: Number, shares :: Number } -> Array { leverage :: Number, value :: Number, shares :: Number }
-    distributeToGroups _ [] acc = acc
-    distributeToGroups 0.0 remaining acc = acc <> remaining
-    distributeToGroups loss groups acc = case Array.uncons groups of
-      Nothing -> acc
-      Just { head: g, tail: gs } ->
-        let maxLoss = g.value * 0.9  -- Can lose up to 90%
-            actualLoss = min loss maxLoss
-            newValue = max (g.value * 0.1) (g.value - actualLoss)
-            remainingLoss = loss - actualLoss
-        in distributeToGroups remainingLoss gs (acc <> [g { value = newValue }])
 
 -- | Update leverage state with new values
 updateLeverageValues :: LeverageState -> LeverageValues -> LeverageState
 updateLeverageValues state newValues =
-  state { leverageGroups = zipWith updateGroup state.leverageGroups newValues.values }
-  where
-    updateGroup g v = g { value = v.value }
+  state { seniorValue = newValues.seniorValue
+        , juniorValue = newValues.juniorValue
+        , totalValue = newValues.seniorValue + newValues.juniorValue
+        }
 
 -- | Distribute pool PnL to positions based on their shares and leverage
 -- | Returns updated position with new value
 distributePoolPnL :: Position -> LeverageState -> LeverageValues -> Position
 distributePoolPnL position oldState newValues =
   let
-    -- Find the leverage group for this position
-    posLeverage = leverageMultiplier position.leverage
-    leverageGroup = find (\g -> g.leverage == posLeverage) oldState.leverageGroups
-    valueGroup = find (\v -> v.leverage == posLeverage) newValues.values
-    
-    -- Calculate per-share value for this leverage level
-    perShareValue = case { lg: leverageGroup, vg: valueGroup } of
-      { lg: Just lg', vg: Just vg' } -> 
-        if lg'.shares > 0.0 
-        then vg'.value / lg'.shares 
+    -- Calculate per-share value based on position's leverage tier
+    perShareValue = case position.leverage of
+      Senior -> 
+        if oldState.seniorShares > 0.0
+        then newValues.seniorValue / oldState.seniorShares
         else 0.0
-      _ -> 0.0
+      Junior ->
+        if oldState.juniorShares > 0.0
+        then newValues.juniorValue / oldState.juniorShares
+        else 0.0
     
     -- Update position value based on shares
     newValue = position.shares * perShareValue
       
   in position { value = newValue }
+
+--------------------------------------------------------------------------------
+-- POOL HEALTH METRICS
+--------------------------------------------------------------------------------
+
+-- | Update pool health metrics and fee parameters based on liquidity and volume
+-- | Adjusts protocol fees dynamically based on pool health conditions
+-- | Returns the pool state with updated fees
+updatePoolHealthMetrics :: PoolState -> PoolState
+updatePoolHealthMetrics pool =
+  let
+    -- Calculate pool health based on liquidity and volume
+    liquidityDepth = pool.liquidity
+    volume = pool.feeGrowthGlobal0X128 + pool.feeGrowthGlobal1X128
+    
+    -- Health score: 0.0 (unhealthy) to 1.0 (very healthy)
+    liquidityScore = min 1.0 (liquidityDepth / 10000.0)  -- Normalize to 10k liquidity
+    volumeScore = min 1.0 (volume / 100.0)               -- Normalize to 100 volume
+    healthScore = (liquidityScore + volumeScore) / 2.0
+    
+    -- Dynamic fee adjustment based on health
+    -- Lower fees for healthy pools to attract volume
+    -- Higher fees for unhealthy pools to compensate LPs
+    baseFee = pool.protocolFee
+    adjustedFee = if healthScore > 0.8
+                  then max 10.0 (baseFee * 0.8)    -- 20% fee reduction for very healthy pools
+                  else if healthScore < 0.3
+                       then min 50.0 (baseFee * 1.5) -- 50% fee increase for unhealthy pools
+                       else baseFee
+  
+  in pool { protocolFee = adjustedFee }

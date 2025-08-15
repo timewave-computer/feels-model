@@ -1,6 +1,6 @@
 -- Application entry point for the Feels Protocol DeFi system.
--- Initializes the web application, sets up the DOM, and renders the main UI.
--- This is the starting point for the unified lending-based financial protocol.
+-- Initializes the Halogen web application and renders the main UI.
+-- Entry point for the protocol simulation and interaction interface.
 module Main where
 
 import Prelude

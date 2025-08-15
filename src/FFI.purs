@@ -1,7 +1,7 @@
--- Foreign Function Interface providing JavaScript interop for the lending protocol.
+-- Foreign Function Interface providing JavaScript interop for the protocol.
 -- Bridges PureScript business logic with JavaScript runtime functionality including
--- DOM manipulation, state management, system metrics, and browser APIs. Enables
--- the web-based interface for the Feels DeFi application.
+-- DOM manipulation, math operations, system metrics, and browser APIs.
+-- Enables the web-based interface for the Feels Protocol.
 module FFI where
 
 import Prelude
@@ -19,7 +19,7 @@ foreign import volatility :: forall a. a -> a -> Effect Number
 -- Utility functions
 foreign import currentTime :: Effect Number
 foreign import generateId :: Number -> Int
-foreign import toNumber :: Int -> Number  -- Use Data.Int.toNumber instead
+foreign import toNumber :: Int -> Number
 
 -- DOM manipulation
 foreign import setInnerHTML :: Element -> String -> Effect Unit
@@ -28,7 +28,7 @@ foreign import removeAllEventListeners :: Element -> String -> Effect Unit
 foreign import getValue :: Element -> Effect String
 foreign import getTextContent :: Element -> Effect String
 foreign import parseFloat :: String -> Number
-foreign import floor :: Number -> Int     -- Use Data.Int.floor instead
+foreign import floor :: Number -> Int
 -- Note: In actual usage, these are typed specifically in each module
 foreign import setGlobalState :: forall a. a -> Effect Unit
 foreign import getGlobalState :: forall a. Effect a
@@ -37,9 +37,7 @@ foreign import setTimeout :: Effect Unit -> Int -> Effect Unit
 -- Application initialization
 foreign import onDOMReady :: Effect Unit -> Effect Unit
 
--- Math functions (consider replacing with Math module equivalents)
--- sqrt, sin, cos, log, exp are available in Math module
--- floor available in Data.Int, toNumber available in Data.Int
+-- Math functions used throughout the protocol
 foreign import log10 :: Number -> Number
 foreign import sqrt :: Number -> Number
 foreign import sin :: Number -> Number

@@ -34,6 +34,8 @@ module Protocol.Position
   , getNextTermExpiries
   , groupPositionsByExpiry
   , processExpiredPositions
+  -- LVR compensation functions
+  , isVolHarvesterPosition  -- Check if position qualifies for LVR compensation
   ) where
 
 import Prelude
@@ -51,14 +53,16 @@ import Protocol.Common (PoolId, PositionId, BlockNumber, ShareAmount)
 --------------------------------------------------------------------------------
 -- The fundamental types that define positions, tranches, and term commitments
 
--- | Position structure - unified model with continuous price, discrete duration/leverage
+-- | Position structure with price level, time commitment, and leverage exposure
 type Position =
   { id :: PositionId
   , owner :: String
   , amount :: Number               -- Initial capital invested
   , price :: Number                -- Price level (tick rate) for liquidity
-  , duration :: Duration           -- Time commitment (Spot or Monthly)
-  , leverage :: Leverage           -- Exposure tier (Senior 1x or Junior 3x)
+  , duration :: Duration           -- Time commitment (Flash, Spot or Monthly)
+  , leverage :: Leverage           -- Risk/reward tier (Senior 1x or Junior 3x)
+  , lendAsset :: TokenType         -- Asset being lent (FeelsSOL or Token)
+  , collateralAsset :: TokenType   -- Asset provided as collateral
   , rollover :: Boolean            -- Whether position auto-rolls to next term
   , shares :: ShareAmount          -- Pool ownership shares
   , createdAt :: BlockNumber       -- Creation block number
@@ -72,13 +76,15 @@ type Position =
 
 -- | Duration options - discrete time commitments
 data Duration
-  = Spot      -- Perpetual, no expiry
+  = Flash     -- Single block duration (flash loan)
+  | Spot      -- Perpetual, no expiry
   | Monthly   -- 28-day term commitment
 
 derive instance eqDuration :: Eq Duration
 derive instance ordDuration :: Ord Duration
 
 instance showDuration :: Show Duration where
+  show Flash = "Flash"
   show Spot = "Spot"
   show Monthly = "Monthly"
 
@@ -101,6 +107,7 @@ leverageMultiplier Junior = 3.0
 
 -- | Get duration in blocks
 durationBlocks :: Duration -> Int
+durationBlocks Flash = 1  -- Single block duration
 durationBlocks Spot = 0
 durationBlocks Monthly = blocksPerMonth
 
@@ -133,25 +140,29 @@ monthlyDuration = Monthly
 --------------------------------------------------------------------------------
 -- Functions for creating new positions
 
--- | Create a new position with unified parameters
+-- | Create a new position with specified parameters
 createPosition :: 
   PositionId ->     -- Unique position identifier
   String ->         -- Position owner
   Number ->         -- Initial investment amount
   Number ->         -- Price level for liquidity
-  Duration ->       -- Time commitment (Spot or Monthly)
+  Duration ->       -- Time commitment (Flash, Spot or Monthly)
   Leverage ->       -- Exposure tier (Senior or Junior)
+  TokenType ->      -- Asset being lent
+  TokenType ->      -- Collateral asset
   Boolean ->        -- Auto-rollover setting
   ShareAmount ->    -- Shares allocated by pool
   BlockNumber ->    -- Current block number
   Position
-createPosition id owner amount price duration leverage rollover shares currentBlock =
+createPosition id owner amount price duration leverage lendAsset collateralAsset rollover shares currentBlock =
   { id
   , owner
   , amount
   , price
   , duration
   , leverage
+  , lendAsset
+  , collateralAsset
   , rollover
   , shares
   , createdAt: currentBlock
@@ -183,6 +194,7 @@ isTermPosition pos = not (isSpot pos)
 -- | Get term expiry block number if position has duration
 getTermExpiry :: Position -> Maybe Int
 getTermExpiry pos = case pos.duration of
+  Flash -> Just (pos.createdAt + 1)  -- Expires next block
   Spot -> Nothing
   Monthly -> Just (pos.createdAt + blocksPerMonth)
 
@@ -198,6 +210,16 @@ isJunior pos = pos.leverage == Junior
 getPositionLeverage :: Position -> Number
 getPositionLeverage pos = leverageMultiplier pos.leverage
 
+-- | Check if a position qualifies for LVR compensation
+-- | Positions receive LVR compensation when they:
+-- | - Have Monthly duration (28-day lock)
+-- | - Provide liquidity (have shares > 0)
+-- | This compensates liquidity providers for adverse selection
+isVolHarvesterPosition :: Position -> Boolean
+isVolHarvesterPosition pos = 
+  pos.duration == Monthly &&     -- Must be monthly duration
+  pos.shares > 0.0               -- Must have liquidity shares
+
 --------------------------------------------------------------------------------
 -- TERM EXPIRY CALCULATION
 --------------------------------------------------------------------------------
@@ -206,6 +228,7 @@ getPositionLeverage pos = leverageMultiplier pos.leverage
 -- | Get the next expiry block for a given duration
 getNextExpiry :: Duration -> Int -> Int
 getNextExpiry duration currentBlock = case duration of
+  Flash -> currentBlock + 1  -- Next block
   Spot -> 2147483647  -- MaxInt32 (effectively never expires)
   Monthly -> getNextMonthlyExpiry currentBlock
 
@@ -219,6 +242,7 @@ getNextMonthlyExpiry currentBlock =
 -- | Calculate blocks remaining until a position expires
 blocksUntilExpiry :: Position -> Int -> Int
 blocksUntilExpiry position currentBlock = case position.duration of
+  Flash -> max 0 ((position.createdAt + 1) - currentBlock)
   Spot -> 2147483647  -- MaxInt32 (never expires)
   Monthly -> max 0 ((position.createdAt + blocksPerMonth) - currentBlock)
 
@@ -230,6 +254,7 @@ blocksUntilExpiry position currentBlock = case position.duration of
 -- | Check if a position has expired based on current block
 isExpired :: Int -> Position -> Boolean
 isExpired currentBlock position = case position.duration of
+  Flash -> currentBlock >= (position.createdAt + 1)  -- Expires after one block
   Spot -> false  -- Spot positions never expire
   Monthly -> currentBlock >= (position.createdAt + blocksPerMonth)
 

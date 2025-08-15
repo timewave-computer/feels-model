@@ -1,7 +1,6 @@
--- Domain-specific utility functions for the lending-based protocol.
--- Contains only custom formatting and mathematical functions not available in standard libraries.
--- All standard array, math, and control flow functions should be imported from their respective
--- standard libraries (Data.Array, Data.Foldable, Control.Monad, etc.)
+-- Protocol-specific utility functions for formatting and calculations.
+-- Custom functions not available in PureScript standard libraries.
+-- Standard functions should be imported from Data.Array, Data.Foldable, etc.
 module Utils 
   ( formatPrice
   , formatPercentage
@@ -24,7 +23,7 @@ import Data.Functor (map)
 -- Domain-Specific Formatting Functions
 --------------------------------------------------------------------------------
 
--- Format price with appropriate decimal places based on magnitude
+-- Format price with decimal precision based on value magnitude
 formatPrice :: Number -> String
 formatPrice price = 
   if price < 0.01 then 
@@ -34,15 +33,15 @@ formatPrice price =
   else 
     show (Int.toNumber (Int.floor (price * 100.0)) / 100.0)
 
--- Format percentage (0.05 -> "5%")
+-- Convert decimal to percentage string (0.05 -> "5%")
 formatPercentage :: Number -> String
 formatPercentage n = show (Int.toNumber (Int.floor (n * 100.0))) <> "%"
 
--- Format fee as percentage with 2 decimal places (0.0005 -> "0.05%")
+-- Format fee as basis points percentage (0.0005 -> "0.05%")
 formatFeePercentage :: Number -> String
 formatFeePercentage fee = show (Int.toNumber (Int.floor (fee * 10000.0)) / 100.0) <> "%"
 
--- Format amount with maximum 2 decimal places, no decimals for integers
+-- Format amounts with up to 2 decimal places, integers without decimals
 formatAmount :: Number -> String
 formatAmount amount = 
   let rounded = Int.toNumber (Int.floor (amount * 100.0)) / 100.0

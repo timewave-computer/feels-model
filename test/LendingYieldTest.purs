@@ -30,6 +30,8 @@ createTestPosition = pure $ Position.createPosition
   1.0                     -- price
   Position.Monthly        -- duration
   Position.Junior         -- leverage (3x)
+  FeelsSOL                -- lendAsset
+  JitoSOL                 -- collateralAsset
   false                   -- rollover
   3000.0                  -- shares (amount * leverage)
   0                       -- currentBlock
@@ -123,49 +125,37 @@ testLeveragePnLDistribution = do
   
   -- Create leverage state with both tiers
   let leverageState = { totalValue: 1000.0
-                      , leverageGroups: 
-                        [ { leverage: 1.0, value: 600.0, shares: 600.0 }   -- Senior
-                        , { leverage: 3.0, value: 400.0, shares: 1200.0 }  -- Junior
-                        ]
+                      , seniorValue: 600.0
+                      , seniorShares: 600.0
+                      , juniorValue: 400.0
+                      , juniorShares: 1200.0
                       }
   
   -- Test profit scenario
   let profitValues = Pool.calculateLeverageValues 1000.0 1100.0 leverageState
   
-  case profitValues.values of
-    [senior, junior] -> do
-      log $ "    Senior value: " <> show senior.value <> " (started with 600)"
-      log $ "    Junior value: " <> show junior.value <> " (started with 400)"
-      -- Check proportional gains: Junior gets 3x leverage on profits
-      -- Senior gain: 633.33 - 600 = 33.33
-      -- Junior gain: 466.67 - 400 = 66.67 (2x senior's gain, which is correct)
-      let seniorGain = senior.value - 600.0
-      let juniorGain = junior.value - 400.0
-      quickCheck $ juniorGain > seniorGain  -- Junior gets more absolute profit
-      quickCheck $ approxEqual (senior.value + junior.value) 1100.0
-      log "  ✓ Profits distributed proportionally to leverage"
-    _ -> log "  ✗ Unexpected leverage group structure"
+  log $ "    Senior value: " <> show profitValues.seniorValue <> " (started with 600)"
+  log $ "    Junior value: " <> show profitValues.juniorValue <> " (started with 400)"
+  -- Check proportional gains: Junior gets 3x leverage on profits
+  -- Senior gain: 633.33 - 600 = 33.33
+  -- Junior gain: 466.67 - 400 = 66.67 (2x senior's gain, which is correct)
+  let seniorGain = profitValues.seniorValue - 600.0
+  let juniorGain = profitValues.juniorValue - 400.0
+  quickCheck $ juniorGain > seniorGain  -- Junior gets more absolute profit
+  quickCheck $ approxEqual (profitValues.seniorValue + profitValues.juniorValue) 1100.0
+  log "  ✓ Profits distributed proportionally to leverage"
   
   -- Test loss scenario  
   let lossValues = Pool.calculateLeverageValues 1000.0 900.0 leverageState
   
-  case lossValues.values of
-    values -> do
-      -- Find by leverage value instead of assuming order
-      let seniorGroup = values # find (\v -> v.leverage == 1.0)
-      let juniorGroup = values # find (\v -> v.leverage == 3.0)
-      
-      case { senior: seniorGroup, junior: juniorGroup } of
-        { senior: Just s, junior: Just j } -> do
-          log $ "    Loss scenario - Senior (1x) value: " <> show s.value
-          log $ "    Loss scenario - Junior (3x) value: " <> show j.value
-          -- In loss scenario, junior should absorb losses first
-          -- Total loss is 100, junior had 400, so should go to 300
-          -- Senior should remain at 600
-          quickCheck $ approxEqual s.value 600.0  -- Senior unchanged
-          quickCheck $ approxEqual j.value 300.0   -- Junior lost 100
-          log "  ✓ Losses absorbed by junior tier first"
-        _ -> log "  ✗ Could not find leverage groups"
+  log $ "    Loss scenario - Senior (1x) value: " <> show lossValues.seniorValue
+  log $ "    Loss scenario - Junior (3x) value: " <> show lossValues.juniorValue
+  -- In loss scenario, junior should absorb losses first
+  -- Total loss is 100, junior had 400, so should go to 300
+  -- Senior should remain at 600
+  quickCheck $ approxEqual lossValues.seniorValue 600.0  -- Senior unchanged
+  quickCheck $ approxEqual lossValues.juniorValue 300.0   -- Junior lost 100
+  log "  ✓ Losses absorbed by junior tier first"
 
 -- Test end-to-end position creation
 testEndToEndPositionCreation :: Effect Unit
@@ -180,8 +170,10 @@ testEndToEndPositionCreation = do
         1.0                    -- price
         Position.Monthly       -- duration
         Position.Junior        -- leverage
+        FeelsSOL               -- lendAsset
+        JitoSOL                -- collateralAsset
         false                  -- rollover
-        3000.0                 -- shares (leveraged amount)
+        3000.0                 -- shares
         100                    -- currentBlock
   
   -- Verify position has yield tracking fields initialized

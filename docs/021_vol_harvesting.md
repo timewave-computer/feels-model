@@ -2,62 +2,69 @@
 
 ## Overview
 
-Volatility Harvesting is a strategy employed by market participants ("Vol Harvesters") who aim to profit from price fluctuations in an asset pair without taking a directional bet on the price of the underlying assets. Their goal is to capture the "volatility premium" (often in the form of trading fees) while maintaining a delta-neutral position, meaning their overall portfolio value is not significantly affected by upward or downward movements of the base asset (FeelsSOL in this context).
+Volatility Harvesting is a strategy employed by market participants ("Vol Harvesters") who aim to profit from market volatility by committing their FeelsSOL to the protocol for a 28-day rollover term. Their goal is to receive compensation for the inherent costs of adverse selection (Loss Versus Rebalancing, LVR) and to be eligible for additional volatility yield, without directly engaging in complex delta-neutral hedging strategies.
 
-## The Core Strategy: Liquidity Provision
+## The Core Strategy: FeelsSOL Commitment
 
-In the Feels Protocol's tick-based AMM system (similar to Uniswap V3), Vol Harvesters can provide concentrated liquidity to specific price ranges to capture volatility.
+Vol Harvesters commit their FeelsSOL to the protocol for a fixed 28-day term, with an option for automatic rollover. This commitment makes their FeelsSOL available to the protocol for its internal volatility monetization strategies.
 
-*   **Mechanism**: Unlike traditional AMMs, the tick system allows LPs to:
-    *   **Concentrated Liquidity**: Provide liquidity to specific price ranges (tick ranges) for capital efficiency
-    *   **Single-Sided Deposits**: When the current price is outside their chosen range, LPs only need to provide one asset:
-        *   Below range: Provide only FeelsSOL
-        *   Above range: Provide only TokenX
-    *   **Range Orders**: Place strategic single-sided positions that act like limit orders
-*   **Profit Source**: The fees collected from swaps within their liquidity ranges, with higher capital efficiency due to concentration.
+*   **Mechanism**: Users create a position by committing a specified amount of FeelsSOL. This FeelsSOL is then managed by the protocol for a 28-day period. The position can be configured to automatically roll over for subsequent 28-day terms.
+*   **Profit Source**: Vol Harvesters receive two forms of compensation from the protocol:
+    1.  **LVR Compensation**: A payment designed to compensate for the estimated Loss Versus Rebalancing (LVR) incurred by the protocol's underlying volatility monetization activities.
+    2.  **Volatility Yield**: An additional yield component, representing upside gains from the protocol's successful monetization of volatility beyond the LVR compensation.
 
-## The Challenge: Impermanent Loss (Directional Exposure)
+## The Challenge: Protocol-Absorbed Loss Versus Rebalancing
 
-While providing liquidity allows LPs to earn fees from volatility, it comes with a significant challenge: **Impermanent Loss (IL)**.
+While the protocol's internal volatility monetization activities (e.g., providing liquidity in AMMs) incur Loss Versus Rebalancing (LVR), the Vol Harvester is shielded from directly bearing this cost. Instead, the protocol absorbs the LVR and compensates the Vol Harvester through a dedicated payment.
 
-*   **Mechanism in Tick-Based Systems**: 
-    *   Within their active range, LPs experience rebalancing as prices move - accumulating more of the depreciating asset
-    *   When price exits their range entirely, positions become single-sided (100% in one asset)
-    *   IL is more pronounced in concentrated positions but offset by higher fee earnings
-*   **Directional Exposure**: Even with tick-based systems, active LP positions have directional exposure. For Vol Harvesters aiming for delta-neutrality, this exposure must be hedged.
+### What is LVR in Practice?
 
-## Achieving Delta-Neutrality with a Borrowing Facility
+LVR represents the systematic losses that liquidity providers incur from adverse selection - being forced to trade at stale AMM prices while arbitrageurs trade against them at more favorable rates. Unlike impermanent loss, LVR isolates the true economic cost of providing liquidity.
 
-To mitigate the directional exposure (specifically to the FeelsSOL price) and achieve a more delta-neutral position, Vol Harvesters can utilize a borrowing facility within the protocol.
+*   **Adverse Selection Cost**: When prices move on external markets (like centralized exchanges), AMM prices lag behind, creating arbitrage opportunities. Arbitrageurs exploit these stale quotes, causing LPs to systematically buy high and sell low.
 
-### The Need to Offset FeelsSOL Exposure
+*   **Always a Cost**: Unlike impermanent loss which can be positive or negative depending on price paths, LVR is monotonically increasing - it represents a real, measurable cost that LPs pay to arbitrageurs.
 
-When providing liquidity to a `FeelsSOL/TokenX` pool, the Vol Harvester is effectively taking a long position on a basket of `FeelsSOL` and `TokenX`. To neutralize their exposure to the `FeelsSOL` price, they need to create a synthetic short position in `FeelsSOL`.
+### LVR in Tick-Based Systems (Protocol's Perspective)
 
-### Strategy Steps:
+*   **Concentrated Liquidity Amplification**: 
+    *   Higher liquidity concentration leads to steeper price curves (higher marginal liquidity $|x'(P)|$)
+    *   This increases the instantaneous LVR rate: $\ell(\sigma, P) = \frac{\sigma^2 P^2}{2} |x'(P)|$
+    *   Concentrated positions experience higher LVR per dollar but earn proportionally higher fees
 
-1.  **Provide Liquidity (Long LP Position):** The Vol Harvester deposits `FeelsSOL` and `TokenX` into the `FeelsSOL/TokenX` AMM pool, becoming an LP and starting to earn trading fees. This creates a long exposure to both `FeelsSOL` and `TokenX`.
-2.  **Borrow FeelsSOL (Short FeelsSOL Position):** The Vol Harvester then utilizes a protocol borrowing facility to borrow a calculated amount of `FeelsSOL`.
-3.  **Sell Borrowed FeelsSOL:** The borrowed `FeelsSOL` is immediately sold on the market. This creates the synthetic short position in `FeelsSOL`.
+*   **Range Dynamics**: 
+    *   Within active ranges: LPs face continuous adverse selection as prices fluctuate
+    *   At range boundaries: LPs experience the full force of adverse selection as positions flip between assets
+    *   Outside ranges: Single-sided positions avoid further LVR but miss fee opportunities
 
-### What They Would Borrow Against (Collateral)
+### The LVR vs. Fees Trade-off (Protocol's Perspective)
 
-To borrow `FeelsSOL`, the Vol Harvester would need to provide collateral. The type of collateral and its requirements would depend on the design of the borrowing facility:
+The fundamental equation for LP profitability after hedging market risk is:
+$\text{Delta-Hedged LP Returns} = \text{Trading Fees} - \text{LVR}$
 
-*   **LP Tokens:** The most direct and capital-efficient collateral would be their **LP tokens** (representing their share of the `FeelsSOL/TokenX` liquidity pool). This allows them to leverage their existing LP position.
-*   **Other Assets:** Alternatively, they could provide other accepted assets as collateral, such as:
-    *   `JitoSOL`: If the borrowing facility accepts it. **Note**: If JitoSOL is used as collateral, Vol Harvesters would expect the yield generated from their overall delta-neutral position to exceed the native staking yield of JitoSOL (i.e., SOL → JitoSOL yield).
-    *   `TokenX`: If they hold additional amounts of the paired token.
-    *   Other `Feels Tokens`: If they hold other user-created tokens.
+*   **Fee Income**: Earned from legitimate traders and arbitrageurs passing through the position
+*   **LVR Cost**: Paid to arbitrageurs exploiting stale prices
+*   **Volatility Dependency**: Both fees and LVR increase with volatility, but LVR grows faster ($\propto \sigma^2$)
 
-The amount of `FeelsSOL` borrowed would be carefully calculated to offset the `FeelsSOL` exposure from their LP position, aiming for a net delta of zero with respect to the `FeelsSOL` price.
+
+
 
 ## Benefits for Vol Harvesters
 
-By combining an AMM LP position with a short position in `FeelsSOL` (enabled by the borrowing facility), Vol Harvesters can:
+By committing FeelsSOL to the protocol for volatility monetization, Vol Harvesters can:
 
-*   **Isolate Volatility Premium:** Reduce their exposure to the directional price movements of `FeelsSOL`.
-*   **Profit from Fluctuations:** Continue to earn trading fees from the volatility between `FeelsSOL` and `TokenX`.
-*   **Optimize Capital:** Utilize their LP position as collateral, improving capital efficiency.
+*   **Simplicity**: Engage in volatility harvesting without directly managing complex AMM LP positions or hedging strategies.
+*   **Guaranteed LVR Compensation**: Receive a payment from the protocol designed to offset the estimated LVR costs, providing a more predictable return profile.
+*   **Eligibility for Volatility Yield**: Participate in the upside gains from the protocol's successful volatility monetization.
+*   **Capital Efficiency**: Their committed FeelsSOL is utilized by the protocol, potentially generating returns that exceed simple holding.
+*   **Focus on Core Bet**: Focus purely on the protocol's ability to monetize volatility, rather than managing individual LP risks.
 
-This strategy allows Vol Harvesters to achieve their motivation of profiting from volatility in a more controlled, delta-neutral manner within the Feels Protocol.
+### Strategic Advantages
+
+This approach transforms volatility harvesting into a simplified, protocol-managed offering:
+
+*   **Risk Abstraction**: Vol Harvesters are shielded from the direct complexities and risks of AMM LPing and hedging.
+*   **Predictable Returns**: The LVR compensation provides a more predictable baseline return, making the strategy more attractive.
+*   **Scalability**: The protocol can manage pooled FeelsSOL for volatility monetization at scale, benefiting all participating Vol Harvesters.
+
+This strategy allows Vol Harvesters to achieve their motivation of profiting from volatility in a simplified, protocol-managed manner.

@@ -14,7 +14,9 @@ import Data.Maybe (Maybe(..))
 
 import Protocol.Token (TokenType(..))
 import Protocol.Common (Position, TokenMetadata)
-import Simulation.Engine (SimulationConfig, SimulationResults, AccountProfile(..), MarketScenario(..))
+import Simulation.Engine (SimulationResults)
+import Simulation.Agent (AccountProfile(..), defaultPreferences)
+import Simulation.Scenario (SimulationConfig, MarketScenario(..))
 import UI.ProtocolState (AppRuntime)
 
 --------------------------------------------------------------------------------
@@ -160,7 +162,7 @@ defaultSimulationConfig =
   , priceVolatility: 0.02
   , accountProfiles: [Whale, Aggressive, Conservative]
   , actionFrequency: 1.0  -- Reduced from 2.0
-  , juniorTranchePreference: 0.5  -- 50% preference for junior positions
+  , agentPreferences: defaultPreferences  -- Use default 3D preferences
   }
 
 --------------------------------------------------------------------------------

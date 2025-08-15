@@ -20,9 +20,8 @@ import Data.Maybe (Maybe(..))
 
 -- Import UI modules
 import UI.State (UIState, Action(..), initialUIState)
-import UI.Action (handleAction)
+import UI.Action.Action (handleAction)
 import UI.Component (renderSystemPanel, renderWalletPanel, renderTokenCreatorPanel, renderExchangePanel, renderLoanBookPanel, renderSimulationPanel)
--- Removed unused import
 
 --------------------------------------------------------------------------------
 -- Main Component Definition

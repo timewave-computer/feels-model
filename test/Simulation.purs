@@ -17,7 +17,10 @@ import Test.QuickCheck (Result(..), quickCheck)
 -- Core system imports
 import Protocol.Token (TokenCreationParams, TokenMetadata, createToken)
 -- import Protocol.POL (getTotalPOL)
-import Simulation.Engine (AccountProfile(..), MarketScenario(..), SimulationConfig, SimulationState, initSimulation, runSimulation, executeSimulation, TradingAction(..))
+import Simulation.Engine (SimulationState, initSimulation, runSimulation, executeSimulation)
+import Simulation.Agent (AccountProfile(..), defaultPreferences)
+import Simulation.Scenario (SimulationConfig, MarketScenario(..))
+import Simulation.Action (TradingAction(..))
 import Utils (formatAmount)
 import FFI (currentTime)
 
@@ -35,7 +38,7 @@ createTestConfig =
   , priceVolatility: 0.1
   , accountProfiles: [Conservative, Moderate, Aggressive, Whale, Retail]
   , actionFrequency: 2.0
-  , juniorTranchePreference: 0.3
+  , agentPreferences: defaultPreferences
   }
 
 -- Create test token creation parameters for simulation
@@ -159,8 +162,8 @@ calculateTotalVolume actions =
     addVolume acc action = case action of
       EnterProtocol _ amount _ -> acc + amount
       ExitProtocol _ amount _ -> acc + amount
-      CreateLendOffer _ _ amount _ _ _ _ -> acc + amount  -- Legacy: will become CreateTickPosition
-      TakeLoan _ _ amount _ _ _ -> acc + amount           -- Legacy: will become EnterTickPosition
+      CreateLendOffer _ _ amount _ _ _ _ _ -> acc + amount  -- Legacy: will become CreateTickPosition
+      TakeLoan _ _ amount _ _ _ _ -> acc + amount           -- Legacy: will become EnterTickPosition
       _ -> acc  -- Other actions don't contribute to volume
 
 --------------------------------------------------------------------------------

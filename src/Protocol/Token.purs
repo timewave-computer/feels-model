@@ -79,8 +79,7 @@ unwrapFeelsSOL (FeelsSOLAmount n) = n
 --------------------------------------------------------------------------------
 -- The three types of tokens supported by the protocol
 
--- TokenType is now imported from Protocol.Common to avoid duplication
--- All instances (Eq, Ord, Show) are defined in Protocol.Common
+-- TokenType is defined here with instances for Eq, Ord, Show
 
 -- | Token supply representation combining type and quantity
 type TokenSupply = 

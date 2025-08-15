@@ -18,7 +18,7 @@ module Protocol.Common
   -- Foreign types (needed for CommandResult)
   , TokenMetadata
   , Position
-  , OfferingResult
+  , LaunchResult
   ) where
 
 import Prelude
@@ -32,7 +32,7 @@ import Protocol.Token (TokenType(..))
 
 foreign import data Position :: Type
 foreign import data TokenMetadata :: Type
-foreign import data OfferingResult :: Type
+foreign import data LaunchResult :: Type
 
 --------------------------------------------------------------------------------
 -- TYPE ALIASES
@@ -77,9 +77,9 @@ data CommandResult
       }
   | UnbondingInitiated Int                       -- Position unbonding started (positionId)
   | PositionWithdrawn Int                        -- Position was fully withdrawn (positionId)
-  | OfferingCreated String String                -- New token offering created (poolId, ticker)
-  | OfferingPhaseStarted String String           -- Offering phase began (poolId, phase)
-  | OfferingPhaseCompleted String String         -- Offering phase ended (poolId, phase)
+  | LaunchCreated String String                  -- New token launch created (poolId, ticker)
+  | LaunchPhaseStarted String String             -- Launch phase began (poolId, phase)
+  | LaunchPhaseCompleted String String           -- Launch phase ended (poolId, phase)
 
 --------------------------------------------------------------------------------
 -- QUERY RESULTS
@@ -109,6 +109,6 @@ data QueryResult
       , growthRate24h :: Number
       }
   | TargetTokenInfo (Maybe String)               -- Target token for position
-  | ActiveOfferingsList                          -- Currently active token offerings
+  | ActiveLaunchesList                           -- Currently active token launches
       (Array { poolId :: String, phase :: String })
-  | OfferingStatusResult (Maybe OfferingResult)  -- Current offering status
+  | LaunchStatusResult (Maybe LaunchResult)      -- Current launch status

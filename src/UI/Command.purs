@@ -30,8 +30,8 @@ import Protocol.POL (contribute, getTotalPOL)
 import Protocol.Oracle (takeMarketSnapshot)
 import FFI (currentTime)
 import Protocol.Error (ProtocolError(..))
-import Protocol.Offering as Offering
-import Protocol.Offering (OfferingPhase(..), OfferingConfig, PhaseConfig)
+import Protocol.Launch as Launch
+import Protocol.Launch (LaunchPhase(..), LaunchConfig, PhaseConfig)
 
 -- Import action modules
 import UI.Action.TokenActions as TokenActions
@@ -185,9 +185,9 @@ handleWithdrawPosition user positionId state = do
       let newState = state { timestamp = timestamp }
       pure $ Right $ Tuple newState (PositionWithdrawn positionId)
 
--- | Handle offering creation
-handleCreateOffering :: String -> Number -> Array { phase :: String, tokens :: Number, priceLower :: Number, priceUpper :: Number } -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleCreateOffering ticker totalTokens phases state = do
+-- | Handle launch creation
+handleCreateLaunch :: String -> Number -> Array { phase :: String, tokens :: Number, priceLower :: Number, priceUpper :: Number } -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleCreateLaunch ticker totalTokens phases state = do
   -- Convert phase configs
   let phaseConfigs = map convertPhase phases
       config = { tokenTicker: ticker
@@ -196,15 +196,15 @@ handleCreateOffering ticker totalTokens phases state = do
                , treasuryAddress: "treasury"
                }
   
-  offeringResult <- Offering.initOffering config
-  case offeringResult of
+  launchResult <- Launch.initLaunch config
+  case launchResult of
     Left err -> pure $ Left err
-    Right offeringState -> do
+    Right launchState -> do
       let poolId = ticker <> "/FeelsSOL"
-          newState = state { offerings = Map.insert poolId offeringState state.offerings
+          newState = state { launches = Map.insert poolId launchState state.launches
                            , timestamp = state.timestamp 
                            }
-      pure $ Right $ Tuple newState (OfferingCreated poolId ticker)
+      pure $ Right $ Tuple newState (LaunchCreated poolId ticker)
   where
     convertPhase p = 
       { phase: parsePhase p.phase
@@ -218,43 +218,43 @@ handleCreateOffering ticker totalTokens phases state = do
     parsePhase _ = SpotPhase
     priceToTick price = floor (log price / log 1.0001)
 
--- | Handle offering phase start
-handleStartOfferingPhase :: String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleStartOfferingPhase poolId state = do
-  case Map.lookup poolId state.offerings of
-    Nothing -> pure $ Left $ InvalidCommandError "Offering not found"
-    Just offeringRef -> do
+-- | Handle launch phase start
+handleStartLaunchPhase :: String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleStartLaunchPhase poolId state = do
+  case Map.lookup poolId state.launches of
+    Nothing -> pure $ Left $ InvalidCommandError "Launch not found"
+    Just launchRef -> do
       -- Get pool state
       pool <- lookupPool poolId state.poolRegistry
       case pool of
         Nothing -> pure $ Left $ InvalidCommandError "Pool not found"
         Just poolState -> do
-          result <- Offering.startPhase offeringRef poolState state.currentBlock
+          result <- Launch.startPhase launchRef poolState state.currentBlock
           case result of
             Left err -> pure $ Left err
             Right _ -> do
-              offering <- read offeringRef
-              pure $ Right $ Tuple state (OfferingPhaseStarted poolId (show offering.currentPhase))
+              launch <- read launchRef
+              pure $ Right $ Tuple state (LaunchPhaseStarted poolId (show launch.currentPhase))
 
--- | Handle offering phase completion
-handleCompleteOfferingPhase :: String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
-handleCompleteOfferingPhase poolId state = do
-  case Map.lookup poolId state.offerings of
-    Nothing -> pure $ Left $ InvalidCommandError "Offering not found"
-    Just offeringRef -> do
+-- | Handle launch phase completion
+handleCompleteLaunchPhase :: String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
+handleCompleteLaunchPhase poolId state = do
+  case Map.lookup poolId state.launches of
+    Nothing -> pure $ Left $ InvalidCommandError "Launch not found"
+    Just launchRef -> do
       pool <- lookupPool poolId state.poolRegistry
       case pool of
         Nothing -> pure $ Left $ InvalidCommandError "Pool not found"
         Just poolState -> do
           -- Check if phase is complete
-          isComplete <- Offering.checkPhaseComplete offeringRef poolState
+          isComplete <- Launch.checkPhaseComplete launchRef poolState
           if not isComplete
             then pure $ Left $ InvalidCommandError "Phase not complete"
             else do
-              result <- Offering.completeOffering offeringRef
+              result <- Launch.completeLaunch launchRef
               case result of
                 Left err -> pure $ Left err
-                Right nextPhase -> pure $ Right $ Tuple state (OfferingPhaseCompleted poolId (show nextPhase))
+                Right nextPhase -> pure $ Right $ Tuple state (LaunchPhaseCompleted poolId (show nextPhase))
 
 --------------------------------------------------------------------------------
 -- Command Mapping
@@ -281,12 +281,12 @@ executeCommand cmd state = case cmd of
     handleInitiateUnbonding user positionId state
   WithdrawPosition user positionId ->
     handleWithdrawPosition user positionId state
-  CreateOffering ticker totalTokens phases ->
-    handleCreateOffering ticker totalTokens phases state
-  StartOfferingPhase poolId ->
-    handleStartOfferingPhase poolId state
-  CompleteOfferingPhase poolId ->
-    handleCompleteOfferingPhase poolId state
+  CreateLaunch ticker totalTokens phases ->
+    handleCreateLaunch ticker totalTokens phases state
+  StartLaunchPhase poolId ->
+    handleStartLaunchPhase poolId state
+  CompleteLaunchPhase poolId ->
+    handleCompleteLaunchPhase poolId state
 
 --------------------------------------------------------------------------------
 -- Helper Functions

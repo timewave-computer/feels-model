@@ -16,6 +16,7 @@ module UI.PoolRegistry
   , getPosition
   , getUserPositions
   , getAllPositions
+  , getPositionsRef
   -- , getPoolPositions -- TODO: Need to track pool-position relationship
   ) where
 
@@ -148,6 +149,12 @@ getAllPositions :: PoolRegistry -> Effect (Array Position)
 getAllPositions registryRef = do
   registry <- read registryRef
   pure $ fromFoldable $ Map.values registry.positions
+
+-- | Get positions map as a separate Ref (for compatibility with Protocol modules)
+getPositionsRef :: PoolRegistry -> Effect (Ref (Map PositionId Position))
+getPositionsRef registryRef = do
+  registry <- read registryRef
+  new registry.positions
 
 -- | Get all positions in a specific pool
 -- TODO: Position no longer has poolId field - need to track pool-position relationship separately

@@ -1,5 +1,5 @@
 -- UI Components for the Feels Protocol application
--- Contains all render functions for different panels and UI elements
+-- Contains render functions for different panels and UI elements
 module UI.Component
   ( renderSystemPanel
   , renderWalletPanel

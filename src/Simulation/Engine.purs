@@ -18,10 +18,8 @@
 -- | 4. Update protocol state and capture market snapshots
 -- | 5. Calculate comprehensive results and performance metrics
 module Simulation.Engine
-  ( -- Re-exports from Types module
-    module Simulation.Types
-  -- Re-exports from Agent module
-  , module Simulation.Agent
+  ( -- Re-exports from Agent module
+    module Simulation.Agent
   -- Re-exports from Scenario module  
   , module Simulation.Scenario
   -- Re-exports from Action module
@@ -45,6 +43,7 @@ import Prelude
 import Data.Array (length, range, (:))
 import Data.Foldable (sum, foldl)
 import Data.Map as Map
+import Effect.Ref (new)
 import Effect (Effect)
 import Effect.Console (log)
 
@@ -58,17 +57,16 @@ import Protocol.POL (initPOL)
 import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot, updatePrice)
 
 -- Import simulation subsystem modules
-import Simulation.Types (TradingAction(..))
 import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
 import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
-import Simulation.Action (generateTradingSequence)
-import Simulation.Analysis (SimulationResults, calculateResults, getRecentlyCreatedTokens)
+import Simulation.Action (TradingAction(..), generateTradingSequence)
+import Simulation.Analysis (SimulationResults, calculateResults)
 
 -- Re-export from Agent module
 import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
 
--- Re-export from Types module
-import Simulation.Types (TradingAction(..))
+-- Re-export from Action module
+import Simulation.Action (TradingAction(..), generateTradingSequence, getRecentlyCreatedTokens)
 
 -- Re-export from Scenario module  
 import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
@@ -93,22 +91,23 @@ import Control.Monad (when)
 import Protocol.Common (CommandResult(..))
 import Protocol.Error (ProtocolError)
 import Protocol.Position (Duration(..), Leverage(..))
-import UI.ProtocolState (ProtocolState)
+import UI.ProtocolState (ProtocolState, ProtocolCommand)
 import UI.Command (executeCommand)
 import UI.ProtocolState as PS
+import UI.ProtocolState (ProtocolCommand(..)) as PS
 import Protocol.POL (getAllAllocations)
 import Protocol.Pool (PoolState, swap, SwapParams)
 import UI.PoolRegistry (getAllPools, getPool, updatePool)
 import UI.Account (AccountRegistry, updateChainAccountBalance, getChainAccountBalance)
-import Protocol.Clock (runProtocolBlock)
+import UI.Clock (runProtocolBlock)
 
 --------------------------------------------------------------------------------
 -- SIMULATION STATE DATA STRUCTURES
 --------------------------------------------------------------------------------
 -- Comprehensive state management for complex DeFi protocol simulations
 
--- | Complete simulation state tracking all protocol components and history
--- | Maintains comprehensive view of simulation progress and market conditions
+-- | Complete simulation state tracking agents, pools, protocol state, and trading history
+-- | Maintains real-time view of simulation progress and market dynamics
 type SimulationState =
   { accounts :: Array SimulatedAccount          -- All simulated user accounts with balances
   , poolRegistry :: PoolRegistry                -- Pool registry with all active pools
@@ -118,7 +117,7 @@ type SimulationState =
   , currentPrice :: Number                     -- Current market price from oracle
   , priceHistory :: Array { price :: Number, timestamp :: Number }  -- Historical price data
   , actionHistory :: Array TradingAction       -- Complete history of all executed actions
-  , nextPositionId :: Int                      -- Counter for generating unique position IDs
+  , nextPositionId :: Int                      -- Auto-incrementing counter for position creation
   , polAllocationHistory :: Array { block :: Int, timestamp :: Number, allocations :: Map.Map String Number }  -- POL allocation history by pool over time
   }
 
@@ -326,13 +325,13 @@ executeAction stateEffect action = do
       pure state
       
     -- Lending offer creation: Track action without immediate balance changes
-    CreateLendOffer _ _ _ _ _ _ _ -> do
+    CreateLendOffer _ _ _ _ _ _ _ _ -> do
       -- Position creation handled through pool system integration
       -- Balance changes occur when positions are actually filled
       pure state
     
     -- Loan taking: Track action without immediate balance changes
-    TakeLoan _ _ _ _ _ _ -> do
+    TakeLoan _ _ _ _ _ _ _ -> do
       -- Loan execution handled through pool system integration
       -- Balance changes occur when loans are actually executed
       pure state
@@ -452,7 +451,7 @@ runProtocolSimulationBlock protocolRef config simStateEffect blockNum = do
   log $ "Market conditions: price " <> show simState.currentPrice <> " -> " <> show newPrice
   
   -- Step 2: Run protocol block (this advances the blockchain)
-  polSnapshot <- runProtocolBlock protocolRef newPrice config.scenario blockNum
+  polSnapshot <- runProtocolBlock protocolRef newPrice blockNum
   
   -- Step 3: Read updated protocol state
   protocolState <- read protocolRef
@@ -534,7 +533,7 @@ executeAgentOrder protocolRef simStateEffect action = do
           pure simState
               
     -- Agent creates lending position
-    CreateLendOffer userId lendAsset amount collateralAsset collateralAmount duration _targetToken -> do
+    CreateLendOffer userId lendAsset amount collateralAsset collateralAmount duration _leverage _targetToken -> do
       let protocolLeverage = Senior  -- Default leverage for simulation
       
       result <- executeCommand 
@@ -554,7 +553,7 @@ executeAgentOrder protocolRef simStateEffect action = do
           pure simState
               
     -- Agent takes loan (executes swap through pool)
-    TakeLoan userId lendAsset amount collateralAsset _collateralAmount _duration -> do
+    TakeLoan userId lendAsset amount collateralAsset _collateralAmount _duration _leverage -> do
       -- Determine pool for this token pair
       let poolId = case Tuple lendAsset collateralAsset of
             Tuple (Token ticker) FeelsSOL -> ticker <> "/FeelsSOL"

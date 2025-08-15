@@ -18,8 +18,9 @@
 -- | - Position Management: Creation, modification, and closure of positions
 -- | - Timing Actions: Wait blocks for realistic pacing and sequencing
 module Simulation.Action
-  ( module Simulation.Types
+  ( TradingAction(..)
   , generateTradingSequence
+  , getRecentlyCreatedTokens
   ) where
 
 import Prelude
@@ -35,14 +36,12 @@ import Data.Enum (toEnum)
 
 -- Core protocol system imports
 import Protocol.Token (TokenType(..))
-import Protocol.Position (Duration(..), monthlyDuration, spotDuration)
+import Protocol.Position (Duration(..), Leverage(..), monthlyDuration, spotDuration)
 import Utils (formatAmount)
 
 -- Import simulation subsystem dependencies
-import Simulation.Types (TradingAction(..))
-import Simulation.Agent (AccountProfile(..), SimulatedAccount)
-import Simulation.Scenario (SimulationConfig, MarketScenario(..), generateMarketScenario, getVolatilityMultiplier, getMarketTradingBias, getActionFrequencyMultiplier, getSizingMultiplier, getMarketExitBias, getOpportunityMultiplier, getPanicMultiplier)
-import Simulation.Analysis (getRecentlyCreatedTokens)
+import Simulation.Agent (AccountProfile(..), SimulatedAccount, AgentPreferences, sampleFromPreferences)
+import Simulation.Scenario (SimulationConfig, MarketScenario(..), generateMarketScenario, getVolatilityMultiplier, getMarketTradingBias, getActionFrequencyMultiplier, getSizingMultiplier, getMarketExitBias, getOpportunityMultiplier, getPanicMultiplier, adjustPreferencesForScenario)
 
 -- Oracle integration for market data
 import Protocol.Oracle (Oracle, takeMarketSnapshot)
@@ -56,7 +55,40 @@ type ActionSimulationState =
   , oracle :: Oracle                     -- Price oracle for market data
   }
 
--- TradingAction type now imported from Simulation.Types
+--------------------------------------------------------------------------------
+-- TRADING ACTION TYPE DEFINITIONS
+--------------------------------------------------------------------------------
+-- Comprehensive action types representing all possible protocol interactions
+
+-- | Complete set of trading actions representing all protocol interactions
+-- | Each action type captures specific user behavior patterns and economic activity
+data TradingAction
+  = EnterProtocol String Number TokenType        -- Protocol entry: User converts assets to FeelsSOL
+  | ExitProtocol String Number TokenType         -- Protocol exit: User converts FeelsSOL back to assets
+  | CreateToken String String String              -- Token creation: User launches new token with ticker/name
+  | CreateLendOffer String TokenType Number TokenType Number Duration Leverage (Maybe String)  -- Position creation: User creates lending offer
+  | TakeLoan String TokenType Number TokenType Number Duration Leverage         -- Position creation: User takes existing lending offer
+  | ClosePosition String Int                      -- Position management: User closes existing position
+  | WaitBlocks Int                               -- Timing control: Simulate realistic action pacing
+
+derive instance eqTradingAction :: Eq TradingAction
+
+-- | Human-readable action descriptions for logging and analysis
+instance showTradingAction :: Show TradingAction where
+  show (EnterProtocol user amount asset) = user <> " enters protocol with " <> formatAmount amount <> " " <> show asset
+  show (ExitProtocol user amount asset) = user <> " exits protocol with " <> formatAmount amount <> " " <> show asset
+  show (CreateToken user ticker name) = user <> " creates token " <> ticker <> " (" <> name <> ")"
+  show (CreateLendOffer user lendAsset amount collAsset ratio term leverage targetToken) = 
+    user <> " offers " <> formatAmount amount <> " " <> show lendAsset <> 
+    " @ " <> formatAmount ratio <> " " <> show collAsset <> " (" <> show term <> ", " <> show leverage <> ")" <>
+    case targetToken of
+      Just ticker -> " for token " <> ticker
+      Nothing -> ""
+  show (TakeLoan user borrowAsset amount collAsset collAmount term leverage) = 
+    user <> " borrows " <> formatAmount amount <> " " <> show borrowAsset <> 
+    " with " <> formatAmount collAmount <> " " <> show collAsset <> " (" <> show term <> ", " <> show leverage <> ")"
+  show (ClosePosition user posId) = user <> " closes position #" <> show posId
+  show (WaitBlocks blocks) = "Wait " <> show blocks <> " blocks for realistic pacing"
 
 --------------------------------------------------------------------------------
 -- COMPREHENSIVE TRADING SEQUENCE GENERATION ENGINE
@@ -210,11 +242,15 @@ generateTokenSwapAction config state account = do
               -- Market making spread: 5-15% above market price for buy orders
               priceWithSpread = currentMarketPrice * (1.05 + priceRand * 0.1)
           
+          -- Use 3D preferences to determine position parameters
+          let adjustedPrefs = adjustPreferencesForScenario config.scenario config.agentPreferences
+          positionConfig <- sampleFromPreferences adjustedPrefs
+          
           -- 50% chance to create offer, 50% chance to take existing offer
           actionChoice <- random
           if actionChoice < 0.5
-            then pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread spotDuration Nothing
-            else pure $ TakeLoan account.id (Token tokenTicker) actualAmount FeelsSOL actualAmount spotDuration
+            then pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount positionConfig.lendAsset priceWithSpread positionConfig.duration positionConfig.leverage Nothing
+            else pure $ TakeLoan account.id (Token tokenTicker) actualAmount positionConfig.lendAsset actualAmount positionConfig.duration positionConfig.leverage
           
         -- Execute sell orders (Token → FeelsSOL)
         else if account.feelsSOLBalance >= 20.0
@@ -239,11 +275,15 @@ generateTokenSwapAction config state account = do
                 -- Market making spread: 5-15% below market price for sell orders
                 priceWithSpread = currentMarketPrice * (0.95 - priceRand * 0.1)
             
+            -- Use 3D preferences to determine position parameters
+            let adjustedPrefs = adjustPreferencesForScenario config.scenario config.agentPreferences
+            positionConfig <- sampleFromPreferences adjustedPrefs
+            
             -- 50% chance to create offer, 50% chance to take existing offer
             actionChoice <- random
             if actionChoice < 0.5
-              then pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread spotDuration Nothing
-              else pure $ TakeLoan account.id FeelsSOL actualAmount (Token tokenTicker) actualAmount spotDuration
+              then pure $ CreateLendOffer account.id positionConfig.lendAsset actualAmount (Token tokenTicker) priceWithSpread positionConfig.duration positionConfig.leverage Nothing
+              else pure $ TakeLoan account.id positionConfig.lendAsset actualAmount (Token tokenTicker) actualAmount positionConfig.duration positionConfig.leverage
           else pure $ WaitBlocks 1  -- Insufficient balance for trading
 
 --------------------------------------------------------------------------------
@@ -355,8 +395,29 @@ generateRandomAction config state = do
                 Just tokenTicker -> do
                   if account.feelsSOLBalance >= 100.0
                     then do
+                      -- Use preferences to determine staking parameters
+                      let adjustedPrefs = adjustPreferencesForScenario config.scenario config.agentPreferences
+                      positionConfig <- sampleFromPreferences adjustedPrefs
+                      
                       -- Standard 100 FeelsSOL stake for token launch support
-                      pure $ CreateLendOffer account.id FeelsSOL 100.0 (Token tokenTicker) 100.0 Monthly (Just tokenTicker)
+                      -- Force Monthly duration for token staking to support launches
+                      pure $ CreateLendOffer account.id positionConfig.lendAsset 100.0 (Token tokenTicker) 100.0 Monthly positionConfig.leverage (Just tokenTicker)
                     else pure $ WaitBlocks 1  -- Insufficient balance for staking
                 Nothing -> pure $ WaitBlocks 1  -- Token selection failed
         else pure $ WaitBlocks 1  -- Default wait action for pacing
+
+--------------------------------------------------------------------------------
+-- ACTION ANALYSIS UTILITIES
+--------------------------------------------------------------------------------
+-- Supporting functions for action history analysis
+
+-- | Extract all token tickers created during the simulation
+-- | Used for tracking token ecosystem development and trading opportunities
+getRecentlyCreatedTokens :: Array TradingAction -> Array String
+getRecentlyCreatedTokens actions = 
+  foldl extractToken [] actions
+  where
+    -- | Extract token ticker from CreateToken actions
+    extractToken acc action = case action of
+      CreateToken _ ticker _ -> ticker : acc  -- Accumulate all created token tickers
+      _ -> acc                                -- Ignore non-creation actions

@@ -1,6 +1,6 @@
 -- UI Action Handling for the Feels Protocol application
 -- Contains all action handling logic for user interactions
-module UI.Action
+module UI.Action.Action
   ( handleAction
   , validateTokenInput
   ) where
@@ -13,7 +13,7 @@ import Data.String.Common (trim)
 import Data.String as String
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Data.Tuple (Tuple(..))
+import Data.Tuple (Tuple(..), snd)
 import Effect.Aff.Class (class MonadAff)
 import Effect.Console (log)
 import Effect.Ref (read, write)
@@ -34,7 +34,8 @@ import Protocol.Token (TokenType(..))
 import Protocol.Position (spotDuration, monthlyDuration, Leverage(..))
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
 import Simulation.Engine (initSimulationWithPoolRegistry, executeSimulation, calculateResults, runProtocolSimulation)
-import Protocol.Metrics (getProtocolMetrics)
+import Protocol.Metric (getPOLMetrics, getProtocolTotalFeesCollected)
+import UI.PoolRegistry (getAllPools)
 
 --------------------------------------------------------------------------------
 -- Main Action Handler
@@ -339,11 +340,14 @@ handleRunSimulation = do
         results <- H.liftEffect $ calculateResults state.simulationConfig finalState
       
         -- Get actual protocol metrics including POL reserves
-        protocolMetrics <- H.liftEffect $ getProtocolMetrics finalProtocolState
+        polMetrics <- H.liftEffect $ getPOLMetrics finalProtocolState.polState
+        pools <- H.liftEffect $ getAllPools finalProtocolState.poolRegistry
+        let poolStates = map snd pools
+        totalFees <- H.liftEffect $ getProtocolTotalFeesCollected poolStates
       
         H.liftEffect $ log $ "Simulation completed with " <> show results.totalUsers <> " users"
-        H.liftEffect $ log $ "POL reserves: " <> show protocolMetrics.polReserves
-        H.liftEffect $ log $ "Total fees collected: " <> show protocolMetrics.totalFeesCollected
+        H.liftEffect $ log $ "POL reserves: " <> show polMetrics.totalValue
+        H.liftEffect $ log $ "Total fees collected: " <> show totalFees
       
         -- Process simulation results with proper POL floor data
         priceHistory <- H.liftEffect $ processSimulationResults protocol finalState results

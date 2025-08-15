@@ -1,6 +1,6 @@
--- | Token registry management for the UI.
--- | Manages the global registry of all tokens in the system.
--- | In Solana, token metadata would be stored in Metaplex or similar.
+-- | Token registry for managing system and user-created tokens.
+-- | Maintains metadata for all tokens available in the protocol.
+-- | In production, token metadata would be stored on-chain.
 module UI.TokenRegistry
   ( TokenRegistry
   , initTokenRegistry
@@ -32,7 +32,7 @@ initTokenRegistry = do
   let systemTokens = getSystemTokens
   new systemTokens
 
--- | Get built-in system tokens
+-- | System tokens pre-registered in the protocol
 getSystemTokens :: Array TokenMetadata
 getSystemTokens = 
   [ { id: 1

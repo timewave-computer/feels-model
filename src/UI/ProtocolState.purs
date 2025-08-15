@@ -40,7 +40,7 @@ import Protocol.POL (POLState, initPOL, contribute)
 import Protocol.Oracle (Oracle, initOracle)
 import Protocol.Incentive (MarketDynamics, initMarketDynamics)
 import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance)
-import Protocol.Offering (OfferingState)
+import Protocol.Launch (LaunchState)
 import Protocol.Error (ProtocolError)
 import FFI (currentTime)
 -- Commands module will be imported by consumers to avoid circular dependency
@@ -65,11 +65,11 @@ data ProtocolCommand
     -- ^ user, positionId
   | WithdrawPosition String Int   
     -- ^ user, positionId
-  | CreateOffering String Number (Array { phase :: String, tokens :: Number, priceLower :: Number, priceUpper :: Number })
+  | CreateLaunch String Number (Array { phase :: String, tokens :: Number, priceLower :: Number, priceUpper :: Number })
     -- ^ ticker, totalTokens, phases
-  | StartOfferingPhase String
+  | StartLaunchPhase String
     -- ^ poolId
-  | CompleteOfferingPhase String
+  | CompleteLaunchPhase String
     -- ^ poolId
 
 derive instance eqProtocolCommand :: Eq ProtocolCommand
@@ -85,8 +85,8 @@ data IndexerQuery
   | GetSystemStats
   | GetPOLMetrics
   | GetPositionTargetToken Int
-  | GetActiveOfferings
-  | GetOfferingStatus String
+  | GetActiveLaunches
+  | GetLaunchStatus String
 
 derive instance eqIndexerQuery :: Eq IndexerQuery
 
@@ -103,7 +103,7 @@ type ProtocolState =
   , oracle :: Oracle
   , marketDynamics :: MarketDynamics
   , accounts :: AccountRegistry
-  , offerings :: Map String OfferingState  -- Pool ID -> Offering state
+  , launches :: Map String LaunchState     -- Pool ID -> Launch state
   , positionTokenMap :: Array { positionId :: Int, tokenTicker :: String }
   , currentUser :: String  -- For demo purposes, in production would be wallet-based
   , currentBlock :: Int     -- Current block number
@@ -162,7 +162,7 @@ initStateImpl = do
         , oracle: oracle
         , marketDynamics: marketDynamics
         , accounts: accounts
-        , offerings: Map.empty
+        , launches: Map.empty
         , positionTokenMap: []
         , currentUser: "demo-user"
         , currentBlock: 1000
@@ -182,19 +182,13 @@ initStateImpl = do
     , feeGrowthGlobal1X128: 0.0
     , protocolFee: 30.0
     , unlocked: true
-    , offering: Nothing
+    , launch: Nothing
     , leverageState: 
       { totalValue: 10000.0
-      , leverageGroups:
-        [ { leverage: 1.0   -- Senior
-          , value: 0.0
-          , shares: 0.0
-          }
-        , { leverage: 3.0   -- Junior
-          , value: 0.0
-          , shares: 0.0
-          }
-        ]
+      , seniorValue: 0.0
+      , seniorShares: 0.0
+      , juniorValue: 0.0
+      , juniorShares: 0.0
       }
     , totalValue: 10000.0
     , lastUpdateBlock: 0

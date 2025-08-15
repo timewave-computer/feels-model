@@ -10,11 +10,10 @@ import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
 
-import Protocol.Offering (OfferingPhase(..))
+import Protocol.Launch (LaunchPhase(..))
 import Utils (formatAmount)
 
--- Use OfferingPhase instead of LaunchPhase
-type LaunchPhase = OfferingPhase
+-- LaunchPhase imported from Protocol.Launch
 type BatchResult = 
   { success :: Boolean
   , batchNumber :: Int

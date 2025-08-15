@@ -1,6 +1,6 @@
--- | FeelsSOL module for managing the synthetic SOL token.
--- | This module manages the conversion between JitoSOL and FeelsSOL,
--- | including synthetic asset creation and oracle-driven pricing.
+-- | FeelsSOL synthetic token system for protocol entry and exit.
+-- | Manages JitoSOL ↔ FeelsSOL conversions with buffer management,
+-- | oracle pricing, and solvency monitoring.
 module Protocol.FeelsSOL
   ( FeelsSOLState
   , OraclePrice
@@ -14,7 +14,6 @@ module Protocol.FeelsSOL
   , getTotalMinted
   , getOraclePrice
   , getTotalSupply
-  , getSystemHealth
   , getBufferStatus
   , rebalanceBuffer
   , checkSolvency
@@ -67,10 +66,10 @@ type FeelsSOLState =
   , priceOracle :: Effect Number           -- JitoSOL/SOL price oracle
   , lastOracleUpdate :: Ref Number         -- Last oracle update timestamp
   , cachedPrice :: Ref (Maybe OraclePrice) -- Cached oracle price
-  , entryFee :: Number                     -- Fee for entering (e.0.001 = 0.1%)
-  , exitFee :: Number                      -- Fee for exiting (e.0.002 = 0.2%)
-  , polAllocationRate :: Number            -- Portion of fees going to POL (e.0.25 = 25%)
-  , bufferTargetRatio :: Number            -- Target buffer as % of backing (e.0.10 = 10%)
+  , entryFee :: Number                     -- Fee for JitoSOL → FeelsSOL conversion
+  , exitFee :: Number                      -- Fee for FeelsSOL → JitoSOL conversion
+  , polAllocationRate :: Number            -- Portion of fees allocated to POL system
+  , bufferTargetRatio :: Number            -- Target withdrawal buffer ratio
   }
 
 --------------------------------------------------------------------------------
@@ -328,17 +327,6 @@ getTotalLocked state = read state.totalJitoSOLBacking
 -- Get total FeelsSOL minted
 getTotalMinted :: FeelsSOLState -> Effect Number
 getTotalMinted state = getTotalSupply state
-
--- | Get system health metrics including buffer status
--- | Provides a high-level view of the FeelsSOL system's status
-getSystemHealth :: FeelsSOLState -> Effect { collateralRatio :: Number, totalLocked :: Number, totalMinted :: Number, bufferRatio :: Number, isHealthy :: Boolean }
-getSystemHealth state = do
-  ratio <- getCollateralRatio state
-  locked <- getTotalLocked state
-  minted <- getTotalMinted state
-  bufferStatus <- getBufferStatus state
-  let isHealthy = ratio >= 1.0 && bufferStatus.isHealthy  -- System healthy if collateralized and buffer adequate
-  pure { collateralRatio: ratio, totalLocked: locked, totalMinted: minted, bufferRatio: bufferStatus.ratio, isHealthy }
 
 --------------------------------------------------------------------------------
 -- BUFFER MANAGEMENT FUNCTIONS

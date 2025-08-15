@@ -13,8 +13,8 @@ module UI.Query
   , handleGetSystemStats
   , handleGetPOLMetrics
   , handleGetPositionTargetToken
-  , handleGetActiveOfferings
-  , handleGetOfferingStatus
+  , handleGetActiveLaunches
+  , handleGetLaunchStatus
   ) where
 
 import Prelude
@@ -28,11 +28,12 @@ import Unsafe.Coerce (unsafeCoerce)
 -- Import protocol modules for data access
 import UI.TokenRegistry (getAllTokens)
 import UI.PoolRegistry (getUserPositions, getAllPositions, getPool)
-import Protocol.POL (getTotalPOL, getPOLMetrics, calculateGrowthRate24h)
+import Protocol.POL (getTotalPOL)
+import Protocol.Metric (getPOLMetrics, calculateGrowthRate24h)
 import Protocol.Pool (syncPositionValue)
 import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
 import Protocol.Error (ProtocolError(..))
-import Protocol.Offering as Offering
+import Protocol.Launch as Launch
 import Data.Map as Map
 import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse)
@@ -43,7 +44,7 @@ import Protocol.Position as P
 
 -- Import app state and result types
 import UI.ProtocolState (ProtocolState, IndexerQuery(..))
-import Protocol.Common (QueryResult(..), TokenMetadata, Position, OfferingResult)
+import Protocol.Common (QueryResult(..), TokenMetadata, Position, LaunchResult)
 import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------
@@ -62,8 +63,8 @@ executeQuery query state = case query of
   GetSystemStats -> handleGetSystemStats state
   GetPOLMetrics -> handleGetPOLMetrics state
   GetPositionTargetToken positionId -> handleGetPositionTargetToken positionId state
-  GetActiveOfferings -> handleGetActiveOfferings state
-  GetOfferingStatus poolId -> handleGetOfferingStatus poolId state
+  GetActiveLaunches -> handleGetActiveLaunches state
+  GetLaunchStatus poolId -> handleGetLaunchStatus poolId state
 
 --------------------------------------------------------------------------------
 -- Query Handlers
@@ -174,28 +175,28 @@ handleGetPositionTargetToken positionId state = do
     Just mapping -> pure $ Right $ TargetTokenInfo (Just mapping.tokenTicker)
     Nothing -> pure $ Right $ TargetTokenInfo Nothing
 
--- | Handle active offerings query
-handleGetActiveOfferings :: ProtocolState -> Effect (Either ProtocolError QueryResult)
-handleGetActiveOfferings state = do
-  -- Get all offerings from the map
-  let offeringPairs = Map.toUnfoldable state.offerings :: Array (Tuple String Offering.OfferingState)
-  activeOfferings <- traverse (\(Tuple poolId offeringRef) -> do
-    offering <- read offeringRef
-    if offering.isActive
-      then pure $ Just { poolId, phase: show offering.currentPhase }
+-- | Handle active launches query
+handleGetActiveLaunches :: ProtocolState -> Effect (Either ProtocolError QueryResult)
+handleGetActiveLaunches state = do
+  -- Get all launches from the map
+  let launchPairs = Map.toUnfoldable state.launches :: Array (Tuple String Launch.LaunchState)
+  activeLaunches <- traverse (\(Tuple poolId launchRef) -> do
+    launch <- read launchRef
+    if launch.isActive
+      then pure $ Just { poolId, phase: show launch.currentPhase }
       else pure Nothing
-  ) offeringPairs
+  ) launchPairs
   
-  let filtered = Array.mapMaybe identity activeOfferings
-  pure $ Right $ ActiveOfferingsList filtered
+  let filtered = Array.mapMaybe identity activeLaunches
+  pure $ Right $ ActiveLaunchesList filtered
 
--- | Handle offering status query
-handleGetOfferingStatus :: String -> ProtocolState -> Effect (Either ProtocolError QueryResult)
-handleGetOfferingStatus poolId state = do
-  case Map.lookup poolId state.offerings of
-    Nothing -> pure $ Right $ OfferingStatusResult Nothing
-    Just offeringRef -> do
-      result <- Offering.getOfferingStatus offeringRef
-      -- Convert from Offering.OfferingResult to foreign OfferingResult type
-      let convertedResult = unsafeCoerce result :: OfferingResult
-      pure $ Right $ OfferingStatusResult (Just convertedResult)
+-- | Handle launch status query
+handleGetLaunchStatus :: String -> ProtocolState -> Effect (Either ProtocolError QueryResult)
+handleGetLaunchStatus poolId state = do
+  case Map.lookup poolId state.launches of
+    Nothing -> pure $ Right $ LaunchStatusResult Nothing
+    Just launchRef -> do
+      result <- Launch.getLaunchStatus launchRef
+      -- Convert from Launch.LaunchResult to foreign LaunchResult type
+      let convertedResult = unsafeCoerce result :: LaunchResult
+      pure $ Right $ LaunchStatusResult (Just convertedResult)

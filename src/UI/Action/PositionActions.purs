@@ -6,6 +6,7 @@ module UI.Action.PositionActions
   , getPositionValue
   , initiateUnbonding
   , withdrawPosition
+  , createVolHarvesterPosition
   ) where
 
 import Prelude
@@ -17,7 +18,7 @@ import Data.Int (toNumber)
 -- Import types
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..))
-import Protocol.Position (Position, Duration(..), Leverage(..), isExpired, leverageMultiplier, isSpot)
+import Protocol.Position (Position, Duration(..), Leverage(..), isExpired, leverageMultiplier, isSpot, isVolHarvesterPosition)
 import Protocol.Position as P
 import Data.Array ((:))
 import UI.PoolRegistry (getPosition, removePosition, addPosition)
@@ -50,7 +51,7 @@ createPosition ::
   Maybe String ->     -- target token for staking
   ProtocolState ->         -- current state
   Effect (Either ProtocolError { position :: Position, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
-createPosition user _lendAsset amount _collateralAsset _collateralAmount duration leverage rollover targetToken state = do
+createPosition user lendAsset amount collateralAsset _collateralAmount duration leverage rollover targetToken state = do
   -- Validate amount
   if amount <= 0.0
     then pure $ Left $ InvalidAmountError amount
@@ -76,6 +77,8 @@ createPosition user _lendAsset amount _collateralAsset _collateralAmount duratio
             price
             duration
             leverage
+            lendAsset
+            collateralAsset
             rollover
             shares
             currentBlock
@@ -89,6 +92,37 @@ createPosition user _lendAsset amount _collateralAsset _collateralAmount duratio
             Nothing -> state.positionTokenMap
       
       pure $ Right { position, positionTokenMap: newMapping }
+
+-- | Create a position optimized for volatility harvesting
+-- | This creates a monthly liquidity position that:
+-- | - Uses Monthly duration (28-day commitment)
+-- | - Provides liquidity to the pool
+-- | - Receives LVR compensation and volatility yield
+-- | - Can optionally enable rollover for continuous yield
+createVolHarvesterPosition :: 
+  String ->           -- user
+  Number ->           -- amount of FeelsSOL to commit
+  Leverage ->         -- leverage tier (Senior or Junior)
+  Boolean ->          -- enable auto-rollover
+  ProtocolState ->    -- current state
+  Effect (Either ProtocolError { position :: Position, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
+createVolHarvesterPosition user amount leverage rollover state = do
+  -- Volatility harvesting positions:
+  -- - FeelsSOL as lend asset
+  -- - Monthly duration for LVR compensation
+  -- - Optional rollover for continuous harvesting
+  -- - No specific target token
+  createPosition 
+    user 
+    FeelsSOL        -- lend asset (FeelsSOL for liquidity)
+    amount          -- amount to commit
+    FeelsSOL        -- collateral asset (same as lend asset for liquidity provision)
+    amount          -- collateral amount (1:1 for liquidity)
+    Monthly         -- duration (Monthly for LVR compensation)
+    leverage        -- leverage tier chosen by user
+    rollover        -- rollover chosen by user
+    Nothing         -- no target token
+    state
 
 --------------------------------------------------------------------------------
 -- Position Management

@@ -28,6 +28,7 @@ module Simulation.Scenario
   , getMarketExitBias
   , getOpportunityMultiplier
   , getPanicMultiplier
+  , adjustPreferencesForScenario
   ) where
 
 import Prelude
@@ -35,8 +36,9 @@ import Data.Int as Int
 import Effect (Effect)
 import Effect.Random (random)
 
--- Import AccountProfile from Agent module for configuration
-import Simulation.Agent (AccountProfile)
+-- Import AccountProfile and AgentPreferences from Agent module for configuration
+import Simulation.Agent (AccountProfile, AgentPreferences)
+import Data.Ord (min)
 
 --------------------------------------------------------------------------------
 -- MARKET SCENARIO TYPE DEFINITIONS
@@ -68,17 +70,17 @@ instance showMarketScenario :: Show MarketScenario where
 --------------------------------------------------------------------------------
 -- Comprehensive configuration for realistic DeFi protocol simulations
 
--- | Complete simulation configuration combining market conditions with protocol parameters
--- | Controls all aspects of simulation from agent behavior to market dynamics
+-- | Complete simulation configuration defining market scenarios and agent parameters
+-- | Controls market dynamics, agent populations, and simulation duration
 type SimulationConfig =
-  { scenario :: MarketScenario                  -- Market regime to simulate
-  , numAccounts :: Int                          -- Population size for simulation
-  , simulationBlocks :: Int                     -- Duration of simulation in blocks
-  , initialJitoSOLPrice :: Number               -- Starting price reference point
-  , priceVolatility :: Number                   -- Volatility multiplier (0.0-1.0)
-  , accountProfiles :: Array AccountProfile     -- Distribution of agent types
-  , actionFrequency :: Number                   -- Average actions per block (0.0-10.0)
-  , juniorTranchePreference :: Number           -- Agent preference for junior positions (0.0-1.0)
+  { scenario :: MarketScenario                  -- Current market conditions being simulated
+  , numAccounts :: Int                          -- Number of agent accounts in simulation
+  , simulationBlocks :: Int                     -- Total duration in blockchain blocks
+  , initialJitoSOLPrice :: Number               -- Starting JitoSOL price for simulation
+  , priceVolatility :: Number                   -- Base volatility factor (0.0-1.0)
+  , accountProfiles :: Array AccountProfile     -- Mix of trading profiles (Whale, Aggressive, etc)
+  , actionFrequency :: Number                   -- Base trading actions per block
+  , agentPreferences :: AgentPreferences        -- 3D preference cube for position parameters
   }
 
 --------------------------------------------------------------------------------
@@ -224,3 +226,60 @@ getPanicMultiplier scenario = case scenario of
   RecoveryMarket -> 0.3  -- 30% normal profit taking
   BullMarket -> 0.3      -- 30% normal profit taking
   SidewaysMarket -> 0.3  -- 30% normal profit taking
+
+--------------------------------------------------------------------------------
+-- PREFERENCE ADJUSTMENT FUNCTIONS
+--------------------------------------------------------------------------------
+-- Functions that modify agent preferences based on market conditions
+
+-- | Adjust preferences based on market scenario
+-- | Different market conditions shift agent risk tolerances
+adjustPreferencesForScenario :: MarketScenario -> AgentPreferences -> AgentPreferences
+adjustPreferencesForScenario scenario prefs = case scenario of
+  CrashScenario ->
+    -- Flight to safety: prefer flash loans, senior positions, liquid assets
+    prefs
+      { timeTolerances = prefs.timeTolerances
+          { flashProbability = min 1.0 (prefs.timeTolerances.flashProbability * 2.0)
+          , monthlyProbability = prefs.timeTolerances.monthlyProbability * 0.3
+          , spotProbability = 1.0 - (min 1.0 (prefs.timeTolerances.flashProbability * 2.0)) - (prefs.timeTolerances.monthlyProbability * 0.3)
+          }
+      , leverageTolerance = prefs.leverageTolerance
+          { seniorProbability = min 1.0 (prefs.leverageTolerance.seniorProbability * 1.5)
+          , juniorProbability = 1.0 - min 1.0 (prefs.leverageTolerance.seniorProbability * 1.5)
+          }
+      , liquidityTolerance = prefs.liquidityTolerance
+          { feelsSOLProbability = min 1.0 (prefs.liquidityTolerance.feelsSOLProbability * 1.3)
+          , tokenProbability = 1.0 - min 1.0 (prefs.liquidityTolerance.feelsSOLProbability * 1.3)
+          }
+      }
+  
+  BullMarket ->
+    -- Risk-on: accept longer terms, higher leverage, illiquid tokens
+    prefs
+      { timeTolerances = prefs.timeTolerances
+          { flashProbability = prefs.timeTolerances.flashProbability * 0.5
+          , monthlyProbability = min 1.0 (prefs.timeTolerances.monthlyProbability * 1.5)
+          , spotProbability = 1.0 - (prefs.timeTolerances.flashProbability * 0.5) - min 1.0 (prefs.timeTolerances.monthlyProbability * 1.5)
+          }
+      , leverageTolerance = prefs.leverageTolerance
+          { seniorProbability = prefs.leverageTolerance.seniorProbability * 0.7
+          , juniorProbability = 1.0 - (prefs.leverageTolerance.seniorProbability * 0.7)
+          }
+      , liquidityTolerance = prefs.liquidityTolerance
+          { feelsSOLProbability = prefs.liquidityTolerance.feelsSOLProbability * 0.8
+          , tokenProbability = 1.0 - (prefs.liquidityTolerance.feelsSOLProbability * 0.8)
+          }
+      }
+  
+  VolatileMarket ->
+    -- Mixed: more flash loans for arbitrage, balanced other preferences
+    prefs
+      { timeTolerances = prefs.timeTolerances
+          { flashProbability = min 1.0 (prefs.timeTolerances.flashProbability * 1.5)
+          , monthlyProbability = prefs.timeTolerances.monthlyProbability * 0.8
+          , spotProbability = 1.0 - min 1.0 (prefs.timeTolerances.flashProbability * 1.5) - (prefs.timeTolerances.monthlyProbability * 0.8)
+          }
+      }
+  
+  _ -> prefs  -- No adjustment for other scenarios

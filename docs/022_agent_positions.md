@@ -8,77 +8,74 @@ This document maps market participants (agents) to their preferences across thre
 
 Each agent type is characterized by their preferences/tolerances across three risk dimensions:
 
-### 1. Time Preference → Credit Risk Tolerance
-- **Long**: Tolerance for credit risk (willing to lock capital with counterparty)
-- **Short**: Sensitivity to credit risk (needs immediate access to capital)
+### 1. Time Tolerance → Credit Risk Sensitivity
+- **Infinite**: Theoretical tolerance for unbounded credit risk (Spot liquidity providers)
+- **High**: Tolerance for credit risk (willing to lend for 28-day terms)
+- **Low**: Sensitivity to credit risk (requires immediate return via Flash loans)
 
-### 2. Leverage Preference → Directional Risk Appetite  
-- **High**: Seeks magnified exposure to price movements
-- **Low**: Avoids amplified directional risk
+### 2. Leverage Tolerance → Principal Volatility Sensitivity
+- **High**: Tolerance for principal volatility (accepts 3x price movements in both directions)
+- **Low**: Sensitivity to principal volatility (prefers stable 1x exposure)
 
-### 3. Liquidity Preference → Liquidity Risk Sensitivity
-- **Strong**: Sensitivity to liquidity risk (needs deep markets, avoids slippage)
-- **Weak**: Tolerance for liquidity risk (accepts wide spreads, thin markets)
+### 3. Liquidity Tolerance → Liquidity Risk Sensitivity
+- **High**: Tolerance for liquidity risk (willing to hold/lend illiquid tokens)
+- **Low**: Sensitivity to liquidity risk (prefers to hold/lend liquid FeelsSOL)
 
 ## Agent Profiles in 3D Space
 
 ### Visualization
 ```
-                    Liquidity Preference
-                    Strong        Weak
+                    Liquidity Tolerance
+                    Low          High
                       │            │
-    Time: Long    ┌───┼────────────┼───┐
-    Lev: Low      │ Hodler     Issuer │
+    Time: High    ┌───┼────────────┼───┐
+    Lev: Low      │Vol Harvester  Hodler
+                  │   │           Issuer
                   └───┼────────────┼───┘
                       │            │
-    Time: Long    ┌───┼────────────┼───┐
-    Lev: High     │Vol Harvester│   │
+    Time: Low     ┌───┼────────────┼───┐
+    Lev: Low      │ Sniper         │   │
                   └───┼────────────┼───┘
                       │            │
-    Time: Short   ┌───┼────────────┼───┐
-    Lev: Low      │ Sniper        │   │
-                  └───┼────────────┼───┘
-                      │            │
-    Time: Short   ┌───┼────────────┼───┐
-    Lev: High     │          Momentum │
-                  │           Trader  │
+    Time: Low     ┌───┼────────────┼───┐
+    Lev: High     │ Momentum Trader│   │
                   └───┼────────────┼───┘
 ```
 
 ### Detailed Agent Preferences
 
 #### 1. **Issuers**
-- **Time**: Long (tolerance for credit risk - permanent holders)
-- **Leverage**: Low (avoid directional risk amplification)
-- **Liquidity**: Weak (tolerance for liquidity risk - don't need exits)
+- **Time**: High tolerance for credit risk (28-day term lenders)
+- **Leverage**: Low tolerance for principal volatility (prefer stable value)
+- **Liquidity**: High tolerance for liquidity risk (don't need exits)
 - **Motivation**: Maximize long-term token appreciation
 - **Behavior**: Stake to support protocol, provide foundational liquidity
 
 #### 2. **Hodlers**
-- **Time**: Long (tolerance for credit risk - months to years)
-- **Leverage**: Low (avoid directional risk amplification)
-- **Liquidity**: Strong (sensitivity to liquidity risk - want fair exit prices)
+- **Time**: High tolerance for credit risk (willing to lend for 28-day terms)
+- **Leverage**: Low tolerance for principal volatility (seek predictable returns)
+- **Liquidity**: High tolerance for liquidity risk (willing to hold illiquid tokens)
 - **Motivation**: Steady appreciation with downside protection
-- **Behavior**: Stake for yield, need liquid markets for eventual exit
+- **Behavior**: Stake tokens for yield, accept illiquidity for returns
 
 #### 3. **Volatility Harvesters**
-- **Time**: Long (tolerance for credit risk - willing to stake)
-- **Leverage**: High (want to magnify fee yields)
-- **Liquidity**: Strong (sensitivity to liquidity risk - need efficient markets)
+- **Time**: High tolerance for credit risk (28-day term lenders)
+- **Leverage**: Low tolerance for principal volatility (seek delta-neutral positions)
+- **Liquidity**: Low tolerance for liquidity risk (need efficient markets)
 - **Motivation**: Maximize fee yield while staying delta-neutral
-- **Behavior**: Stake with enhanced fee multipliers to compensate for LVR
+- **Behavior**: Commit FeelsSOL to the protocol for a 28-day rollover term, receiving LVR compensation and eligibility for volatility yield.
 
 #### 4. **Momentum Traders**
-- **Time**: Short (sensitivity to credit risk - need capital flexibility)
-- **Leverage**: High (seek magnified directional exposure)
-- **Liquidity**: Weak (tolerance for liquidity risk - accept slippage)
+- **Time**: Low tolerance for credit risk (need capital flexibility)
+- **Leverage**: High tolerance for principal volatility (accept 3x price swings)
+- **Liquidity**: Low tolerance for liquidity risk (brief token exposure, return to FeelsSOL)
 - **Motivation**: Capture short-term price movements with leverage
-- **Behavior**: Use leveraged positions for amplified returns
+- **Behavior**: Use leveraged flash loans for quick in-and-out trades
 
 #### 5. **Snipers**
-- **Time**: Short (sensitivity to credit risk - immediate flips)
-- **Leverage**: Low (already high risk from timing)
-- **Liquidity**: Strong (sensitivity to liquidity risk - must exit at targets)
+- **Time**: Low tolerance for credit risk (immediate flips)
+- **Leverage**: Low tolerance for principal volatility (precision matters more than amplification)
+- **Liquidity**: Low tolerance for liquidity risk (must exit at targets)
 - **Motivation**: Exploit predictable price movements at launches
 - **Behavior**: Provide initial liquidity and price discovery
 
@@ -87,34 +84,50 @@ Each agent type is characterized by their preferences/tolerances across three ri
 Based on agent preferences, positions are constructed using the protocol's parameters:
 
 ### Position Parameters
-1. **Tranche**: Maps to both leverage preference and loss ordering
-   - **Senior**: 1x exposure, protected from first losses
-   - **Junior**: 3x exposure, absorbs first losses
-2. **Duration**: Maps to time preference (credit risk tolerance)
-   - **Spot**: Perpetual/infinite duration (can exit anytime but still lending)
-   - **Monthly**: Fixed 28-day term (locked until expiry)
-3. **Amount**: Capital committed to the position
+1. **Tranche**: Maps to leverage tolerance (principal volatility)
+   - **Senior**: 1x exposure, stable principal during rebases (low tolerance)
+   - **Junior**: 3x exposure, amplified participation in rebases (high tolerance)
+2. **Duration**: Maps to time tolerance (credit risk)
+   - **Flash**: 0 duration, same-transaction return (low tolerance)
+   - **Monthly**: Fixed 28-day term with return expectation (high tolerance)
+   - **Spot**: Perpetual/infinite duration (infinite tolerance - see note below)
+3. **Lend Asset**: Maps to liquidity tolerance (liquidity risk)
+   - **FeelsSOL**: Lending the liquid asset (low tolerance)
+   - **Token**: Lending the illiquid asset (high tolerance)
+4. **Amount**: Capital committed to the position
 
-**Important**: In the "everything is lending" model, even Spot positions are loans - they're just perpetual loans that can be recalled anytime, while Monthly positions are term loans that cannot be recalled early.
+**Important**: In the "everything is lending" model:
+- **Flash positions** are same-transaction loans where capital must return immediately (low credit risk tolerance)
+- **Monthly positions** are term loans with an expectation of capital return after 28 days (high credit risk tolerance)
+- **Spot positions** are perpetual loans where the lender provides liquidity indefinitely. When borrowed, the collateral effectively becomes permanent capital for the protocol
 
-### How Preferences Map to Tranches
+**Note on Spot Liquidity**: The "Infinite" credit risk tolerance is a theoretical classification to complete our model. In practice, LPs providing spot liquidity reframe the transaction as an exchange rather than a loan - credit risk becomes asymptotically large and is removed from their decision calculus entirely.
 
-The tranche system bundles two concepts:
-- **Leverage**: Senior = 1x, Junior = 3x
-- **Loss Priority**: Junior takes first losses, protecting Senior
+### How Preferences Map to Position Choices
 
-This creates natural agent-tranche alignment:
-- **Low leverage preference** → Senior tranche (Issuers, Hodlers, Vol Harvesters)
-- **High leverage preference** → Junior tranche (Momentum Traders)
-- **Special cases**: Snipers (low leverage but may use Junior for other reasons)
+#### Leverage → Tranche Selection
+- **Low tolerance for principal volatility** → Senior tranche (1x)
+- **High tolerance for principal volatility** → Junior tranche (3x)
+
+#### Time → Duration Selection
+- **Low tolerance for credit risk** → Flash duration (capital returns same transaction)
+- **High tolerance for credit risk** → Monthly duration (capital returns after 28 days)
+- **Infinite tolerance for credit risk** → Spot duration (perpetual loan, may never return)
+
+#### Liquidity → Asset Selection
+- **Low tolerance for liquidity risk** → Lend FeelsSOL (remain liquid)
+- **High tolerance for liquidity risk** → Lend Token (accept illiquidity)
+
+This creates natural agent-position alignment based on their 3D preference profile.
 
 ### Agent-Specific Position Templates
 
 #### Issuer Position
 ```purescript
 issuerPosition = 
-  { tranche: Senior          -- Low leverage preference (1x)
-  , duration: Monthly        -- High credit risk tolerance
+  { tranche: Senior          -- Low tolerance for principal volatility (1x)
+  , duration: Monthly        -- High tolerance for credit risk (28-day terms)
+  , lendAsset: Token         -- High tolerance for liquidity risk
   , amount: largeAmount      -- Significant capital
   , purpose: "Long-term protocol support and appreciation"
   }
@@ -123,8 +136,9 @@ issuerPosition =
 #### Hodler Position
 ```purescript
 hodlerPosition = 
-  { tranche: Senior          -- Low leverage preference (1x)
-  , duration: Spot           -- Perpetual commitment (flexible exit)
+  { tranche: Senior          -- Low tolerance for principal volatility (1x)
+  , duration: Monthly        -- High tolerance for credit risk (28-day terms)
+  , lendAsset: Token         -- High tolerance for liquidity risk
   , amount: mediumAmount     -- Diversified allocation
   , purpose: "Steady yield with downside protection"
   }
@@ -133,20 +147,21 @@ hodlerPosition =
 #### Volatility Harvester Position
 ```purescript
 volHarvesterPosition = 
-  { tranche: Senior          -- Surprisingly, low leverage (1x)
-  , duration: Monthly        -- High credit risk tolerance
-  , amount: largeAmount      -- Maximize fee generation
-  , feeMultiplier: 2.0       -- Enhanced fees compensate for LVR
-  , purpose: "Fee farming with LVR compensation instead of leverage"
+  { tranche: Senior          -- Low tolerance for principal volatility (1x)
+  , duration: Monthly        -- High tolerance for credit risk (28-day terms)
+  , lendAsset: FeelsSOL      -- Committed to the protocol for volatility monetization
+  , amount: largeAmount      -- Capital committed for volatility monetization
+  , purpose: "Monetizing volatility with LVR compensation and yield eligibility"
   }
 ```
-*Note: Despite high leverage preference for yield, Vol Harvesters use Senior tranche because fee multipliers provide the yield enhancement without directional risk.
+*Note: Vol Harvesters lend FeelsSOL to maintain liquidity while earning enhanced fees.
 
 #### Momentum Trader Position
 ```purescript
 momentumPosition = 
-  { tranche: Junior          -- High leverage preference (3x)
-  , duration: Spot           -- Low credit risk tolerance
+  { tranche: Junior          -- High tolerance for principal volatility (3x)
+  , duration: Flash          -- Low tolerance for credit risk (immediate return)
+  , lendAsset: FeelsSOL      -- Low tolerance for liquidity risk
   , amount: smallAmount      -- Limited risk capital
   , purpose: "Leveraged short-term trading"
   }
@@ -155,13 +170,14 @@ momentumPosition =
 #### Sniper Position
 ```purescript
 sniperPosition = 
-  { tranche: Junior          -- Despite low leverage preference
-  , duration: Spot           -- Low credit risk tolerance
+  { tranche: Junior          -- Despite low tolerance for principal volatility
+  , duration: Flash          -- Low tolerance for credit risk (immediate return)
+  , lendAsset: FeelsSOL      -- Low tolerance for liquidity risk
   , amount: mediumAmount     -- Sized for impact
   , purpose: "Quick flips with first-mover advantage"
   }
 ```
-*Note: Snipers may use Junior despite low leverage preference because they exit before losses accumulate.
+*Note: Snipers use Junior for first-mover advantage with Flash loans for immediate capital recovery.
 
 ## Complementary Dynamics
 
@@ -169,50 +185,43 @@ The system creates natural complementarities between agents:
 
 ### Credit Risk Dimension (Time)
 ```
-HIGH TOLERANCE (Long)              LOW TOLERANCE (Short)
-├── Issuers                        ├── Momentum Traders
-├── Hodlers                        └── Snipers
-└── Vol Harvesters                 
+INFINITE TOLERANCE                 HIGH TOLERANCE                   LOW TOLERANCE
+└── (Spot LPs)*                    ├── Issuers                      ├── Momentum Traders
+                                   ├── Hodlers                      └── Snipers
+                                   └── Vol Harvesters               
 
-Provide: Patient capital           Provide: Trading volume
-         Market stability                   Price discovery
-         Long-term liquidity               Fee generation
+Provide: Spot liquidity            Provide: Term capital            Provide: Flash liquidity
+         (Exchange mindset)                28-day loans                     Trading volume
+         No credit calculus                Bounded risk                     Price discovery
+
+*Theoretical classification
 ```
 
-### Directional Risk Dimension (Leverage) 
+### Principal Volatility Dimension (Leverage) 
 ```
-LOW APPETITE (1x)                  HIGH APPETITE (3x)
+LOW TOLERANCE (1x)                 HIGH TOLERANCE (3x)
 ├── Issuers                        ├── Momentum Traders
 ├── Hodlers                        └── (Sometimes Snipers)
 └── Vol Harvesters*                
 
-Provide: Stable base               Provide: First-loss buffer
+Provide: Stable base               Provide: Rebase absorption
          Conservative liquidity             Leveraged activity
-         Risk absorption                    Volume generation
+         Principal stability                Volume generation
 
 *Vol Harvesters achieve yield through fees, not leverage
 ```
 
-### Liquidity Risk Dimension
+### Liquidity Risk Dimension (Asset Choice)
 ```
-HIGH SENSITIVITY (Strong)          LOW SENSITIVITY (Weak)
-├── Hodlers                        ├── Issuers  
-├── Vol Harvesters                 ├── Momentum Traders
-└── Snipers                        └── (Locked positions)
+LOW TOLERANCE                      HIGH TOLERANCE
+├── Vol Harvesters                 ├── Issuers  
+├── Momentum Traders               ├── Hodlers
+└── Snipers                        └── (Token lenders)
 
-Need: Deep markets                 Accept: Wide spreads
-      Fair pricing                         Slippage
-      Quick exits                          Illiquidity
+Lend: FeelsSOL                     Lend: Tokens
+      Maintain liquidity                  Accept illiquidity
+      Stable exit value                   Token price exposure
 ```
-
-## LVR Protection for Volatility Harvesters
-
-Since Vol Harvesters cannot actively rebalance their staked positions, the protocol provides several protection mechanisms:
-
-1. **Enhanced Fee Share**: 2x base fee rate for monthly stakes
-2. **Senior Tranche Priority**: Protected from first losses up to Junior buffer
-3. **POL Buffer**: Protocol-owned liquidity absorbs arbitrage losses
-4. **Duration Bonus**: Longer stakes receive exponentially better terms
 
 ## Market Equilibrium
 
@@ -221,5 +230,6 @@ The system naturally balances when:
 - Active traders generate volume and fees (Momentum Traders, Snipers)
 - Senior positions provide stability while Junior positions absorb volatility
 - Each agent type finds their complementary partners in the ecosystem
+- Liquidity-sensitive agents lending FeelsSOL are matched with liquidity-tolerant agents borrowing FeelsSOL
 
-This 3D preference model ensures that every participant can find a position type that matches their specific needs while contributing to overall market health.
+This 3D preference model ensures that every participant can find a position type that matches their specific needs while contributing to overall market health. Each dimension maps to a concrete choice in position construction: Duration (Flash/Monthly/Spot), Tranche (Senior/Junior), and Asset (FeelsSOL/Token).
