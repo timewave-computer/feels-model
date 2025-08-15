@@ -13,7 +13,7 @@ import Prelude
 import Data.Array (length, null)
 import Data.String.Common (trim)
 import Data.String as String
-import Data.String (contains, Pattern(..))
+import Data.String (contains, Pattern(..), split, joinWith, take, drop)
 import Data.Number as Number
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -39,31 +39,105 @@ import Utils (formatAmount)
 renderSystemPanel :: forall m. UIState -> H.ComponentHTML Action () m
 renderSystemPanel state =
   HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
+    [ HP.class_ (HH.ClassName "panel system-metrics-panel") ]
     [ HH.h2_ [ HH.text "System Metrics" ]
     , case state.protocolStats of
         Nothing -> HH.div 
           [ HP.class_ (HH.ClassName "loading-state") ]
           [ HH.text "Loading system metrics..." ]
-        Just stats -> HH.div
-          [ HP.class_ (HH.ClassName "metrics-grid") ]
-          [ renderMetric "Total Value Locked" (formatAmount stats.totalValueLocked <> " FeelsSOL")
-          , renderMetric "Total Users" (show stats.totalUsers)
-          , renderMetric "Active Positions" (show stats.activePositions)
-          , renderMetric "Live Tokens" (show stats.liveTokens)
-          , renderMetric "Lender Offers" (show stats.totalLenderOffers)
-          , renderMetric "POL Balance" (formatAmount stats.polBalance <> " FeelsSOL")
-          , renderMetric "FeelsSOL Supply" (formatAmount stats.feelsSOLSupply)
-          , renderMetric "JitoSOL Locked" (formatAmount stats.jitoSOLLocked)
+        Just stats -> HH.div_
+          [ -- Primary metrics (larger display)
+            HH.div
+              [ HP.class_ (HH.ClassName "primary-metrics") ]
+              [ renderPrimaryMetric "Total Value Locked" 
+                  (formatLargeNumber stats.totalValueLocked) 
+                  "FeelsSOL"
+              , renderPrimaryMetric "Active Positions" 
+                  (formatIntWithCommas stats.activePositions) 
+                  ""
+              ]
+          , -- Secondary metrics grid
+            HH.div
+              [ HP.class_ (HH.ClassName "metrics-grid") ]
+              [ renderMetric "Total Users" (formatIntWithCommas stats.totalUsers)
+              , renderMetric "Live Tokens" (formatIntWithCommas stats.liveTokens)
+              , renderMetric "Lender Offers" (formatIntWithCommas stats.totalLenderOffers)
+              , renderMetric "POL Balance" (formatCompactNumber stats.polBalance <> " FeelsSOL")
+              ]
+          , -- Token supplies section
+            HH.div
+              [ HP.class_ (HH.ClassName "supplies-section") ]
+              [ HH.h4_ [ HH.text "Token Supplies" ]
+              , HH.div
+                  [ HP.class_ (HH.ClassName "supplies-grid") ]
+                  [ renderSupply "FeelsSOL Supply" (formatLargeNumber stats.feelsSOLSupply)
+                  , renderSupply "JitoSOL Locked" (formatLargeNumber stats.jitoSOLLocked)
+                  ]
+              ]
           ]
     ]
   where
+    renderPrimaryMetric label value unit =
+      HH.div
+        [ HP.class_ (HH.ClassName "primary-metric") ]
+        [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
+        , HH.div 
+            [ HP.class_ (HH.ClassName "metric-value-large") ] 
+            [ HH.span [ HP.class_ (HH.ClassName "value") ] [ HH.text value ]
+            , if unit /= "" 
+              then HH.span [ HP.class_ (HH.ClassName "unit") ] [ HH.text $ " " <> unit ]
+              else HH.text ""
+            ]
+        ]
+    
     renderMetric label value =
       HH.div
         [ HP.class_ (HH.ClassName "metric-item") ]
         [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
         , HH.div [ HP.class_ (HH.ClassName "metric-value") ] [ HH.text value ]
         ]
+    
+    renderSupply label value =
+      HH.div
+        [ HP.class_ (HH.ClassName "supply-item") ]
+        [ HH.span [ HP.class_ (HH.ClassName "supply-label") ] [ HH.text $ label <> ":" ]
+        , HH.span [ HP.class_ (HH.ClassName "supply-value") ] [ HH.text value ]
+        ]
+    
+    -- Format large numbers with comma separators
+    formatLargeNumber :: Number -> String
+    formatLargeNumber n = 
+      let str = formatAmount n
+          parts = split (Pattern ".") str
+      in case parts of
+           [whole, decimal] -> addCommas whole <> "." <> decimal
+           [whole] -> addCommas whole
+           _ -> str
+    
+    -- Format compact numbers (K/M notation)
+    formatCompactNumber :: Number -> String
+    formatCompactNumber n = 
+      if n >= 1000000.0 
+      then formatAmount (n / 1000000.0) <> "M"
+      else if n >= 1000.0
+      then formatAmount (n / 1000.0) <> "K"
+      else formatAmount n
+    
+    -- Format integers with commas
+    formatIntWithCommas :: Int -> String
+    formatIntWithCommas n = addCommas (show n)
+    
+    -- Add commas to number strings
+    addCommas :: String -> String
+    addCommas s = 
+      let len = String.length s
+      in if len <= 3 
+         then s
+         else if len <= 6
+         then take (len - 3) s <> "," <> drop (len - 3) s
+         else if len <= 9
+         then take (len - 6) s <> "," <> take 3 (drop (len - 6) s) <> "," <> drop (len - 3) s
+         else take (len - 9) s <> "," <> take 3 (drop (len - 9) s) <> "," <> take 3 (drop (len - 6) s) <> "," <> drop (len - 3) s
 
 --------------------------------------------------------------------------------
 -- Wallet Panel Components
@@ -80,7 +154,7 @@ renderWalletPanel state =
         [ HP.class_ (HH.ClassName "wallet-section") ]
         [ HH.h3_ [ HH.text "Balances" ]
         , HH.div
-            [ HP.class_ (HH.ClassName "form-fields") ]
+            [ HP.class_ (HH.ClassName "balance-compact") ]
             [ renderBalance "JitoSOL" state.jitoBalance
             , renderBalance "FeelsSOL" state.feelsBalance
             ]
@@ -113,9 +187,11 @@ renderWalletPanel state =
   where
     renderBalance label amount =
       HH.div
-        [ HP.class_ (HH.ClassName "list-item__content") ]
-        [ HH.div [ HP.class_ (HH.ClassName "label") ] [ HH.text label ]
-        , HH.div [ HP.class_ (HH.ClassName "value") ] [ HH.text $ formatAmount amount ]
+        [ HP.class_ (HH.ClassName "balance-line")
+        , HP.style "margin: 0; padding: 2px 0; line-height: 1.2;"
+        ]
+        [ HH.span [ HP.class_ (HH.ClassName "balance-label") ] [ HH.text $ label <> ": " ]
+        , HH.span [ HP.class_ (HH.ClassName "balance-value") ] [ HH.text $ formatAmount amount ]
         ]
     
     renderToken foreignToken =
@@ -169,12 +245,6 @@ renderWalletPanel state =
 -- Token creator panel (always visible)
 renderTokenCreatorPanel :: forall m. UIState -> H.ComponentHTML Action () m
 renderTokenCreatorPanel state =
-  let 
-    hasErrors = not (null state.tokenValidationErrors)
-    buttonClass = if hasErrors || trim state.tokenTicker == "" || trim state.tokenName == ""
-                 then "btn btn--primary btn--disabled"
-                 else "btn btn--primary"
-  in
   HH.div
     [ HP.class_ (HH.ClassName "panel") ]
     [ HH.h2_ [ HH.text "Create Feels Token" ]
@@ -203,8 +273,7 @@ renderTokenCreatorPanel state =
         , renderValidationWarnings state.tokenValidationErrors
         , HH.button
             [ HE.onClick \_ -> CreateTokenUI
-            , HP.class_ (HH.ClassName buttonClass)
-            , HP.disabled (hasErrors || trim state.tokenTicker == "" || trim state.tokenName == "")
+            , HP.class_ (HH.ClassName "btn btn--primary")
             ]
             [ HH.text "Create Token" ]
         ]
@@ -276,7 +345,7 @@ renderExchangePanel state =
         , -- Exchange arrow
           HH.div
             [ HP.class_ (HH.ClassName "exchange-arrow") ]
-            [ HH.text "↓" ]
+            [ ]
         , -- To section
           HH.div
             [ HP.class_ (HH.ClassName "exchange-section") ]

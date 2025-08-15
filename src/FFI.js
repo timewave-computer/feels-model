@@ -631,9 +631,10 @@ function renderChartJS(canvas, data) {
   console.log('Got 2D context:', !!ctx);
   
   // Check if data has multiple tokens or single price format
-  const isMultiToken = data.length > 0 && data[0].tokens;
+  const isMultiToken = data.length > 0 && data[0].tokens && Array.isArray(data[0].tokens);
   console.log('Is multi-token data:', isMultiToken);
-  console.log('First data point:', data[0]);
+  console.log('First data point has tokens:', !!data[0]?.tokens);
+  console.log('Tokens field is array:', Array.isArray(data[0]?.tokens));
   
   if (isMultiToken) {
     console.log('Calling renderMultiTokenChart');
@@ -664,14 +665,30 @@ function renderSingleTokenChart(ctx, data) {
       return isValid;
     });
     
-    if (validData.length === 0) {
+    console.log('Valid data points before deduplication:', validData.length);
+    
+    // Deduplicate data points with the same timestamp (take the last value for each timestamp)
+    const timestampMap = new Map();
+    validData.forEach(point => {
+      const timestamp = point.timestamp || point.block || 0;
+      timestampMap.set(timestamp, point);
+    });
+    const deduplicatedData = Array.from(timestampMap.values()).sort((a, b) => {
+      const aTime = a.timestamp || a.block || 0;
+      const bTime = b.timestamp || b.block || 0;
+      return aTime - bTime;
+    });
+    
+    console.log('Valid data points after deduplication:', deduplicatedData.length);
+    
+    if (deduplicatedData.length === 0) {
       console.error('No valid data points to chart');
       return;
     }
     
     // Convert data to Chart.js format for line charts
     // Use timestamp for x-axis since block numbers are all 0 in simulation
-    const priceData = validData.map((point, index) => ({
+    const priceData = deduplicatedData.map((point, index) => ({
       x: point.timestamp ? Number(point.timestamp) : index,  // Use timestamp or index for x-axis
       y: Number(point.price)
     }));
@@ -679,7 +696,7 @@ function renderSingleTokenChart(ctx, data) {
     console.log('Price data sample:', priceData.slice(0, 3));
   
   // POL floor data as a line
-  const polData = validData.map((point, index) => ({
+  const polData = deduplicatedData.map((point, index) => ({
     x: point.timestamp ? Number(point.timestamp) : index,  // Use timestamp or index for x-axis
     y: point.nfvValue != null && !isNaN(point.nfvValue) && isFinite(point.nfvValue) ? Number(point.nfvValue) : 0
   }));
@@ -769,8 +786,8 @@ function renderSingleTokenChart(ctx, data) {
               family: 'monospace'
             }
           },
-          min: validData.length > 0 ? Math.min(...validData.map((d, i) => d.timestamp || i)) : 0,
-          max: validData.length > 0 ? Math.max(...validData.map((d, i) => d.timestamp || i)) : 100,
+          min: deduplicatedData.length > 0 ? Math.min(...deduplicatedData.map((d, i) => d.timestamp || i)) : 0,
+          max: deduplicatedData.length > 0 ? Math.max(...deduplicatedData.map((d, i) => d.timestamp || i)) : 100,
           grid: {
             color: '#1f2937',
             drawBorder: false
@@ -848,6 +865,7 @@ function renderSingleTokenChart(ctx, data) {
 
 // Render chart for multiple tokens
 function renderMultiTokenChart(ctx, data) {
+  console.log('*** MULTI-TOKEN CHART FUNCTION ENTRY ***');
   console.log('Rendering multi-token chart');
   
   // Force canvas to have reasonable dimensions - fit container width but fixed height
@@ -856,10 +874,23 @@ function renderMultiTokenChart(ctx, data) {
   ctx.canvas.height = 500;
   console.log('Set canvas dimensions to', ctx.canvas.width, 'x', ctx.canvas.height, '(multi-token)');
   
+  // Deduplicate data points with the same timestamp (take the last value for each timestamp)
+  console.log('*** STARTING DEDUPLICATION ***');
+  console.log('Data points before deduplication:', data.length);
+  const timestampMap = new Map();
+  data.forEach(point => {
+    timestampMap.set(point.timestamp, point);
+  });
+  const deduplicatedData = Array.from(timestampMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+  console.log('Data points after deduplication:', deduplicatedData.length);
+  
   // Extract unique token tickers from the array format
-  const tokenTickers = data.length > 0 && Array.isArray(data[0].tokens) 
-    ? data[0].tokens.map(t => t.ticker).filter(ticker => ticker !== 'JitoSOL')
+  const tokenTickers = deduplicatedData.length > 0 && Array.isArray(deduplicatedData[0].tokens) 
+    ? deduplicatedData[0].tokens.map(t => t.ticker).filter(ticker => ticker !== 'JitoSOL')
     : [];
+    
+  console.log('Token tickers found:', tokenTickers);
+  console.log('Processing', tokenTickers.length, 'tokens for chart');
   
   // Color palette for different tokens
   const colors = [
@@ -876,7 +907,7 @@ function renderMultiTokenChart(ctx, data) {
   const datasets = [];
   
   // Add JitoSOL/FeelsSOL as line chart
-  const jitoData = data.map((point, index) => {
+  const jitoData = deduplicatedData.map((point, index) => {
     const x = point.timestamp ? Number(point.timestamp) : index;  // Use timestamp or index
     const price = point.price || 1.22; // Default JitoSOL/FeelsSOL price (current market rate)
     
@@ -898,53 +929,74 @@ function renderMultiTokenChart(ctx, data) {
     fill: false
   });
   
-  // Add each feels token as a line
+  // Add each feels token as two lines: solid price + dotted POL floor
   tokenTickers.forEach((ticker, index) => {
-    const tokenData = data.map((point, idx) => {
+    const baseColor = colors[index % colors.length];
+    
+    // 1. Token Price Line (Solid)
+    const tokenData = deduplicatedData.map((point, idx) => {
       const tokenInfo = point.tokens && Array.isArray(point.tokens) 
         ? point.tokens.find(t => t.ticker === ticker) 
         : null;
       return {
-        x: point.timestamp ? Number(point.timestamp) : idx,  // Use timestamp or index
-        y: tokenInfo ? tokenInfo.price : 0
+        x: point.timestamp ? Number(point.timestamp) : idx,
+        y: tokenInfo && tokenInfo.price > 0 ? tokenInfo.price : null  // Use null for missing/invalid data
       };
     });
     
-    datasets.push({
-      label: `${ticker}/FeelsSOL`,
-      type: 'line',
-      data: tokenData,
-      borderColor: colors[index % colors.length],
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      pointRadius: 0,
-      tension: 0.1
-    });
+    // Only add the dataset if it has some valid data points
+    const validPricePoints = tokenData.filter(point => point.y !== null).length;
+    if (validPricePoints > 0) {
+      datasets.push({
+        label: `${ticker} Price`,
+        type: 'line',
+        data: tokenData,
+        borderColor: baseColor,
+        backgroundColor: 'transparent',
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        spanGaps: true  // Connect lines across null values
+      });
+    } else {
+      console.log(`Skipping ${ticker} Price - no valid data points`);
+    }
     
-    // Add POL floor for this token
-    const polData = data.map((point, idx) => {
+    // 2. POL Floor Line (Dotted)
+    const polData = deduplicatedData.map((point, idx) => {
       const tokenInfo = point.tokens && Array.isArray(point.tokens) 
         ? point.tokens.find(t => t.ticker === ticker) 
         : null;
       return {
-        x: point.timestamp ? Number(point.timestamp) : idx,  // Use timestamp or index
-        y: tokenInfo ? tokenInfo.polFloor : 0
+        x: point.timestamp ? Number(point.timestamp) : idx,
+        y: tokenInfo && tokenInfo.polFloor > 0 ? tokenInfo.polFloor : null  // Use null for missing/invalid data
       };
     });
     
-    datasets.push({
-      label: `${ticker} POL Floor`,
-      type: 'line',
-      data: polData,
-      borderColor: colors[index % colors.length],
-      backgroundColor: colors[index % colors.length] + '20', // 20% opacity
-      borderWidth: 1,
-      borderDash: [5, 5],
-      pointRadius: 0,
-      fill: true,
-      tension: 0.1
-    });
+    // Only add the dataset if it has some valid data points
+    const validPolPoints = polData.filter(point => point.y !== null).length;
+    if (validPolPoints > 0) {
+      datasets.push({
+        label: `${ticker} POL Floor`,
+        type: 'line',
+        data: polData,
+        borderColor: baseColor,
+        backgroundColor: 'transparent',
+        borderWidth: 1,
+        borderDash: [4, 4],  // Dotted line pattern
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        spanGaps: true  // Connect lines across null values
+      });
+    } else {
+      console.log(`Skipping ${ticker} POL Floor - no valid data points`);
+    }
   });
+  
+  console.log('Total datasets created:', datasets.length);
+  console.log('Dataset labels:', datasets.map(d => d.label));
   
   // Create the chart
   chartInstance = new Chart(ctx, {
@@ -1006,8 +1058,8 @@ function renderMultiTokenChart(ctx, data) {
               family: 'monospace'
             }
           },
-          min: data.length > 0 ? Math.min(...data.map((d, i) => d.timestamp || i)) : 0,
-          max: data.length > 0 ? Math.max(...data.map((d, i) => d.timestamp || i)) : 100,
+          min: deduplicatedData.length > 0 ? Math.min(...deduplicatedData.map((d, i) => d.timestamp || i)) : 0,
+          max: deduplicatedData.length > 0 ? Math.max(...deduplicatedData.map((d, i) => d.timestamp || i)) : 100,
           grid: {
             color: '#1f2937',
             drawBorder: false

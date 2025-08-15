@@ -6,6 +6,7 @@ module UI.Action
   ) where
 
 import Prelude
+import Control.Monad (unless, when)
 import Data.Array ((:), find, null, length)
 import Data.Traversable (traverse_)
 import Data.String.Common (trim)
@@ -33,6 +34,7 @@ import Protocol.Token (TokenType(..))
 import Protocol.Position (spotDuration, monthlyDuration, Leverage(..))
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
 import Simulation.Sim (initSimulationWithPoolRegistry, executeSimulation, calculateResults)
+import Simulation.ProtocolEngine (executeSimulationWithProtocol, getProtocolMetrics)
 
 --------------------------------------------------------------------------------
 -- Main Action Handler
@@ -200,8 +202,14 @@ handleCreateToken = do
     Just protocol -> do
       let ticker = trim state.tokenTicker
           name = trim state.tokenName
+          -- Run validation
+          errors = validateTokenInput ticker name state.userTokens
           
-      if null state.tokenValidationErrors && ticker /= "" && name /= ""
+      -- Update validation errors in state
+      H.modify_ _ { tokenValidationErrors = errors }
+      
+      -- Check if we can proceed
+      if null errors && ticker /= "" && name /= ""
         then do
           -- Execute create token command
           protocolState <- H.liftEffect $ read protocol.state
@@ -225,8 +233,12 @@ handleCreateToken = do
               H.modify_ _ { error = Just "Unexpected result from token creation" }
             Left err -> 
               H.modify_ _ { error = Just $ show err }
-        else 
-          H.modify_ _ { error = Just "Please fix validation errors before creating token" }
+        else do
+          -- Add basic validation errors if fields are empty
+          let emptyFieldErrors = 
+                (if ticker == "" then ["Token ticker is required"] else []) <>
+                (if name == "" then ["Token name is required"] else [])
+          H.modify_ \s -> s { tokenValidationErrors = s.tokenValidationErrors <> emptyFieldErrors }
 
 --------------------------------------------------------------------------------
 -- Universal Exchange Handler
@@ -265,73 +277,99 @@ handleExecuteExchange = do
 
 handleRunSimulation :: forall o m. MonadAff m => H.HalogenM UIState Action () o m Unit
 handleRunSimulation = do
-  H.liftEffect $ log "Starting simulation..."
-  H.modify_ _ { simulationRunning = true, error = Nothing }
+  -- Check if simulation is already running
+  currentState <- H.get
+  when currentState.simulationRunning do
+    H.liftEffect $ log "Simulation already running, skipping..."
+    pure unit
   
-  state <- H.get
-  case state.api of
-    Nothing -> H.modify_ _ { error = Just "Protocol not initialized" }
-    Just protocol -> do
-      -- Extract the protocol's lending book instead of creating a new one
-      protocolState <- H.liftEffect $ read protocol.state
+  unless currentState.simulationRunning do
+    H.liftEffect $ log "Starting simulation..."
+    H.modify_ _ { simulationRunning = true, error = Nothing }
+    
+    state <- H.get
+    case state.api of
+      Nothing -> H.modify_ _ { error = Just "Protocol not initialized" }
+      Just protocol -> do
+        -- Extract the protocol's lending book instead of creating a new one
+        protocolState <- H.liftEffect $ read protocol.state
       
-      -- Initialize simulation with the protocol's actual pool registry and oracle
-      simState <- H.liftEffect $ initSimulationWithPoolRegistry 
-        state.simulationConfig 
-        protocolState.poolRegistry
-        protocolState.oracle
+        -- Initialize simulation with the protocol's actual pool registry and oracle
+        simState <- H.liftEffect $ initSimulationWithPoolRegistry 
+          state.simulationConfig 
+          protocolState.poolRegistry
+          protocolState.oracle
       
-      -- Seed initial JitoSOL/FeelsSOL liquidity at correct price
-      H.liftEffect $ log "Seeding initial JitoSOL/FeelsSOL liquidity..."
-      _ <- H.liftEffect $ do
-        -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
-        -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
-        state1 <- read protocol.state
-        result1 <- executeCommand (PS.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotDuration Senior false Nothing) state1
-        _ <- case result1 of
-          Right (Tuple newState1 _) -> write newState1 protocol.state
-          _ -> pure unit
-        -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
-        state2 <- read protocol.state
-        result2 <- executeCommand (PS.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotDuration Senior false Nothing) state2
-        _ <- case result2 of
-          Right (Tuple newState2 _) -> write newState2 protocol.state
-          _ -> pure unit
-        pure unit
+        -- Seed initial JitoSOL/FeelsSOL liquidity at correct price
+        H.liftEffect $ log "Seeding initial JitoSOL/FeelsSOL liquidity..."
+        _ <- H.liftEffect $ do
+          log "Creating first liquidity position..."
+          -- Create initial liquidity offers at 1.22 FeelsSOL per JitoSOL
+          -- For JitoSOL -> FeelsSOL: If lending 500 JitoSOL, want 610 FeelsSOL as collateral (500 * 1.22)
+          state1 <- read protocol.state
+          result1 <- executeCommand (PS.CreatePosition "liquidity-bot" JitoSOL 500.0 FeelsSOL 610.0 spotDuration Senior false Nothing) state1
+          _ <- case result1 of
+            Right (Tuple newState1 _) -> do
+              write newState1 protocol.state
+              log "First liquidity position created"
+            Left err -> log $ "Failed to create first position: " <> show err
+          -- For FeelsSOL -> JitoSOL: If lending 500 FeelsSOL, want 410 JitoSOL as collateral (500 / 1.22)
+          log "Creating second liquidity position..."
+          state2 <- read protocol.state
+          result2 <- executeCommand (PS.CreatePosition "liquidity-bot" FeelsSOL 500.0 JitoSOL 410.0 spotDuration Senior false Nothing) state2
+          _ <- case result2 of
+            Right (Tuple newState2 _) -> do
+              write newState2 protocol.state
+              log "Second liquidity position created"
+            Left err -> log $ "Failed to create second position: " <> show err
+          log "Finished seeding liquidity"
+          pure unit
       
-      -- Run simulation
-      finalState <- H.liftEffect $ executeSimulation state.simulationConfig simState
+        -- Execute simulation through the actual protocol with proper event loop
+        H.liftEffect $ log "About to call executeSimulationWithProtocol..."
+        executionResult <- H.liftEffect $ executeSimulationWithProtocol 
+          protocol.state 
+          state.simulationConfig 
+          simState
       
-      -- Calculate results
-      results <- H.liftEffect $ calculateResults state.simulationConfig finalState
+        let finalState = executionResult.finalSimState
+            finalProtocolState = executionResult.finalProtocolState
       
-      H.liftEffect $ log $ "Simulation completed with " <> show results.totalUsers <> " users"
+        -- Calculate results using the final simulation state
+        results <- H.liftEffect $ calculateResults state.simulationConfig finalState
       
-      -- Process simulation results including token creation
-      priceHistory <- H.liftEffect $ processSimulationResults protocol finalState results
+        -- Get actual protocol metrics including POL reserves
+        protocolMetrics <- H.liftEffect $ getProtocolMetrics finalProtocolState
       
-      -- Refresh data to show updated offers
-      handleAction RefreshData
+        H.liftEffect $ log $ "Simulation completed with " <> show results.totalUsers <> " users"
+        H.liftEffect $ log $ "POL reserves: " <> show protocolMetrics.polReserves
+        H.liftEffect $ log $ "Total fees collected: " <> show protocolMetrics.totalFeesCollected
       
-      -- Update state
-      H.modify_ _ 
-        { simulationRunning = false
-        , simulationResults = Just results
-        , priceHistory = priceHistory
-        }
+        -- Process simulation results with proper POL floor data
+        priceHistory <- H.liftEffect $ processSimulationResults protocol finalState results
       
-      -- Set chart data in the DOM
-      H.liftEffect $ do
-        log $ "Setting chart data with " <> show (length priceHistory) <> " points"
-        setChartData priceHistory
+        -- Refresh data to show updated offers
+        handleAction RefreshData
       
-      -- Force a render cycle before initializing chart
-      H.liftEffect $ log "State updated, scheduling chart render..."
+        -- Update state
+        H.modify_ _ 
+          { simulationRunning = false
+          , simulationResults = Just results
+          , priceHistory = priceHistory
+          }
       
-      -- Use a small delay to ensure Halogen completes the DOM update
-      void $ H.fork do
-        H.liftEffect $ void $ setTimeout (pure unit) 200
-        handleAction RenderChart
+        -- Set chart data in the DOM
+        H.liftEffect $ do
+          log $ "Setting chart data with " <> show (length priceHistory) <> " points"
+          setChartData priceHistory
+      
+        -- Force a render cycle before initializing chart
+        H.liftEffect $ log "State updated, scheduling chart render..."
+      
+        -- Use a small delay to ensure Halogen completes the DOM update
+        void $ H.fork do
+          H.liftEffect $ void $ setTimeout (pure unit) 200
+          handleAction RenderChart
 
 --------------------------------------------------------------------------------
 -- Token Validation

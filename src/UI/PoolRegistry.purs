@@ -5,6 +5,7 @@ module UI.PoolRegistry
   ( PoolRegistry
   , initPoolRegistry
   , addPool
+  , updatePool
   , removePool
   , getPool
   , getAllPools
@@ -61,6 +62,11 @@ initPoolRegistry = new
 -- | Add a new pool to the registry
 addPool :: PoolId -> PoolState -> PoolRegistry -> Effect Unit
 addPool poolId pool registryRef = do
+  modify_ (\reg -> reg { pools = Map.insert poolId pool reg.pools }) registryRef
+
+-- | Update an existing pool in the registry
+updatePool :: PoolId -> PoolState -> PoolRegistry -> Effect Unit
+updatePool poolId pool registryRef = do
   modify_ (\reg -> reg { pools = Map.insert poolId pool reg.pools }) registryRef
 
 -- | Remove a pool from the registry

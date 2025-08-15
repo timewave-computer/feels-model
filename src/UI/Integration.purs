@@ -9,24 +9,29 @@ module UI.Integration
 
 import Prelude
 import Data.String as String
-import Data.Array (drop, filter, head, length, sortBy, take, zip)
+import Data.Array (drop, filter, head, length, sortBy, take, zip, reverse, find, cons, foldl, (:), range)
 import Data.Traversable (traverse, traverse_)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Either (Either(..))
 import Data.Tuple (Tuple(..))
 import Data.Int (toNumber)
+import Data.Char (toCharCode)
+import Data.String.CodeUnits (toCharArray)
+import Data.Map as Map
 import Effect (Effect)
 import Effect.Console (log)
 import Effect.Ref (new, read, write)
+import Effect.Unsafe (unsafePerformEffect)
 import Unsafe.Coerce (unsafeCoerce)
 
 -- Import API and data types
 import UI.ProtocolState as A
 import UI.ProtocolState (AppRuntime, initState, ProtocolCommand(..), IndexerQuery(..))
 import Protocol.Common (QueryResult(..), CommandResult(..))
+import Protocol.POL (getAllAllocations)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
-import FFI (setTimeout, getElementById, getValue, getTextContent, triggerUIAction, registerRemoteAction, sin)
+import FFI (setTimeout, getElementById, getValue, getTextContent, triggerUIAction, registerRemoteAction, sin, exp)
 import Data.Nullable (toMaybe)
 import Simulation.Sim (SimulationResults)
 import Simulation.Sim as S
@@ -164,6 +169,13 @@ processSimulationResults protocol finalState _results = do
   
   log $ "Found " <> show (length allTokens) <> " total tokens"
   
+  -- Log token tickers for debugging
+  let tokenTickers = map (\token -> 
+        let tokenData = unsafeCoerce token :: { ticker :: String }
+        in tokenData.ticker
+      ) allTokens
+  log $ "Token tickers: " <> show tokenTickers
+  
   -- Get the oracle's actual price history from protocol state
   protocolState <- read protocol.state
   oracleState <- read protocolState.oracle
@@ -171,9 +183,40 @@ processSimulationResults protocol finalState _results = do
   
   log $ "Oracle has " <> show (length oraclePriceHistory) <> " price observations"
   
+  -- Get current POL state for accurate floor calculations
+  polState <- read protocolState.polState
+  let currentPOL = polState.totalPOL
+  log $ "Current POL reserves: " <> show currentPOL <> " FeelsSOL"
+  log $ "POL state details - unallocated: " <> show polState.unallocated <> ", allocations: " <> show (Map.size polState.poolAllocations)
+  
+  -- Get POL allocation history from simulation state
+  let polHistory = finalState.polAllocationHistory
+  log $ "POL allocation history has " <> show (length polHistory) <> " snapshots"
+  
+  -- Log the final POL allocations for debugging
+  case head polHistory of
+    Just lastSnapshot -> do
+      log $ "Final POL allocations at block " <> show lastSnapshot.block <> ":"
+      traverse_ (\(Tuple poolId allocation) -> 
+        log $ "  Pool " <> poolId <> ": " <> show allocation <> " POL"
+      ) (Map.toUnfoldable lastSnapshot.allocations :: Array (Tuple String Number))
+    Nothing -> log "No POL allocation history found"
+  
   -- Convert oracle price history to chart format
   -- Sort observations by block number (not timestamp) to ensure proper ordering
   let sortedHistory = sortBy (\a b -> compare a.timestamp b.timestamp) oraclePriceHistory
+  
+  -- Build map of token creation times from action history
+  let tokenCreationMap = foldl (\acc (Tuple idx action) -> 
+        case action of
+          S.CreateToken _ ticker _ -> 
+            -- Use the index to estimate creation time
+            let creationTime = case head sortedHistory of
+                  Just first -> first.timestamp + (toNumber idx * 5000.0)  -- 5 seconds per action
+                  Nothing -> 0.0
+            in cons (Tuple ticker creationTime) acc
+          _ -> acc
+      ) [] (zip (range 0 (length tokenCreationActions - 1)) tokenCreationActions)
       
       -- Debug: Log timestamps instead of blocks
       timestamps = map _.timestamp sortedHistory
@@ -200,30 +243,101 @@ processSimulationResults protocol finalState _results = do
   let convertedPriceHistory = map (\obs ->
         let jitoPrice = obs.price  -- Oracle tracks JitoSOL/FeelsSOL price
             
+            -- Use actual POL reserves from protocol state
+            -- POL should grow from initial reserves (10000) plus accumulated fees
+            estimatedPOL = if currentPOL > 0.0 
+                          then currentPOL  -- Use actual POL if available
+                          else 10000.0     -- Use initial reserves as fallback
+            
             -- Generate realistic token prices based on oracle price and time-based variations
             -- Each token has a base price multiplier and oscillates around it
+            -- Only include tokens that have been created by this point in time
+            existingTokensAtTime = filter (\token ->
+              let tokenData = unsafeCoerce token :: { ticker :: String }
+                  -- Check if this token was created before current observation
+                  wasCreated = case find (\action -> 
+                    case action of
+                      S.CreateToken _ t _ -> t == tokenData.ticker
+                      _ -> false
+                  ) tokenCreationActions of
+                    Just _ -> true  -- Token was created during simulation
+                    Nothing -> false
+              in wasCreated
+            ) liveTokens
+            
             tokenPrices = map (\token -> 
               let -- Use unsafeCoerce to access foreign TokenMetadata fields
                   tokenData = unsafeCoerce token :: { ticker :: String, live :: Boolean }
-                  -- Calculate base price from ticker hash for consistency
-                  tickerLen = String.length tokenData.ticker
-                  baseMultiplier = (toNumber (tickerLen * 13) / 10.0) + 0.8  -- Range: 0.8-1.8x oracle price
-                  -- Add time-based oscillation for realistic market movement
-                  timeVariation = sin (obs.timestamp / 1000000.0) * 0.1  -- ±10% oscillation
-                  currentPrice = jitoPrice * baseMultiplier * (1.0 + timeVariation)
-                  -- POL floor is 95% of current price for stability
-                  polFloorPrice = currentPrice * 0.95
+                  
+                  -- Pool ID for this token pair
+                  poolId = tokenData.ticker <> "/FeelsSOL"
+                  
+                  -- Find POL allocation for this timestamp from history
+                  -- Use the most recent allocation before or at this timestamp
+                  -- Since polHistory is in reverse chronological order (newest first), find first match
+                  polAllocationAtTime = case find (\snapshot -> snapshot.timestamp <= obs.timestamp) polHistory of
+                    Just snapshot -> fromMaybe 0.0 (Map.lookup poolId snapshot.allocations)
+                    Nothing -> 0.0  -- No POL allocated yet at this time
+                  
+                  -- Debug: Log pool lookup with timestamp
+                  _ = unsafePerformEffect $ do
+                    log $ "Looking up pool " <> poolId <> " at timestamp " <> show obs.timestamp
+                    log $ "  POL allocation at this time: " <> show polAllocationAtTime
+                  
+                  -- For now, use a realistic initial price and let it evolve with trading
+                  -- In a real implementation, we'd fetch from the pool registry
+                  -- Each token starts at a slightly different price based on its ticker
+                  tickerSum = String.length tokenData.ticker * 100 + 
+                              foldl (\sum i -> sum + i * 17) 0 (range 0 (String.length tokenData.ticker - 1))
+                  basePrice = 0.8 + (toNumber (tickerSum `mod` 40)) * 0.01  -- Range: 0.8 to 1.2
+                  
+                  -- Add realistic price movement based on market conditions
+                  -- Each token should have unique price movements based on its characteristics
+                  marketTrend = case find (\(Tuple t _) -> t == tokenData.ticker) tokenCreationMap of
+                    Just (Tuple _ creationTime) ->
+                      let age = (obs.timestamp - creationTime) / 1000000.0
+                          -- Use ticker hash for unique but deterministic behavior
+                          tickerHash = foldl (\h c -> h * 31 + toCharCode c) 0 (toCharArray tokenData.ticker)
+                          -- Different frequency for each token based on hash
+                          frequency = 0.05 + (toNumber (tickerHash `mod` 20)) * 0.01
+                          -- Different phase offset for each token
+                          phase = toNumber (tickerHash `mod` 360) * 0.0174533  -- Convert to radians
+                          -- New tokens are more volatile
+                          volatility = max 0.05 (0.3 * exp (-age / 100.0))
+                          -- Unique price movement for each token
+                          movement = sin (age * frequency + phase) * volatility
+                      in (1.0 + movement)
+                    Nothing -> 1.0
+                    
+                  -- Calculate POL floor based on actual pool allocations at this time
+                  tokenSupply = 100000.0
+                  
+                  -- Floor price = POL allocated to this pool / token supply
+                  -- This ensures floor prices only go up as more POL is allocated
+                  -- Add a minimum floor of 0.01 to show tokens have value even before POL allocation
+                  polFloorPrice = max 0.01 (polAllocationAtTime / tokenSupply)
+                  
+                  -- Debug: Log floor price calculation
+                  _ = unsafePerformEffect $ log $ 
+                    "  Floor price for " <> tokenData.ticker <> " at block " <> show (length polHistory - length (filter (\s -> s.timestamp > obs.timestamp) polHistory)) <> ": " <> 
+                    show polAllocationAtTime <> " / " <> show tokenSupply <> " = " <> 
+                    show (polAllocationAtTime / tokenSupply) <> " -> " <> show polFloorPrice
+                  
+                  -- Ensure price never falls below POL floor (arbitrage would prevent this)
+                  rawPrice = basePrice * marketTrend * jitoPrice
+                  currentPrice = max polFloorPrice (rawPrice * 1.1)  -- Keep 10% above floor minimum
+                  
               in { ticker: tokenData.ticker
                  , price: currentPrice
                  , polFloor: polFloorPrice  
                  , live: tokenData.live
                  }
-            ) liveTokens
+            ) existingTokensAtTime
             
         in { timestamp: obs.timestamp
            , block: 0  -- Oracle doesn't track blocks
            , price: jitoPrice
-           , polValue: jitoPrice * 0.98  -- POL tracks slightly below price
+           , polValue: estimatedPOL  -- POL value based on actual reserves
            , tokens: tokenPrices
            }
       ) sortedHistory
@@ -246,12 +360,18 @@ processSimulationResults protocol finalState _results = do
         state <- read protocol.state
         result <- executeCommand (A.CreateToken userId ticker name) state
         case result of
-          Right (Tuple newState _) -> do
+          Right (Tuple newState (TokenCreated _)) -> do
             write newState protocol.state
             log $ "Successfully created token: " <> ticker
-            -- Tokens are now launched through the batch auction system
-            -- No need for legacy staking mechanism
-            log $ "Token created - ready for batch auction launch"
+            -- Verify token was added
+            verifyResult <- executeQuery A.GetAllTokens newState
+            case verifyResult of
+              Right (TokenList tokens) -> 
+                log $ "Token list after creation has " <> show (length tokens) <> " tokens"
+              _ -> log "Failed to verify token creation"
+          Right (Tuple newState _) -> do
+            write newState protocol.state
+            log $ "Token created but unexpected response type"
           Left err -> log $ "Failed to create token: " <> show err
       _ -> pure unit
 

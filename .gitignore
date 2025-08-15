@@ -12,10 +12,9 @@ dist/
 .sass-cache/
 
 # Build artifacts
-.server.pid
-.log-server.pid
+*.pid
 
-# Temporary files
+# Temporary files (old locations - kept for cleanup)
 /tmp/watch_files.txt
 /tmp/purescript_files.txt
 
@@ -27,6 +26,21 @@ dist/
 
 # Logs
 logs/
+*.log
+
+# Specific log files (in case they're created outside logs/)
+feels-browser-console.log
+feels-websocket-server.log
+.feels-httpserver.pid
+.feels-logserver.pid
+.feels-watch-state.txt
+
+# Old log file names (for cleanup)
+browser-console.log
+websocket-server.log
+.server.pid
+.log-server.pid
+.watch_files.txt
 
 # Editor
 .vscode/

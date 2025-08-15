@@ -200,7 +200,7 @@ handleCreateOffering ticker totalTokens phases state = do
   case offeringResult of
     Left err -> pure $ Left err
     Right offeringState -> do
-      let poolId = "FeelsSOL/" <> ticker
+      let poolId = ticker <> "/FeelsSOL"
           newState = state { offerings = Map.insert poolId offeringState state.offerings
                            , timestamp = state.timestamp 
                            }

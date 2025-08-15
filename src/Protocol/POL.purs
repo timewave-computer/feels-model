@@ -23,6 +23,8 @@ module Protocol.POL
   , initPOL
   , getPOLMetrics
   , contribute
+  , borrowFromStakers
+  , returnToStakers
   , allocateToPool
   , withdrawFromPool
   , getPoolAllocation
@@ -59,6 +61,8 @@ import FFI (sqrt)
 -- | Uses Ref for efficient updates during frequent operations
 type POLState = Ref
   { totalPOL :: Number                           -- Total POL across all sources
+  , permanentPOL :: Number                       -- Permanent protocol-owned (from fees)
+  , borrowedPOL :: Number                        -- Temporary POL from stakers
   , unallocated :: Number                        -- POL available for allocation
   , poolAllocations :: Map String POLAllocation  -- Per-pool allocation tracking
   , allocationStrategy :: AllocationStrategy     -- Allocation decision strategy
@@ -80,6 +84,8 @@ type POLMetrics =
 type POLAllocation =
   { poolId :: String            -- Pool identifier (e.g., "FeelsSOL/BONK")
   , allocated :: Number         -- Total amount allocated to pool
+  , permanentAllocated :: Number -- Permanent POL allocated (from fees)
+  , borrowedAllocated :: Number  -- Borrowed POL allocated (from stakers)
   , utilized :: Number          -- Amount currently deployed in AMM
   , performance :: Number       -- Performance score for reallocation decisions
   , deployedAmount :: Number    -- Actual amount in AMM positions
@@ -142,13 +148,17 @@ type PoolMetrics =
 -- | Initialize POL state with default configuration
 -- | Starts with empty allocations and manual allocation strategy
 initPOL :: Effect POLState
-initPOL = new
-  { totalPOL: 0.0
-  , unallocated: 0.0
-  , poolAllocations: Map.empty
-  , allocationStrategy: ManualAllocation
-  , contributionHistory: []
-  }
+initPOL = do
+  now <- currentTime
+  new
+    { totalPOL: 10000.0  -- Start with initial POL reserves
+    , permanentPOL: 10000.0  -- Initial reserves are permanent
+    , borrowedPOL: 0.0       -- No borrowed POL initially
+    , unallocated: 10000.0
+    , poolAllocations: Map.empty
+    , allocationStrategy: ManualAllocation
+    , contributionHistory: [{ timestamp: now, amount: 10000.0 }]
+    }
 
 --------------------------------------------------------------------------------
 -- POL CONTRIBUTION AND ALLOCATION
@@ -157,6 +167,7 @@ initPOL = new
 
 -- | Add new funds to the POL system from protocol fees
 -- | All contributions are initially unallocated and require manual allocation
+-- | These are PERMANENT protocol-owned funds that define the floor
 contribute :: POLState -> Number -> Effect Unit
 contribute polRef amount = do
   timestamp <- currentTime
@@ -168,28 +179,64 @@ contribute polRef amount = do
                         else newHistory
     in pol 
       { totalPOL = pol.totalPOL + amount
+      , permanentPOL = pol.permanentPOL + amount  -- Track as permanent
       , unallocated = pol.unallocated + amount
       , contributionHistory = trimmedHistory
       }) polRef
 
+-- | Add borrowed POL from stakers
+-- | This POL can be withdrawn and does NOT contribute to floor prices
+borrowFromStakers :: POLState -> Number -> Effect Unit
+borrowFromStakers polRef amount = do
+  modify_ (\pol -> pol 
+    { totalPOL = pol.totalPOL + amount
+    , borrowedPOL = pol.borrowedPOL + amount
+    , unallocated = pol.unallocated + amount  -- Available for allocation
+    }) polRef
+
+-- | Return borrowed POL to stakers
+-- | Only unallocated borrowed POL can be returned
+returnToStakers :: POLState -> Number -> Effect Boolean
+returnToStakers polRef amount = do
+  pol <- read polRef
+  if amount > pol.borrowedPOL || amount > pol.unallocated
+    then pure false  -- Insufficient borrowed POL or it's allocated
+    else do
+      modify_ (\p -> p
+        { totalPOL = p.totalPOL - amount
+        , borrowedPOL = p.borrowedPOL - amount
+        , unallocated = p.unallocated - amount
+        }) polRef
+      pure true
+
 -- | Allocate POL to a specific pool for potential deployment
 -- | Returns false if insufficient unallocated POL available
+-- | Prioritizes permanent POL for floor stability
 allocateToPool :: POLState -> String -> Number -> Effect Boolean
 allocateToPool polRef poolId amount = do
   pol <- read polRef
   if amount > pol.unallocated
     then pure false  -- Insufficient unallocated POL
     else do
+      -- Calculate how much is permanent vs borrowed
+      -- We need to track how much permanent POL is already allocated
+      let allocatedPermanent = sum $ map _.permanentAllocated (Map.values pol.poolAllocations)
+          unallocatedPermanent = pol.permanentPOL - allocatedPermanent
+          permanentToAllocate = min amount (max 0.0 unallocatedPermanent)
+          borrowedToAllocate = amount - permanentToAllocate
+      
       modify_ (\p -> p
         { unallocated = p.unallocated - amount
-        , poolAllocations = Map.alter (updateAllocation amount) poolId p.poolAllocations
+        , poolAllocations = Map.alter (updateAllocation amount permanentToAllocate borrowedToAllocate) poolId p.poolAllocations
         }) polRef
       pure true
   where
     -- Create new allocation or add to existing one
-    updateAllocation amt Nothing = Just 
+    updateAllocation amt permAmt borrowAmt Nothing = Just 
       { poolId
       , allocated: amt
+      , permanentAllocated: permAmt
+      , borrowedAllocated: borrowAmt
       , utilized: 0.0
       , performance: 1.0           -- Default performance score
       , deployedAmount: 0.0
@@ -197,23 +244,32 @@ allocateToPool polRef poolId amount = do
       , tickUpper: 0
       , lastDeployment: 0.0
       }
-    updateAllocation amt (Just alloc) = Just $ alloc 
-      { allocated = alloc.allocated + amt }
+    updateAllocation amt permAmt borrowAmt (Just alloc) = Just $ alloc 
+      { allocated = alloc.allocated + amt 
+      , permanentAllocated = alloc.permanentAllocated + permAmt
+      , borrowedAllocated = alloc.borrowedAllocated + borrowAmt
+      }
 
 -- | Withdraw POL from a pool allocation back to unallocated funds
--- | Only allows withdrawal of non-utilized POL (not actively deployed)
+-- | Only allows withdrawal of non-utilized BORROWED POL
+-- | PERMANENT POL cannot be withdrawn to maintain floor prices
 withdrawFromPool :: POLState -> String -> Number -> Effect Boolean
 withdrawFromPool polRef poolId amount = do
   pol <- read polRef
   case Map.lookup poolId pol.poolAllocations of
     Nothing -> pure false
     Just alloc ->
-      if amount > (alloc.allocated - alloc.utilized)
-        then pure false  -- Cannot withdraw utilized POL
+      let availableToWithdraw = min (alloc.allocated - alloc.utilized) alloc.borrowedAllocated
+      in if amount > availableToWithdraw
+        then pure false  -- Cannot withdraw more than available borrowed POL
         else do
           modify_ (\p -> p
             { unallocated = p.unallocated + amount
-            , poolAllocations = Map.insert poolId (alloc { allocated = alloc.allocated - amount }) p.poolAllocations
+            , poolAllocations = Map.insert poolId 
+                (alloc { allocated = alloc.allocated - amount
+                       , borrowedAllocated = alloc.borrowedAllocated - amount 
+                       -- Permanent allocation unchanged - maintains floor
+                       }) p.poolAllocations
             }) polRef
           pure true
 

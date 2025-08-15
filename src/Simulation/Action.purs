@@ -103,8 +103,17 @@ generateTradingSequence config state = do
   baseActions <- random
   let baseNumActions = Int.floor $ config.actionFrequency * (0.5 + baseActions)
   
+  -- Market volatility multiplier - volatile markets trigger more trading
+  let volatilityMultiplier = case config.scenario of
+        VolatileMarket -> 3.0   -- 3x more trades in volatile markets
+        CrashScenario -> 2.5    -- 2.5x panic selling/buying
+        BearMarket -> 1.8       -- 1.8x increased exit activity
+        RecoveryMarket -> 1.5   -- 1.5x opportunity buying
+        BullMarket -> 1.2       -- 1.2x moderate increase
+        SidewaysMarket -> 1.0   -- Normal activity
+  
   -- Ensure realistic minimum activity levels for protocol viability
-  let numActions = max 3 baseNumActions
+  let numActions = max 3 (Int.floor $ Int.toNumber baseNumActions * volatilityMultiplier)
   
   -- Analyze current token ecosystem status
   let existingTokenCount = length $ getRecentlyCreatedTokens state.actionHistory
@@ -224,11 +233,21 @@ generateTokenSwapAction config state account = do
         then do
           amountRand <- random
           
+          -- Market volatility amplifies trading sizes
+          let volatilityMultiplier = case config.scenario of
+                VolatileMarket -> 3.0   -- 3x for arbitrage opportunities
+                CrashScenario -> 2.5    -- 2.5x panic trading
+                BearMarket -> 2.0       -- 2x defensive repositioning
+                RecoveryMarket -> 1.8   -- 1.8x opportunity trading
+                _ -> 1.0                -- Normal size
+                
           -- Profile-based position sizing for realistic market behavior
-          let swapAmount = case profile of
+          let baseSwapAmount = case profile of
                 Whale -> 100.0 + amountRand * 400.0      -- 100-500 FeelsSOL (high impact)
                 Aggressive -> 50.0 + amountRand * 150.0  -- 50-200 FeelsSOL (active trading)
                 _ -> 20.0 + amountRand * 80.0            -- 20-100 FeelsSOL (typical retail)
+                
+          let swapAmount = baseSwapAmount * volatilityMultiplier
               
               -- Risk management: limit to 80% of available balance
               actualAmount = min swapAmount (account.feelsSOLBalance * 0.8)
@@ -236,18 +255,31 @@ generateTokenSwapAction config state account = do
               -- Market making spread: 5-15% above market price for buy orders
               priceWithSpread = currentMarketPrice * (1.05 + priceRand * 0.1)
           
-          pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread spotDuration Nothing
+          -- 50% chance to create offer, 50% chance to take existing offer
+          actionChoice <- random
+          if actionChoice < 0.5
+            then pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount FeelsSOL priceWithSpread spotDuration Nothing
+            else pure $ TakeLoan account.id (Token tokenTicker) actualAmount FeelsSOL actualAmount spotDuration
           
         -- Execute sell orders (Token → FeelsSOL)
         else if account.feelsSOLBalance >= 20.0
           then do
             amountRand <- random
             
+            -- Market volatility amplifies sell sizes too
+            let volatilityMultiplier = case config.scenario of
+                  VolatileMarket -> 3.0   -- 3x for arbitrage opportunities
+                  CrashScenario -> 3.5    -- 3.5x panic selling is stronger
+                  BearMarket -> 2.5       -- 2.5x risk reduction
+                  _ -> 1.0                -- Normal size
+                  
             -- Profile-based sell sizing with more conservative amounts
-            let swapAmount = case profile of
+            let baseSwapAmount = case profile of
                   Whale -> 80.0 + amountRand * 320.0       -- 80-400 FeelsSOL
                   Aggressive -> 40.0 + amountRand * 120.0  -- 40-160 FeelsSOL
                   _ -> 15.0 + amountRand * 60.0            -- 15-75 FeelsSOL
+                  
+            let swapAmount = baseSwapAmount * volatilityMultiplier
                 
                 -- More conservative limit for sells: 60% of balance
                 actualAmount = min swapAmount (account.feelsSOLBalance * 0.6)
@@ -255,7 +287,11 @@ generateTokenSwapAction config state account = do
                 -- Market making spread: 5-15% below market price for sell orders
                 priceWithSpread = currentMarketPrice * (0.95 - priceRand * 0.1)
             
-            pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread spotDuration Nothing
+            -- 50% chance to create offer, 50% chance to take existing offer
+            actionChoice <- random
+            if actionChoice < 0.5
+              then pure $ CreateLendOffer account.id FeelsSOL actualAmount (Token tokenTicker) priceWithSpread spotDuration Nothing
+              else pure $ TakeLoan account.id FeelsSOL actualAmount (Token tokenTicker) actualAmount spotDuration
           else pure $ WaitBlocks 1  -- Insufficient balance for trading
 
 --------------------------------------------------------------------------------
@@ -302,6 +338,15 @@ generateRandomAction config state = do
   
   actionRoll <- random
   
+  -- Market condition influences action probabilities
+  let marketBias = case config.scenario of
+        BearMarket -> { exitBias: 0.7, entryBias: 0.1 }      -- 70% exit, 10% entry
+        CrashScenario -> { exitBias: 0.8, entryBias: 0.05 }  -- 80% panic exit, 5% entry
+        VolatileMarket -> { exitBias: 0.5, entryBias: 0.3 }  -- 50% exit, 30% entry (arb)
+        RecoveryMarket -> { exitBias: 0.2, entryBias: 0.6 }  -- 20% exit, 60% buy the dip
+        BullMarket -> { exitBias: 0.2, entryBias: 0.5 }      -- 20% profit taking, 50% FOMO
+        SidewaysMarket -> { exitBias: 0.3, entryBias: 0.3 }  -- 30% each, balanced
+  
   -- Prioritize token trading when tokens exist and account has sufficient balance
   let existingTokens = getRecentlyCreatedTokens state.actionHistory
   shouldCreateTokenSwap <- if length existingTokens > 0 && account.feelsSOLBalance > 50.0
@@ -312,20 +357,44 @@ generateRandomAction config state = do
   
   if shouldCreateTokenSwap
     then generateTokenSwapAction config state account
-    else if actionRoll < 0.3
+    else if actionRoll < marketBias.exitBias && account.feelsSOLBalance > 10.0
       then do
-        -- Protocol entry: JitoSOL → FeelsSOL conversion
+        -- Protocol exit: FeelsSOL → JitoSOL conversion (market-responsive)
         amountRand <- random
         
+        -- Exit amounts vary by market conditions and profile
+        let panicMultiplier = case config.scenario of
+              CrashScenario -> 0.8  -- 80% of holdings in panic
+              BearMarket -> 0.6     -- 60% risk reduction
+              VolatileMarket -> 0.4 -- 40% partial exit
+              _ -> 0.3              -- 30% normal profit taking
+              
+        let exitAmount = account.feelsSOLBalance * panicMultiplier * (0.5 + amountRand * 0.5)
+        
+        pure $ ExitProtocol account.id exitAmount FeelsSOL
+      else if actionRoll < (marketBias.exitBias + marketBias.entryBias)
+      then do
+        -- Protocol entry: JitoSOL → FeelsSOL conversion (market-responsive)
+        amountRand <- random
+        
+        -- Entry amounts influenced by market opportunity
+        let opportunityMultiplier = case config.scenario of
+              RecoveryMarket -> 2.0  -- 2x buying the dip
+              VolatileMarket -> 1.5  -- 1.5x arbitrage capital
+              BullMarket -> 1.2      -- 1.2x FOMO buying
+              _ -> 1.0               -- Normal entry
+              
         -- Profile-based entry amounts reflecting realistic user behavior
-        let amount = case account.profile of
-              Whale -> 500.0 + amountRand * 2000.0       -- 500-2500 JitoSOL (institutional)
-              Aggressive -> 200.0 + amountRand * 800.0   -- 200-1000 JitoSOL (active traders)
-              Conservative -> 50.0 + amountRand * 200.0  -- 50-250 JitoSOL (cautious users)
-              _ -> 100.0 + amountRand * 400.0            -- 100-500 JitoSOL (typical users)
+        let baseAmount = case account.profile of
+              Whale -> 500.0 + amountRand * 2000.0       -- 500-2500 JitoSOL
+              Aggressive -> 200.0 + amountRand * 800.0   -- 200-1000 JitoSOL
+              Conservative -> 50.0 + amountRand * 200.0  -- 50-250 JitoSOL
+              _ -> 100.0 + amountRand * 400.0            -- 100-500 JitoSOL
+              
+        let amount = baseAmount * opportunityMultiplier
         
         pure $ EnterProtocol account.id amount JitoSOL
-      else if actionRoll < 0.5
+      else if actionRoll < 0.7
         then do
           -- Protocol exit: FeelsSOL → JitoSOL conversion (only if sufficient balance)
           if account.feelsSOLBalance > 50.0

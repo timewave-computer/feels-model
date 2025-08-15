@@ -10,7 +10,7 @@ const path = require('path');
 const app = express();
 const PORT = 3001;
 const LOG_DIR = path.join(__dirname, '..', 'logs');
-const LOG_FILE = path.join(LOG_DIR, 'browser-console.log');
+const LOG_FILE = path.join(LOG_DIR, 'feels-browser-console.log');
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));

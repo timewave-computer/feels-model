@@ -30,6 +30,7 @@ module Simulation.Engine
 import Prelude
 import Data.Array (length, range, (:))
 import Data.Foldable (sum, foldl)
+import Data.Map as Map
 import Effect (Effect)
 import Effect.Console (log)
 
@@ -65,6 +66,7 @@ type SimulationState =
   , priceHistory :: Array { price :: Number, timestamp :: Number }  -- Historical price data
   , actionHistory :: Array TradingAction       -- Complete history of all executed actions
   , nextPositionId :: Int                      -- Counter for generating unique position IDs
+  , polAllocationHistory :: Array { block :: Int, timestamp :: Number, allocations :: Map.Map String Number }  -- POL allocation history by pool over time
   }
 
 --------------------------------------------------------------------------------
@@ -114,6 +116,7 @@ initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
        , priceHistory: []                   -- Empty initial price history
        , actionHistory: []                  -- Empty initial action history
        , nextPositionId: 1                  -- Start position ID counter
+       , polAllocationHistory: []           -- Empty initial POL allocation history
        }
 
 --------------------------------------------------------------------------------

@@ -18,6 +18,7 @@ module Protocol.Oracle
   , BufferConfig
   , initOracle
   , updatePrice
+  , updatePriceWithTimestamp
   , getCurrentPrice
   , getTWAP
   , getVolatility
@@ -126,6 +127,18 @@ initOracle initialPrice = do
 updatePrice :: Number -> Oracle -> Effect Unit
 updatePrice newPrice oracleRef = do
   timestamp <- currentTime
+  modify_ (\oracle ->
+    oracle
+      { currentPrice = newPrice
+      , priceHistory = take 100 ({ price: newPrice, timestamp } : oracle.priceHistory)
+      , lastUpdate = timestamp
+      }
+  ) oracleRef
+
+-- | Update price with specific timestamp (for simulations)
+-- | Allows controlled time progression in simulated environments
+updatePriceWithTimestamp :: Number -> Number -> Oracle -> Effect Unit
+updatePriceWithTimestamp newPrice timestamp oracleRef = do
   modify_ (\oracle ->
     oracle
       { currentPrice = newPrice

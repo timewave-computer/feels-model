@@ -145,7 +145,7 @@ initialUIState =
   , lenderOffers: []
   , protocolStats: Nothing
   , userTokens: []
-  , jitoBalance: 0.0
+  , jitoBalance: 1000.0
   , feelsBalance: 0.0
   , priceHistory: []
   }

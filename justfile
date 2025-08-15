@@ -22,13 +22,7 @@ build:
     @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
-    @npx spago build
-    @echo "Bundling JavaScript..."
-    @echo "import * as Main from \"../output/Main/index.js\";" > output/entry.js
-    @echo "function main() { Main.main(); }" >> output/entry.js
-    @echo "if (typeof window !== \"undefined\") { window.addEventListener(\"load\", main); }" >> output/entry.js
-    @npx esbuild output/entry.js --bundle --outfile=dist/bundle.js --platform=browser --minify --target=es2020
-    @rm output/entry.js
+    @npx spago bundle --module Main --outfile dist/bundle.js
     @echo "Build complete! Run 'just serve' to serve the application"
 
 # Build quietly (for internal use)
@@ -41,12 +35,7 @@ _build-quiet:
     @cp assets/feels_guy.png dist/ > /dev/null 2>&1 || exit 1
     @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @if [ ! -f src/Main.purs ]; then exit 1; fi
-    @npx spago build > /dev/null 2>&1 || exit 1
-    @echo "import * as Main from \"../output/Main/index.js\";" > output/entry.js
-    @echo "function main() { Main.main(); }" >> output/entry.js
-    @echo "if (typeof window !== \"undefined\") { window.addEventListener(\"load\", main); }" >> output/entry.js
-    @npx esbuild output/entry.js --bundle --outfile=dist/bundle.js --platform=browser --minify --target=es2020 > /dev/null 2>&1 || exit 1
-    @rm output/entry.js
+    @npx spago bundle --module Main --outfile dist/bundle.js > /dev/null 2>&1 || exit 1
 
 # Run PureScript tests
 test:
@@ -86,13 +75,13 @@ serve:
     @echo ""
     @echo "Browser Log Mirror: http://localhost:3001"
     @echo "Application: http://127.0.0.1:9000"
-    @echo "Logs will be saved to: logs/browser-console.log"
-    @echo "To tail logs in another terminal: tail -f logs/browser-console.log"
+    @echo "Logs will be saved to: logs/feels-browser-console.log"
+    @echo "To tail logs in another terminal: tail -f logs/feels-browser-console.log"
     @echo "Hit CTRL-C to stop both servers"
     @echo ""
     @mkdir -p logs
     @# Install express temporarily and start log server in background
-    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node proxy/log-server.js) > /dev/null 2>&1 & echo $$! > .log-server.pid
+    @(npm install express@4.19.2 --no-save > /dev/null 2>&1 && node proxy/log-server.js) > /dev/null 2>&1 & echo $$! > logs/.feels-logserver.pid
     @sleep 2
     @# Start static file server
     @npx http-server dist -c-1 -p 9000 --no-dotfiles || npx http-server dist -c-1 -p 9001 --no-dotfiles
@@ -126,19 +115,31 @@ watch:
     @echo "Hit CTRL-C to stop the server"
     @echo "Watching for changes..."
     @echo ""
-    @npx http-server dist -c-1 -p 9000 > /dev/null 2>&1 & echo $$! > .server.pid
-    @ls -la src/*.purs test/*.purs assets/styles.scss 2>/dev/null > /tmp/watch_files.txt || touch /tmp/watch_files.txt
+    @mkdir -p logs
+    @npx http-server dist -c-1 -p 9000 > /dev/null 2>&1 & echo $$! > logs/.feels-httpserver.pid
+    @# Initialize watch state for fallback method
+    @find src test -name "*.purs" -exec ls -la {} + 2>/dev/null > logs/.feels-watch-state.txt || touch logs/.feels-watch-state.txt
+    @ls -la assets/styles.scss 2>/dev/null >> logs/.feels-watch-state.txt || true
     @while true; do \
         if command -v inotifywait >/dev/null 2>&1; then \
-            inotifywait -q -e modify src/*.purs test/*.purs assets/styles.scss > /dev/null 2>&1; \
+            echo "Using inotifywait for file watching (Linux)"; \
+            inotifywait -q -e modify -r src/ test/ assets/styles.scss > /dev/null 2>&1; \
+            echo "Changes detected, rebuilding..."; \
+        elif command -v fswatch >/dev/null 2>&1; then \
+            echo "Using fswatch for file watching (macOS)"; \
+            fswatch -1 -r src/ test/ assets/styles.scss > /dev/null 2>&1; \
             echo "Changes detected, rebuilding..."; \
         else \
+            echo "No file watcher available, using polling fallback (2s intervals)"; \
             sleep 2; \
-            if ls -la src/*.purs test/*.purs assets/styles.scss 2>/dev/null | diff /tmp/watch_files.txt - > /dev/null 2>&1; then \
-                continue; \
-            else \
+            find src test -name "*.purs" -exec ls -la {} + 2>/dev/null > logs/.feels-watch-state-new.txt || touch logs/.feels-watch-state-new.txt; \
+            ls -la assets/styles.scss 2>/dev/null >> logs/.feels-watch-state-new.txt || true; \
+            if ! diff logs/.feels-watch-state.txt logs/.feels-watch-state-new.txt > /dev/null 2>&1; then \
                 echo "Changes detected, rebuilding..."; \
-                ls -la src/*.purs test/*.purs assets/styles.scss 2>/dev/null > /tmp/watch_files.txt || touch /tmp/watch_files.txt; \
+                mv logs/.feels-watch-state-new.txt logs/.feels-watch-state.txt; \
+            else \
+                rm -f logs/.feels-watch-state-new.txt; \
+                continue; \
             fi; \
         fi; \
         if just _build-quiet; then \
@@ -155,7 +156,7 @@ clean:
     @pkill -f "node.*proxy/log-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
-    @rm -f .server.pid .log-server.pid
+    @rm -f logs/.feels-httpserver.pid logs/.feels-logserver.pid logs/.feels-watch-state.txt logs/.feels-watch-state-new.txt index.js
     @echo "Clean complete!"
 
 # Clean and also remove browser logs
@@ -164,7 +165,7 @@ clean-all:
     @pkill -f "node.*proxy/log-server.js" 2>/dev/null || true
     @pkill -f "http-server.*dist" 2>/dev/null || true
     @rm -rf output/ .spago/ dist/ .sass-cache/
-    @rm -f .server.pid .log-server.pid
+    @rm -f logs/.feels-httpserver.pid logs/.feels-logserver.pid logs/.feels-watch-state.txt logs/.feels-watch-state-new.txt index.js
     @echo "Clean complete!"
 
 # Build production version without remote control and logging
@@ -181,13 +182,7 @@ build-prod:
     @cp assets/websocket-client.js dist/ 2>/dev/null || true
     @echo "Building PureScript project..."
     @if [ ! -f src/Main.purs ]; then echo "Error: src/Main.purs not found!"; exit 1; fi
-    @npx spago build
-    @echo "Bundling JavaScript..."
-    @echo "import * as Main from \"../output/Main/index.js\";" > output/entry.js
-    @echo "function main() { Main.main(); }" >> output/entry.js
-    @echo "if (typeof window !== \"undefined\") { window.addEventListener(\"load\", main); }" >> output/entry.js
-    @npx esbuild output/entry.js --bundle --outfile=dist/bundle.js --platform=browser --minify --target=es2020
-    @rm output/entry.js
+    @npx spago bundle --module Main --outfile dist/bundle.js
     @echo "Production build complete!"
 
 # Install PureScript dependencies

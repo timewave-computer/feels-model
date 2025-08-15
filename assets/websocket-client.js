@@ -421,14 +421,54 @@
         const datasets = chart.data.datasets.map(ds => ({
             label: ds.label,
             dataLength: ds.data ? ds.data.length : 0,
-            sampleData: ds.data ? ds.data.slice(0, 5) : []
+            hasData: ds.data && ds.data.length > 0 && ds.data.some(p => p && p.y !== null),
+            firstDataPoint: ds.data && ds.data.find(p => p && p.y !== null),
+            lastDataPoint: ds.data && ds.data.slice().reverse().find(p => p && p.y !== null)
         }));
+        
+        // Check for datasets in legend but not displayed
+        const displayedLabels = datasets.filter(ds => ds.hasData).map(ds => ds.label);
+        const allLabels = datasets.map(ds => ds.label);
+        const missingLabels = allLabels.filter(label => !displayedLabels.includes(label));
         
         return { 
             success: true, 
             datasets: datasets,
-            totalDatasets: datasets.length
+            totalDatasets: datasets.length,
+            displayedDatasets: displayedLabels.length,
+            missingDatasets: missingLabels
         };
+    });
+    
+    window.remoteControl.registerAction('debugChartData', () => {
+        const dataElement = document.getElementById('chart-data-hidden');
+        if (!dataElement) {
+            return { success: false, error: 'No chart data element found' };
+        }
+        
+        const rawData = dataElement.textContent;
+        try {
+            const data = JSON.parse(rawData);
+            const firstPoint = data[0];
+            const lastPoint = data[data.length - 1];
+            
+            // Count tokens per observation
+            const tokenCounts = data.map(point => ({
+                timestamp: point.timestamp,
+                tokenCount: point.tokens ? point.tokens.length : 0,
+                tickers: point.tokens ? point.tokens.map(t => t.ticker) : []
+            }));
+            
+            return {
+                success: true,
+                totalPoints: data.length,
+                firstPoint: firstPoint,
+                lastPoint: lastPoint,
+                tokenProgression: tokenCounts.slice(0, 10).concat(['...'], tokenCounts.slice(-5))
+            };
+        } catch (e) {
+            return { success: false, error: 'Failed to parse chart data: ' + e.message };
+        }
     });
     
     window.remoteControl.registerAction('checkChart', () => {

@@ -1,31 +1,10 @@
-# Architecture Decision Record: Pool-Centric Unified Tick System with Vertically Integrated Issuance
+# Pool-Centric Unified Tick System with Vertically Integrated Issuance
 
-**Status**: Adopted
-**Date**: 2024
-**Authors**: System Architecture Team
 
-## Context
 
-The Feels Protocol requires a comprehensive system to manage individual liquidity pools. Each pool represents a FeelsSOL/Token pair and must handle:
 
-- **Price Discovery**: Track spot price and volatility within the pool
-- **Floor System**: Maintain an ever-increasing price support level
-- **Liquidity Distribution**: Allocate liquidity optimally across price ranges
-- **Position Management**: Track user stakes and contributions
-- **Protocol-Owned Liquidity (POL)**: Deploy protocol liquidity strategically
-- **Dual Token Issuance**: Control minting/burning of both tokens in the pair
 
-Initially, these were conceived as separate systems. However, this led to synchronization complexity, redundant calculations, and potential inconsistencies. Additionally, the protocol's unique ability to issue both tokens in each pair was not fully leveraged.
 
-## Decision
-
-We will implement a **Pool-Centric Unified Tick System with Vertically Integrated Issuance** where:
-
-1. **Each pool is a self-contained market** with its own state and dynamics
-2. **Ticks are living entities** that maintain local state and metrics
-3. **The protocol controls issuance of both tokens** in each pair
-4. **All state updates are atomic** within a pool
-5. **The floor emerges from actual market support** rather than arbitrary rules
 
 ## Architecture
 

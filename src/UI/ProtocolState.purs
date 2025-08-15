@@ -24,6 +24,7 @@ import Data.Map (Map)
 import Data.Map as Map
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, write, modify_)
+import Effect.Console (log)
 import Data.Traversable (traverse)
 
 -- Import result types
@@ -38,7 +39,7 @@ import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
 import Protocol.POL (POLState, initPOL, contribute)
 import Protocol.Oracle (Oracle, initOracle)
 import Protocol.Incentive (MarketDynamics, initMarketDynamics)
-import UI.Account (AccountRegistry, initAccountRegistry)
+import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance)
 import Protocol.Offering (OfferingState)
 import Protocol.Error (ProtocolError)
 import FFI (currentTime)
@@ -140,6 +141,10 @@ initStateImpl = do
   let polInit = initPOL
   polState :: POLState <- polInit
   
+  -- Debug: Check POL initialization
+  polStateData <- read polState
+  log $ "POL initialized with totalPOL: " <> show polStateData.totalPOL
+  
   -- Initialize marketDynamics with oracle and POL
   marketDynamics :: MarketDynamics <- initMarketDynamics oracle polState
   
@@ -195,6 +200,10 @@ initStateImpl = do
     , lastUpdateBlock: 0
     }
     poolRegistry
+  
+  -- Set up initial balances for default users
+  _ <- updateChainAccountBalance accounts "main-user" 1000.0
+  _ <- updateChainAccountBalance accounts "demo-user" 1000.0
   
   -- Create runtime
   stateRef <- new initialState

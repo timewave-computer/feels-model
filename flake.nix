@@ -24,6 +24,12 @@
               just
               dart-sass
               rsync
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # Linux file watching
+              inotify-tools
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              # macOS file watching
+              fswatch
             ];
             shellHook = ''
               echo "PureScript development environment ready!"
@@ -33,7 +39,7 @@
               echo "  just build   - Build the project"
               echo "  just test    - Run tests"
               echo "  just serve   - Serve the project"
-              echo "  just watch   - Watch for changes (polls every 2s on macOS)"
+              echo "  just watch   - Watch for changes (inotifywait/fswatch)"
               echo "  just deploy  - Deploy to server (requires .env file)"
             '';
           };

@@ -19,7 +19,7 @@ const PORT = 3002;
 
 // Setup logging to logs/ directory
 const logsDir = path.join(__dirname, '..', 'logs');
-const logFile = path.join(logsDir, 'websocket-server.log');
+const logFile = path.join(logsDir, 'feels-websocket-server.log');
 
 // Ensure logs directory exists
 if (!fs.existsSync(logsDir)) {

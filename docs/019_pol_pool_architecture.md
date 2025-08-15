@@ -16,7 +16,7 @@ type POLState = Ref
   , unallocated :: Number                      -- POL not yet allocated to pools
   , poolAllocations :: Map String POLAllocation  -- Pool-specific allocations
   , allocationStrategy :: AllocationStrategy     -- How to allocate POL to pools
-  , tokenBalances :: Array { token :: TokenType, balance :: Number }  -- Legacy field
+  , contributionHistory :: Array { timestamp :: Number, amount :: Number }  -- History of contributions
   }
 ```
 
@@ -28,24 +28,13 @@ type POLState = Ref
 
 ### 2. Pool-Level POL Usage
 
-Each **Pool** has allocated POL that it can deploy:
-
-```purescript
-type ManagedLiquidity =
-  { total :: Number                -- Total protocol-managed liquidity
-  , senior :: TrancheBucket        -- Senior positions (1x exposure)
-  , junior :: TrancheBucket        -- Junior positions (up to 3x exposure)
-  , polAllocation :: Number        -- POL allocated to this pool (from global POL)
-  , polUtilized :: Number          -- POL currently deployed in positions
-  , distribution :: Distribution   -- How it's distributed across ticks
-  , termBuckets :: Map TermType TermBucket  -- Organize by term
-  }
-```
+-- The concept of "ManagedLiquidity" is handled by "POLAllocation" in Protocol.POL.purs
+-- and "TrancheState" in Protocol.Pool.purs. It is not explicitly defined as a top-level record.
 
 **Key Points:**
-- `polAllocation`: Amount allocated from global POL to this pool
-- `polUtilized`: Amount currently deployed in liquidity positions
-- Pools cannot exceed their allocation without requesting more from POLManager
+- `polAllocation`: Amount allocated from global POL to this pool (part of `POLAllocation` in `Protocol.POL.purs`)
+- `polUtilized`: Amount currently deployed in liquidity positions (part of `POLAllocation` in `Protocol.POL.purs`)
+- Pools cannot exceed their allocation without requesting more from POLManager (enforced by `deployPOL` in `Protocol.POL.purs`)
 
 ### 3. Flow of Funds
 
@@ -58,17 +47,17 @@ Protocol Fees → Global POL → Pool Allocations → Liquidity Positions
 1. **Fee Collection**: FeelsSOL minting/burning fees, trading fees, and staking rewards flow to global POL
 2. **Allocation**: POLManager allocates POL to pools based on strategy (volume, TVL, performance)
 3. **Deployment**: Pools deploy their allocated POL into liquidity positions
-4. **Rebalancing**: Underperforming pools can have POL withdrawn and reallocated
+4. **Rebalancing**: Underperforming pools can have POL withdrawn and reallocated (conceptual process orchestrated by keepers/off-chain logic)
 
 ### 4. Allocation Strategies
 
 ```purescript
 data AllocationStrategy
-  = ProportionalToVolume    -- More volume = more POL
-  = ProportionalToTVL       -- Larger pools get more POL
-  = FixedAllocation         -- Fixed amounts per pool
-  = PerformanceBased        -- Better performing pools get more
+  = ManualAllocation    -- Manual allocation via allocateToPool function
 ```
+
+-- Other allocation strategies (ProportionalToVolume, ProportionalToTVL, FixedAllocation, PerformanceBased)
+-- are conceptual and planned for future implementation.
 
 ### 5. Benefits
 
@@ -82,13 +71,13 @@ data AllocationStrategy
 
 ```purescript
 -- FeelsSOL system contributes fees to global POL
-contributeToTokenPOL polState JitoSOL feeAmount
+contribute polState feeAmount
 
 -- Allocate POL to a high-performing pool
 allocateToPool polState "FeelsSOL/BONK" 1000.0
 
 -- Pool uses its allocation for liquidity
-deployPOLLiquidity pool amount
+deployPOL polState poolId amount tickLower tickUpper triggerType
 
 -- Rebalance from underperforming pool
 withdrawFromPool polState "FeelsSOL/COPE" 500.0
@@ -97,7 +86,7 @@ allocateToPool polState "FeelsSOL/WIF" 500.0
 
 ## Migration Path
 
-1. ~~Replace `POL.purs` stub with enhanced POL module~~ ✓ Completed
-2. Update Pool initialization to request POL allocations from unified POL module
-3. Implement rebalancing logic based on pool metrics
-4. Add POL allocation strategy configuration to system initialization
+1. Replace `POL.purs` stub with enhanced POL module ✓ Completed
+2. Update Pool initialization to request POL allocations from unified POL module (Conceptual/Planned)
+3. Implement rebalancing logic based on pool metrics (Conceptual/Planned)
+4. Add POL allocation strategy configuration to system initialization (Conceptual/Planned)
