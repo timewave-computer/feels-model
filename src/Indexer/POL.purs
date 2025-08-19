@@ -45,19 +45,18 @@ module Indexer.POL
   ) where
 
 import Prelude
-import Data.Array ((:), take, filter, foldl, length, partition, uncons)
+import Data.Array ((:), filter, foldl, length, partition, uncons)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Foldable (sum, maximum, minimum)
 import Data.Int (toNumber, floor)
-import Data.Ord (max, min, abs, comparing)
-import Data.Function (on)
+import Data.Ord (abs, max)
 import FFI (log)
 import Effect (Effect)
 
 -- Import analytics from other indexer modules
 import Indexer.Tick (TickMetrics)
 import Protocol.Pool (PoolEvent(..))
-import Protocol.POL (POLTriggerType(..))
+import Protocol.POLVault (POLTriggerType(..))
 
 --------------------------------------------------------------------------------
 -- KEEPER ACTION TYPES
@@ -141,7 +140,7 @@ findOptimalPOLRange analytics =
 -- | Score POL deployment range using weighted multi-factor analysis
 -- | Combines volume capture, support alignment, fee potential, and risk factors
 scorePOLRange :: PoolAnalytics -> Array HotZone -> Array Int -> _ -> _
-scorePOLRange analytics hotZones supportZones range =
+scorePOLRange analytics _ supportZones range =
   let
     -- Volume capture: How much trading activity will POL capture
     volumeScore = calculateVolumeCoverage range analytics.activeTicks
@@ -239,8 +238,7 @@ calculateEmergencyAmount analytics =
 -- | Higher coverage indicates better fee generation potential
 calculateVolumeCoverage :: _ -> Array TickMetrics -> Number
 calculateVolumeCoverage range ticks = 
-  -- TODO: TickMetrics doesn't have tick field
-  let relevantTicks = ticks -- filter (\t -> t.tick >= range.lower && t.tick <= range.upper) ticks
+  let relevantTicks = filter (\t -> t.tick >= range.lower && t.tick <= range.upper) ticks
       rangeVolume = sum $ map _.volume24h relevantTicks
       totalVolume = sum $ map _.volume24h ticks
   in if totalVolume > 0.0 then rangeVolume / totalVolume else 0.0
@@ -255,13 +253,13 @@ calculateSupportAlignment range supportZones =
 -- | Estimate potential fee generation from POL deployment
 -- | Based on volume capture and standard AMM fee structure
 estimateFeeGeneration :: _ -> PoolAnalytics -> Number
-estimateFeeGeneration range analytics = 
+estimateFeeGeneration _ analytics = 
   analytics.volume24h * 0.003 * 0.5 -- 0.3% fee rate with 50% capture efficiency
 
 -- | Calculate risk adjustment factor based on pool volatility
 -- | Higher volatility reduces effective POL performance
 calculateRiskFactor :: _ -> Number -> Number
-calculateRiskFactor range volatility = 
+calculateRiskFactor _ volatility = 
   max 0.1 (1.0 - volatility / 100.0) -- Inverse relationship with volatility
 
 --------------------------------------------------------------------------------
@@ -273,7 +271,7 @@ calculateRiskFactor range volatility =
 -- | Maintains rolling efficiency metrics based on deployment outcomes
 processPOLEvent :: PoolEvent -> PoolAnalytics -> Effect PoolAnalytics
 processPOLEvent event state = case event of
-  POLDeployed { pool, amount, tickLower, tickUpper, triggerType, slot } -> do
+  POLDeployed { tickLower, tickUpper, triggerType } -> do
     -- Analyze deployment characteristics for efficiency calculation
     let rangeWidth = toNumber (tickUpper - tickLower)
         -- Narrower ranges capture fees more efficiently
@@ -338,16 +336,15 @@ findHotZones ticks =
   where
     -- Group adjacent ticks into coherent zones (within 10 tick spacing)
     groupAdjacentTicks :: Array TickMetrics -> Array (Array TickMetrics)
-    groupAdjacentTicks ticks = case ticks of
+    groupAdjacentTicks ticks' = case ticks' of
       [] -> []
-      _ -> case uncons ticks of
+      _ -> case uncons ticks' of
         Nothing -> []
         Just { head: x, tail: xs } ->
           let
             -- Identify ticks within proximity threshold
-            -- TODO: TickMetrics doesn't have tick field
-            -- Need to refactor to pass tick-indexed data
-            result = partition (\t -> false) xs
+            proximityThreshold = 5  -- Ticks within 5 of each other are considered adjacent
+            result = partition (\t -> abs (t.tick - x.tick) <= proximityThreshold) xs
             adjacent = result.yes
             rest = result.no
             group = x : adjacent
@@ -357,10 +354,9 @@ findHotZones ticks =
     createHotZone :: Array TickMetrics -> HotZone
     createHotZone zone = 
       let
-        -- TODO: TickMetrics doesn't have tick field
-        ticks = []
-        minTick = fromMaybe 0 (minimum ticks)
-        maxTick = fromMaybe 0 (maximum ticks)
+        zoneTicks = map _.tick zone
+        minTick = fromMaybe 0 (minimum zoneTicks)
+        maxTick = fromMaybe 0 (maximum zoneTicks)
         avgTemp = sum (map _.temperature zone) / toNumber (length zone)
         totalVolume = sum (map _.volume24h zone)
         avgVolume = totalVolume / toNumber (length zone)
@@ -375,7 +371,8 @@ findHotZones ticks =
 -- | Identify price support zones based on tick metrics
 -- | Returns tick numbers where strong price support has been observed
 findSupportZones :: Array TickMetrics -> Array Int  
-findSupportZones _ =
-  -- TODO: TickMetrics doesn't include tick number
-  -- Need to refactor to pass tick-indexed data structure
-  []
+findSupportZones ticks =
+  -- Find ticks with high support values (> 60%) as support zones
+  let supportThreshold = 60.0
+      supportTicks = filter (\t -> t.support > supportThreshold) ticks
+  in map _.tick supportTicks

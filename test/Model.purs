@@ -8,7 +8,7 @@ import Prelude
 
 import Data.Int as Int
 import Protocol.Token (TokenType(..), TokenSupply)
-import Protocol.Position (Position, Duration(..), Leverage(..), leverageMultiplier, spotDuration)
+import Protocol.PositionVault (Position, Duration(..), Leverage(..), leverageMultiplier, spotDuration)
 import Data.Array (elem)
 import Data.Number (abs)
 import Data.Array.NonEmpty as NEA

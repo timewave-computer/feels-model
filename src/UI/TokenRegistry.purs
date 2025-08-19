@@ -3,6 +3,7 @@
 -- | In production, token metadata would be stored on-chain.
 module UI.TokenRegistry
   ( TokenRegistry
+  , TokenInfo
   , initTokenRegistry
   , registerToken
   , getTokenFromRegistry
@@ -13,83 +14,161 @@ module UI.TokenRegistry
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..))
-import Data.Array ((:), find, filter)
+import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Array ((:), find, filter, fromFoldable)
+import Data.Either (Either(..))
+import Data.Map as Map
+import Data.Map (Map)
+import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
-import Protocol.Token (TokenType(..), TokenMetadata, TokenCreationParams, createToken)
+import Protocol.Token (TokenType(..), TokenMetadata, TokenCreationParams, FungibleToken, createToken, tokenMetadata)
+import FFI (currentTime)
 
 --------------------------------------------------------------------------------
 -- Global Token Registry
 --------------------------------------------------------------------------------
 
--- | Global token registry type
-type TokenRegistry = Ref (Array TokenMetadata)
+-- | Extended token information for UI/registry purposes
+type TokenInfo =
+  { id :: Int
+  , ticker :: String
+  , name :: String
+  , tokenType :: TokenType
+  , totalSupply :: Number
+  , creator :: String
+  , createdAt :: Number
+  , live :: Boolean
+  }
 
--- | Initialize token registry with system tokens
+-- | Global token registry type with efficient lookups (Map-based optimization)
+type TokenRegistry = Ref TokenRegistryState
+
+-- | Internal registry state with optimized data structures
+type TokenRegistryState =
+  { tokens :: Array TokenInfo            -- All tokens (for iteration)
+  , tickerIndex :: Map String TokenInfo  -- O(log n) ticker lookup
+  , typeIndex :: Map TokenType TokenInfo -- O(log n) type lookup
+  , nextId :: Int                        -- Auto-incrementing ID
+  }
+
+-- | Initialize token registry with system tokens and efficient indexes  
 initTokenRegistry :: Effect TokenRegistry
 initTokenRegistry = do
-  let systemTokens = getSystemTokens
-  new systemTokens
+  timestamp <- currentTime
+  let systemTokens = 
+        [ { id: 1
+          , ticker: "JitoSOL"
+          , name: "Jito Staked SOL"
+          , tokenType: JitoSOL
+          , totalSupply: 1000000.0
+          , creator: "system"
+          , createdAt: timestamp
+          , live: true
+          }
+        , { id: 2
+          , ticker: "FeelsSOL"
+          , name: "Feels SOL"
+          , tokenType: FeelsSOL
+          , totalSupply: 1000000.0
+          , creator: "system"
+          , createdAt: timestamp
+          , live: true
+          }
+        ]
+      -- Build efficient lookup indexes
+      tickerIndex = Map.fromFoldable $ map (\t -> Tuple t.ticker t) systemTokens
+      typeIndex = Map.fromFoldable $ map (\t -> Tuple t.tokenType t) systemTokens
+      initialState = 
+        { tokens: systemTokens
+        , tickerIndex: tickerIndex
+        , typeIndex: typeIndex
+        , nextId: 3 -- Next ID after system tokens
+        }
+  new initialState
 
 -- | System tokens pre-registered in the protocol
-getSystemTokens :: Array TokenMetadata
-getSystemTokens = 
-  [ { id: 1
-    , ticker: "JitoSOL"
-    , name: "Jito Staked SOL"
-    , tokenType: JitoSOL
-    , totalSupply: 1000000.0
-    , creator: "system"
-    , createdAt: 0.0
-    , live: true
-    }
-  , { id: 2
-    , ticker: "FeelsSOL"
-    , name: "Feels SOL"
-    , tokenType: FeelsSOL
-    , totalSupply: 1000000.0
-    , creator: "system"
-    , createdAt: 0.0
-    , live: true
-    }
-  ]
+getSystemTokens :: Effect (Array TokenInfo)
+getSystemTokens = do
+  timestamp <- currentTime
+  pure
+    [ { id: 1
+      , ticker: "JitoSOL"
+      , name: "Jito Staked SOL"
+      , tokenType: JitoSOL
+      , totalSupply: 1000000.0
+      , creator: "system"
+      , createdAt: timestamp
+      , live: true
+      }
+    , { id: 2
+      , ticker: "FeelsSOL"
+      , name: "Feels SOL"
+      , tokenType: FeelsSOL
+      , totalSupply: 1000000.0
+      , creator: "system"
+      , createdAt: timestamp
+      , live: true
+      }
+    ]
 
--- | Register a new token in the global registry
-registerToken :: TokenRegistry -> TokenMetadata -> Effect Unit
+-- | Register a new token in the global registry with efficient indexing
+registerToken :: TokenRegistry -> TokenInfo -> Effect Unit
 registerToken registry token = do
-  modify_ (\tokens -> token : tokens) registry
+  modify_ (\state -> 
+    { tokens: token : state.tokens
+    , tickerIndex: Map.insert token.ticker token state.tickerIndex
+    , typeIndex: Map.insert token.tokenType token state.typeIndex
+    , nextId: state.nextId + 1
+    }) registry
 
--- | Get token from registry by ticker
-getTokenFromRegistry :: TokenRegistry -> String -> Effect (Maybe TokenMetadata)
+-- | Get token from registry by ticker (O(log n) lookup optimization)
+getTokenFromRegistry :: TokenRegistry -> String -> Effect (Maybe TokenInfo)
 getTokenFromRegistry registry ticker = do
-  tokens <- read registry
-  pure $ getTokenByTicker ticker tokens
+  state <- read registry
+  pure $ Map.lookup ticker state.tickerIndex
 
--- | Get token from registry by TokenType
-getTokenByType :: TokenRegistry -> TokenType -> Effect (Maybe TokenMetadata)
+-- | Get token from registry by TokenType (O(log n) lookup optimization)
+getTokenByType :: TokenRegistry -> TokenType -> Effect (Maybe TokenInfo)
 getTokenByType registry tokenType = do
-  tokens <- read registry
-  pure $ find (\t -> t.tokenType == tokenType) tokens
+  state <- read registry
+  pure $ Map.lookup tokenType state.typeIndex
 
 -- | Get all tokens from registry
-getAllTokens :: TokenRegistry -> Effect (Array TokenMetadata)
-getAllTokens registry = read registry
+getAllTokens :: TokenRegistry -> Effect (Array TokenInfo)
+getAllTokens registry = do
+  state <- read registry
+  pure state.tokens
 
 -- | Create a token and automatically register it in the global registry
-createAndRegisterToken :: TokenRegistry -> TokenCreationParams -> Effect TokenMetadata
+createAndRegisterToken :: TokenRegistry -> TokenCreationParams -> Effect (Either String TokenInfo)
 createAndRegisterToken registry params = do
-  token <- createToken params
-  registerToken registry token
-  pure token
+  result <- createToken params
+  case result of
+    Left err -> pure $ Left err
+    Right fungibleToken -> do
+      -- Get next ID from optimized state
+      state <- read registry
+      let nextId = state.nextId
+          meta = tokenMetadata fungibleToken
+          tokenInfo = 
+            { id: nextId
+            , ticker: params.ticker
+            , name: params.name
+            , tokenType: Token params.ticker
+            , totalSupply: fungibleToken.totalSupply
+            , creator: params.creator
+            , createdAt: meta.createdAt
+            , live: true
+            }
+      registerToken registry tokenInfo
+      pure $ Right tokenInfo
 
 --------------------------------------------------------------------------------
 -- Helper Functions
 --------------------------------------------------------------------------------
 
--- | Get token by ticker from array
-getTokenByTicker :: String -> Array TokenMetadata -> Maybe TokenMetadata
+-- | Get token by ticker from array (legacy helper - consider using Map lookup instead)
+getTokenByTicker :: String -> Array TokenInfo -> Maybe TokenInfo
 getTokenByTicker ticker tokens = 
-  case filter (\t -> t.ticker == ticker) tokens of
-    [token] -> Just token
-    _ -> Nothing
+  find (\t -> t.ticker == ticker) tokens

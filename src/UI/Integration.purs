@@ -9,7 +9,7 @@ module UI.Integration
 
 import Prelude
 import Data.String as String
-import Data.Array (drop, filter, head, length, sortBy, take, zip, reverse, find, cons, foldl, (:), range)
+import Data.Array (drop, filter, head, length, sortBy, take, zip, find, cons, foldl, range)
 import Data.Traversable (traverse, traverse_)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Either (Either(..))
@@ -26,16 +26,15 @@ import Unsafe.Coerce (unsafeCoerce)
 
 -- Import API and data types
 import UI.ProtocolState as A
-import UI.ProtocolState (AppRuntime, initState, ProtocolCommand(..), IndexerQuery(..))
+import UI.ProtocolState (AppRuntime, initState)
 import Protocol.Common (QueryResult(..), CommandResult(..))
-import Protocol.POL (getAllAllocations)
+import Protocol.POLVault (getAllAllocations, getTotalPOL, getUnallocatedPOL)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
-import FFI (setTimeout, getElementById, getValue, getTextContent, triggerUIAction, registerRemoteAction, sin, exp)
+import FFI (setTimeout, getElementById, getTextContent, triggerUIAction, registerRemoteAction, sin, exp)
 import Data.Nullable (toMaybe)
 import Simulation.Engine (SimulationResults)
 import Simulation.Engine as S
-import Utils (formatAmount)
 
 --------------------------------------------------------------------------------
 -- API Initialization
@@ -184,10 +183,12 @@ processSimulationResults protocol finalState _results = do
   log $ "Oracle has " <> show (length oraclePriceHistory) <> " price observations"
   
   -- Get current POL state for accurate floor calculations
-  polState <- read protocolState.polState
-  let currentPOL = polState.totalPOL
+  let polState = protocolState.polState
+  currentPOL <- getTotalPOL polState
+  unallocatedPOL <- getUnallocatedPOL polState
+  allocations <- getAllAllocations polState
   log $ "Current POL reserves: " <> show currentPOL <> " FeelsSOL"
-  log $ "POL state details - unallocated: " <> show polState.unallocated <> ", allocations: " <> show (Map.size polState.poolAllocations)
+  log $ "POL state details - unallocated: " <> show unallocatedPOL <> ", allocations: " <> show (length allocations)
   
   -- Get POL allocation history from simulation state
   let polHistory = finalState.polAllocationHistory

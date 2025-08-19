@@ -15,8 +15,9 @@ import Effect.Console (log)
 import Test.QuickCheck (Result(..), quickCheck)
 
 -- Core system imports
-import Protocol.Token (TokenCreationParams, TokenMetadata, createToken)
--- import Protocol.POL (getTotalPOL)
+import Protocol.Token (TokenCreationParams, createToken, tokenMetadata, FungibleToken)
+import UI.TokenRegistry (TokenInfo)
+-- import Protocol.POLVault (getTotalPOL)
 import Simulation.Engine (SimulationState, initSimulation, runSimulation, executeSimulation)
 import Simulation.Agent (AccountProfile(..), defaultPreferences)
 import Simulation.Scenario (SimulationConfig, MarketScenario(..))
@@ -53,7 +54,7 @@ createTestTokenData numTokens =
 -- Enhanced simulation state for testing
 type TestSimulationState =
   { simulationState :: SimulationState
-  , createdTokens :: Array TokenMetadata
+  , createdTokens :: Array TokenInfo
   , initialPOL :: Number
   , finalPOL :: Number
   , totalTrades :: Int
@@ -65,35 +66,55 @@ type TestSimulationState =
 --------------------------------------------------------------------------------
 
 -- Create and fund simulation tokens
-setupSimulationTokens :: Int -> Effect (Either String (Array TokenMetadata))
+setupSimulationTokens :: Int -> Effect (Either String (Array TokenInfo))
 setupSimulationTokens numTokens = do
   log $ "Creating " <> show numTokens <> " simulation tokens..."
   
   let tokenData = createTestTokenData numTokens
   
   -- Create tokens
-  createdTokens <- traverse createSimulationToken tokenData
+  createResults <- traverse createSimulationToken tokenData
   
-  log $ "Successfully created " <> show (length createdTokens) <> " tokens"
-  
-  -- Fund each token with 150 FeelsSOL to exceed launch threshold
-  fundingResults <- traverse (fundSimulationToken 150.0) createdTokens
-  
-  case sequence fundingResults of
-    Left fundErr -> pure (Left fundErr)
-    Right _ -> do
-      log $ "Successfully funded all " <> show (length createdTokens) <> " tokens"
-      pure (Right createdTokens)
+  case sequence createResults of
+    Left err -> pure (Left err)
+    Right createdTokens -> do
+      log $ "Successfully created " <> show (length createdTokens) <> " tokens"
+      
+      -- Fund each token with 150 FeelsSOL to exceed launch threshold
+      fundingResults <- traverse (fundSimulationToken 150.0) createdTokens
+      
+      case sequence fundingResults of
+        Left fundErr -> pure (Left fundErr)
+        Right _ -> do
+          log $ "Successfully funded all " <> show (length createdTokens) <> " tokens"
+          pure (Right createdTokens)
 
 -- Create a single simulation token
-createSimulationToken :: TokenCreationParams -> Effect TokenMetadata
+createSimulationToken :: TokenCreationParams -> Effect (Either String TokenInfo)
 createSimulationToken params = do
-  token <- createToken params
-  log $ "Created token: " <> params.ticker
-  pure token
+  result <- createToken params
+  case result of
+    Left err -> do
+      log $ "Failed to create token " <> params.ticker <> ": " <> err
+      pure $ Left err
+    Right fungibleToken -> do
+      timestamp <- currentTime
+      let meta = tokenMetadata fungibleToken
+          tokenInfo = 
+            { id: 0  -- Will be assigned by registry
+            , ticker: params.ticker
+            , name: params.name
+            , tokenType: Token params.ticker
+            , totalSupply: fungibleToken.totalSupply
+            , creator: params.creator
+            , createdAt: meta.createdAt
+            , live: false  -- Not live until funded
+            }
+      log $ "Created token: " <> params.ticker
+      pure $ Right tokenInfo
 
 -- Fund a simulation token to make it live
-fundSimulationToken :: Number -> TokenMetadata -> Effect (Either String Unit)
+fundSimulationToken :: Number -> TokenInfo -> Effect (Either String Unit)
 fundSimulationToken amount token = do
   log $ "Funding token " <> token.ticker <> " with " <> formatAmount amount <> " FeelsSOL"
   -- In the real system, this would create tick-based positions that provide liquidity to the token
@@ -204,9 +225,9 @@ verifySimulationConsistency testState =
        else Failed $ "Price history incomplete: " <> show priceHistoryLength <> " entries, expected at least " <> show expectedBlocks
 
 -- Verify account activity
-verifyAccountActivity :: forall r. Array { totalDeposited :: Number, activePositions :: Array Int | r } -> Result
+verifyAccountActivity :: forall r. Array { jitoSOLBalance :: Number, activePositions :: Array Int | r } -> Result
 verifyAccountActivity accounts = 
-  let activeAccounts = filter (\acc -> acc.totalDeposited > 0.0 || length acc.activePositions > 0) accounts
+  let activeAccounts = filter (\acc -> acc.jitoSOLBalance > 0.0 || length acc.activePositions > 0) accounts
   in if length activeAccounts > 0
        then Success
        else Failed "No accounts showed any activity during simulation"
@@ -274,9 +295,6 @@ logTestResult testName result =
 testSimulationDeterminism :: Effect Unit
 testSimulationDeterminism = do
   log "Testing simulation determinism..."
-  
-  -- Run the same configuration multiple times
-  let config = createTestConfig { simulationBlocks = 5, numAccounts = 3 }
   
   -- For now, test that simulation runs consistently
   quickCheck (\(_ :: Int) -> 

@@ -29,6 +29,7 @@ data ProtocolError
   
   -- Balance and transfer errors
   | InsufficientBalanceError String     -- Not enough balance for operation
+  | InsufficientReserves                 -- Protocol reserves insufficient for solvency
   | TransferError String                -- Token transfer failed
   
   -- System and matching errors
@@ -50,6 +51,7 @@ instance showProtocolError :: Show ProtocolError where
   show (PositionNotFoundError id) = "Position not found: " <> show id
   show (UserNotFoundError user) = "User not found: " <> user
   show (InsufficientBalanceError msg) = "Insufficient balance: " <> msg
+  show InsufficientReserves = "Insufficient reserves: Protocol solvency check failed"
   show (TransferError msg) = "Transfer error: " <> msg
   show (MatchingError msg) = "Matching error: " <> msg
   show (SystemError msg) = "System error: " <> msg

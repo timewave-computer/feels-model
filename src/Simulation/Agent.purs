@@ -44,7 +44,7 @@ import Effect (Effect)
 import Effect.Random (random, randomInt)
 
 import Utils (formatAmount)
-import Protocol.Position (Duration(..), Leverage(..))
+import Protocol.PositionVault (Duration(..), Leverage(..))
 import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------

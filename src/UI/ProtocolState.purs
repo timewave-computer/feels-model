@@ -7,8 +7,6 @@ module UI.ProtocolState
   -- Command and Query types
   , ProtocolCommand(..)
   , IndexerQuery(..)
-  -- , CommandResult(..) -- TODO: Fix import
-  -- , QueryResult(..) -- TODO: Fix import
   -- State initialization
   , initState
   -- State management
@@ -28,19 +26,19 @@ import Effect.Console (log)
 import Data.Traversable (traverse)
 
 -- Import result types
-import Protocol.Common (CommandResult(..), QueryResult(..))
+import Protocol.Common (CommandResult, QueryResult)
 
 -- Import domain types needed for state
 import Protocol.Token (TokenType(..), TokenMetadata)
 import UI.TokenRegistry (TokenRegistry, initTokenRegistry)
-import Protocol.Position (Position, Duration, Leverage)
+import Protocol.PositionVault (VaultPosition, Duration, Leverage)
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry, addPool)
-import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
-import Protocol.POL (POLState, initPOL, contribute)
+import Protocol.FeelsSOLVault (FeelsSOLState, createFeelsSOLVault)
+import Protocol.POLVault (POLState, initPOL, contribute, getTotalPOL)
 import Protocol.Oracle (Oracle, initOracle)
-import Protocol.Incentive (MarketDynamics, initMarketDynamics)
 import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance)
-import Protocol.Launch (LaunchState)
+import Protocol.LaunchVault (LaunchVault)
+import Effect.Ref (Ref)
 import Protocol.Error (ProtocolError)
 import FFI (currentTime)
 -- Commands module will be imported by consumers to avoid circular dependency
@@ -101,9 +99,8 @@ type ProtocolState =
   , feelsSOL :: FeelsSOLState
   , polState :: POLState
   , oracle :: Oracle
-  , marketDynamics :: MarketDynamics
   , accounts :: AccountRegistry
-  , launches :: Map String LaunchState     -- Pool ID -> Launch state
+  , launches :: Map String (Ref LaunchVault)     -- Pool ID -> Launch vault
   , positionTokenMap :: Array { positionId :: Int, tokenTicker :: String }
   , currentUser :: String  -- For demo purposes, in production would be wallet-based
   , currentBlock :: Int     -- Current block number
@@ -135,20 +132,28 @@ initStateImpl = do
   poolRegistry :: PoolRegistry <- initPoolRegistry
   accounts :: AccountRegistry <- initAccountRegistry
   
-  -- Initialize oracle and POL first since marketDynamics needs them
+  -- Initialize oracle and POL
   let oracleInit = initOracle 1.05
   oracle :: Oracle <- oracleInit
   let polInit = initPOL
   polState :: POLState <- polInit
   
   -- Debug: Check POL initialization
-  polStateData <- read polState
-  log $ "POL initialized with totalPOL: " <> show polStateData.totalPOL
+  totalPOL <- getTotalPOL polState
+  log $ "POL initialized with totalPOL: " <> show totalPOL
   
-  -- Initialize marketDynamics with oracle and POL
-  marketDynamics :: MarketDynamics <- initMarketDynamics oracle polState
-  
-  feelsSOL :: FeelsSOLState <- initFeelsSOL (pure 1.05) 0.001 0.002
+  -- Initialize FeelsSOL vault with oracle and fee configuration
+  let feelsSOLStrategy = 
+        { priceOracle: pure 1.05
+        , lastOracleUpdate: 0.0
+        , cachedPrice: Nothing
+        , entryFee: 0.001
+        , exitFee: 0.002
+        , polAllocationRate: 0.25
+        , bufferTargetRatio: 0.01
+        , jitoSOLBuffer: 0.0
+        }
+  feelsSOL :: FeelsSOLState <- createFeelsSOLVault "FeelsSOL-System" feelsSOLStrategy
   
   -- Get current time
   timestamp <- currentTime
@@ -160,7 +165,6 @@ initStateImpl = do
         , feelsSOL: feelsSOL
         , polState: polState
         , oracle: oracle
-        , marketDynamics: marketDynamics
         , accounts: accounts
         , launches: Map.empty
         , positionTokenMap: []
@@ -192,6 +196,38 @@ initStateImpl = do
       }
     , totalValue: 10000.0
     , lastUpdateBlock: 0
+    , positionTickRanges: Map.empty
+    , volatility: 0.0
+    , priceHistory: []
+    , utilization: 0.0
+    , liquidityDepth: 0.5
+    , feeParameters: 
+      { feelsSOLMintFee: 10.0
+      , feelsSOLBurnFee: 10.0
+      , swapFeeRate: 30.0
+      , flashLoanFee: 5.0
+      , spotPositionFee: 30.0
+      , monthlyPositionFee: 20.0
+      , seniorLeverageFee: 1.0
+      , juniorLeverageFee: 1.5
+      }
+    , metricsState:
+      { volatility: 0.0
+      , utilization: 0.0
+      , liquidityDepth: 0.5
+      , volume24h: 0.0
+      , tvl: 10000.0
+      , lastUpdate: 0
+      }
+    , yieldParameters:
+      { baseYieldRate: 5.0
+      , spotYieldMultiplier: 1.0
+      , monthlyYieldMultiplier: 1.5
+      , seniorYieldShare: 0.3
+      , juniorYieldShare: 0.7
+      , volHarvesterBonus: 2.0
+      }
+    , lastYieldBlock: 0
     }
     poolRegistry
   

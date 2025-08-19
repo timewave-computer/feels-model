@@ -13,6 +13,7 @@ import Effect.Console (log)
 import Test.Model (runModelTests)
 import Test.Simulation (runSimulationTests)
 import Test.LendingYieldTest (lendingYieldTests)
+import Test.TermExpiryTest as TermExpiry
 
 --------------------------------------------------------------------------------
 -- TEST SUITE EXECUTION
@@ -32,6 +33,9 @@ main = do
   
   -- Lending yield system tests
   lendingYieldTests
+  
+  -- Term expiry system tests
+  TermExpiry.main
   
   log "===================================="
   log "Test suite execution completed" 

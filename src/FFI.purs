@@ -27,7 +27,8 @@ foreign import addEventListener :: Element -> String -> Effect Unit -> Effect Un
 foreign import removeAllEventListeners :: Element -> String -> Effect Unit
 foreign import getValue :: Element -> Effect String
 foreign import getTextContent :: Element -> Effect String
-foreign import parseFloat :: String -> Number
+-- Number parsing now handled by purescript-parsing library for type safety
+-- Use: Parser, runParser, number from Text.Parsing.Parser
 foreign import floor :: Number -> Int
 -- Note: In actual usage, these are typed specifically in each module
 foreign import setGlobalState :: forall a. a -> Effect Unit
@@ -37,14 +38,10 @@ foreign import setTimeout :: Effect Unit -> Int -> Effect Unit
 -- Application initialization
 foreign import onDOMReady :: Effect Unit -> Effect Unit
 
--- Math functions used throughout the protocol
-foreign import log10 :: Number -> Number
-foreign import sqrt :: Number -> Number
-foreign import sin :: Number -> Number
-foreign import cos :: Number -> Number
-foreign import log :: Number -> Number
-foreign import exp :: Number -> Number
-foreign import pow :: Number -> Number -> Number
+-- Math functions - now using purescript-math instead of FFI
+-- These can be imported from Math modules throughout the codebase:
+-- import Math (log10, sqrt, sin, cos, log, exp, pow)
+-- FFI math functions removed - use purescript-math library instead
 foreign import generateRecordId :: Effect Int
 
 -- DOM attribute access

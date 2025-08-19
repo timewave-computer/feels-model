@@ -23,24 +23,24 @@ import Data.Maybe (Maybe(..))
 import Data.Array (filter, find, nub, length)
 import Data.Foldable (sum)
 import Effect (Effect)
-import Unsafe.Coerce (unsafeCoerce)
+import UI.Util.Codecs (decodeTokenArray, decodePositionArray)
 
 -- Import protocol modules for data access
 import UI.TokenRegistry (getAllTokens)
 import UI.PoolRegistry (getUserPositions, getAllPositions, getPool)
-import Protocol.POL (getTotalPOL)
+import Protocol.POLVault (getTotalPOL)
 import Protocol.Metric (getPOLMetrics, calculateGrowthRate24h)
 import Protocol.Pool (syncPositionValue)
 import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
 import Protocol.Error (ProtocolError(..))
-import Protocol.Launch as Launch
+import Protocol.LaunchVault as Launch
 import Data.Map as Map
 import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse)
 import Data.Array as Array
 import Data.Function (identity)
-import Effect.Ref (read)
-import Protocol.Position as P
+import Effect.Ref (Ref, read)
+import Protocol.PositionVault as P
 
 -- Import app state and result types
 import UI.ProtocolState (ProtocolState, IndexerQuery(..))
@@ -179,11 +179,11 @@ handleGetPositionTargetToken positionId state = do
 handleGetActiveLaunches :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetActiveLaunches state = do
   -- Get all launches from the map
-  let launchPairs = Map.toUnfoldable state.launches :: Array (Tuple String Launch.LaunchState)
+  let launchPairs = Map.toUnfoldable state.launches :: Array (Tuple String (Ref Launch.LaunchVault))
   activeLaunches <- traverse (\(Tuple poolId launchRef) -> do
-    launch <- read launchRef
-    if launch.isActive
-      then pure $ Just { poolId, phase: show launch.currentPhase }
+    status <- Launch.getLaunchStatus launchRef
+    if status.isActive
+      then pure $ Just { poolId, phase: show status.phase }
       else pure Nothing
   ) launchPairs
   
@@ -197,6 +197,6 @@ handleGetLaunchStatus poolId state = do
     Nothing -> pure $ Right $ LaunchStatusResult Nothing
     Just launchRef -> do
       result <- Launch.getLaunchStatus launchRef
-      -- Convert from Launch.LaunchResult to foreign LaunchResult type
+      -- Convert from Launch.LaunchStatus to foreign LaunchResult type
       let convertedResult = unsafeCoerce result :: LaunchResult
       pure $ Right $ LaunchStatusResult (Just convertedResult)

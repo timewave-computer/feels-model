@@ -39,20 +39,15 @@ module Indexer.Pool
   ) where
 
 import Prelude
-import Data.Array ((:), take, filter, length, head, last)
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Array ((:), take, filter, length)
 import Data.Foldable (sum)
 import Data.Int (toNumber)
-import Data.Ord (max, abs)
 import FFI (sqrt)
-import Unsafe.Coerce (unsafeCoerce)
 import Effect (Effect)
 
 -- Import analytics from other indexer modules
-import Indexer.Tick (TickMetrics, TickAnalytics, TickEvent)
-import Indexer.POL (processPOLEvent)
+import Indexer.Tick (TickMetrics)
 import Protocol.Pool (PoolEvent(..))
-import Protocol.POL (POLTriggerType(..))
 
 --------------------------------------------------------------------------------
 -- POOL ANALYTICS DATA STRUCTURES
@@ -68,6 +63,7 @@ type PoolAnalytics =
   , volume24h :: Number                 -- 24-hour trading volume
   , volume7d :: Number                  -- 7-day trading volume
   , totalValueLocked :: Number          -- Current total value locked
+  , liquidityDepth :: Number            -- Total available liquidity depth in the pool
   
   -- Cross-tick pattern analysis
   , activeTicks :: Array TickMetrics    -- Detailed tick-level activity data
@@ -109,7 +105,7 @@ processEvent :: PoolEvent -> IndexerState -> Effect IndexerState
 processEvent event state = case event of
   SwapExecuted _ -> processSwapEvent event state
   LiquidityChanged _ -> processLiquidityEvent event state  
-  POLDeployed _ -> pure state  -- TODO: POL event processing needs type adaptation
+  POLDeployed polEvent -> processPOLDeployedEvent polEvent state
 
 -- | Process swap events and update comprehensive pool metrics
 -- | Updates price, volume, trading patterns, and statistical measures
@@ -134,12 +130,11 @@ processSwapEvent _ state = pure state  -- Other events are handled elsewhere
 -- | Handles position additions/removals and updates total value locked
 processLiquidityEvent :: PoolEvent -> IndexerState -> Effect IndexerState
 processLiquidityEvent event state = case event of
-  LiquidityChanged { pool, tickLower, tickUpper, liquidityDelta, slot } -> do
+  LiquidityChanged { pool, liquidityDelta } -> do
     -- Locate pool analytics for update
     let poolAnalytics = findOrCreatePool pool state.pools
         
         -- Analyze liquidity change characteristics
-        rangeWidth = toNumber (tickUpper - tickLower)
         
         -- Estimate TVL impact from liquidity change
         -- Uses current price for token amount approximation
@@ -151,7 +146,7 @@ processLiquidityEvent event state = case event of
         -- Update pool analytics with new liquidity metrics
         updatedPoolAnalytics = poolAnalytics
           { totalValueLocked = max 0.0 (poolAnalytics.totalValueLocked + tvlDelta)
-          -- TODO: liquidityDepth field doesn't exist in PoolAnalytics
+          , liquidityDepth = max 0.0 (poolAnalytics.liquidityDepth + liquidityDelta)
           }
         
         -- Apply updates to pool collection
@@ -160,6 +155,32 @@ processLiquidityEvent event state = case event of
     pure $ state { pools = updatedPools }
     
   _ -> pure state  -- Non-liquidity events ignored
+
+-- | Process POL deployment events and update pool analytics
+-- | Records POL deployments for tracking protocol-owned liquidity
+processPOLDeployedEvent :: _ -> IndexerState -> Effect IndexerState
+processPOLDeployedEvent polEvent state = case polEvent of
+  { pool, amount } -> do
+    -- Find or create pool analytics
+    let poolAnalytics = findOrCreatePool pool state.pools
+        
+        -- Calculate POL range width and estimated TVL impact
+        currentPrice = poolAnalytics.currentPrice
+        
+        -- Estimate token amounts from liquidity
+        token0Amount = amount / sqrt currentPrice
+        token1Amount = amount * sqrt currentPrice
+        polTVL = token0Amount * currentPrice + token1Amount
+        
+        -- Update pool analytics with POL deployment
+        updatedPoolAnalytics = poolAnalytics
+          { totalValueLocked = poolAnalytics.totalValueLocked + polTVL
+          , volume24h = poolAnalytics.volume24h -- POL doesn't affect volume directly
+          }
+        
+        updatedPools = updatePool updatedPoolAnalytics state.pools
+    
+    pure $ state { pools = updatedPools }
 
 --------------------------------------------------------------------------------
 -- POOL-LEVEL PATTERN ANALYSIS
@@ -178,7 +199,7 @@ findHotZones ticks =
   in map createHotZone zones
   where
     groupAdjacentTicks _ = [] -- Simplified - production would implement tick clustering
-    createHotZone zone = 
+    createHotZone _ = 
       { tickLower: 0
       , tickUpper: 10
       , temperature: 85.0
@@ -188,10 +209,11 @@ findHotZones ticks =
 -- | Identify price support zones from tick-level support metrics
 -- | Returns tick numbers where strong price support has been observed
 findSupportZones :: Array TickMetrics -> Array Int  
-findSupportZones _ =
-  -- TODO: TickMetrics doesn't have tick field
-  -- Need to refactor to pass tick-indexed data
-  []
+findSupportZones ticks =
+  -- Find ticks with high support values (> 60%) as support zones
+  let supportThreshold = 60.0
+      supportTicks = filter (\t -> t.support > supportThreshold) ticks
+  in map _.tick supportTicks
 
 --------------------------------------------------------------------------------
 -- STATISTICAL ANALYSIS UTILITIES
@@ -243,7 +265,22 @@ findOrCreatePool poolId pools =
     [pool] -> pool
     _ -> createEmptyPool poolId
   where
-    createEmptyPool id = unsafeCoerce { poolId: id } -- Placeholder - would implement full initialization
+    createEmptyPool id = 
+      { poolId: id
+      , currentPrice: 1.0
+      , priceChange24h: 0.0
+      , volume24h: 0.0
+      , volume7d: 0.0
+      , totalValueLocked: 0.0
+      , liquidityDepth: 0.0
+      , activeTicks: []
+      , hotZones: []
+      , supportLevels: []
+      , resistanceLevels: []
+      , historicalVolatility: 0.0
+      , averageTradeSize: 0.0
+      , uniqueTraders24h: 0
+      }
 
 -- | Update specific pool analytics within the global pool collection
 -- | Replaces existing analytics while preserving other pools

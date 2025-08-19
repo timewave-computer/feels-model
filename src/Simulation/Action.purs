@@ -36,7 +36,7 @@ import Data.Enum (toEnum)
 
 -- Core protocol system imports
 import Protocol.Token (TokenType(..))
-import Protocol.Position (Duration(..), Leverage(..), monthlyDuration, spotDuration)
+import Protocol.PositionVault (Duration(..), Leverage(..), monthlyDuration, spotDuration)
 import Utils (formatAmount)
 
 -- Import simulation subsystem dependencies

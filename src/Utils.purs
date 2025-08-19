@@ -12,12 +12,9 @@ module Utils
 
 import Prelude
 import Data.Int as Int
-import Data.Number (pow)
-import FFI (sqrt)
-import Data.Foldable (sum)
-import Data.Array (length)
-import Data.Array as Array
-import Data.Functor (map)
+import Data.Number (pow, sqrt)
+import Data.Foldable (sum, length)
+-- Removed unused imports
 
 --------------------------------------------------------------------------------
 -- Domain-Specific Formatting Functions
@@ -55,7 +52,7 @@ formatAmount amount =
 
 -- Calculate average of an array of numbers
 average :: Array Number -> Number
-average xs = if Array.length xs == 0 then 0.0 else sum xs / Int.toNumber (Array.length xs)
+average xs = if length xs == 0 then 0.0 else sum xs / Int.toNumber (length xs)
 
 -- Calculate standard deviation of an array of numbers
 standardDeviation :: Array Number -> Number

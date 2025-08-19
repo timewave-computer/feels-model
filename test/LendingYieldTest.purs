@@ -11,7 +11,7 @@ import Data.Maybe (Maybe(..))
 
 -- Import protocol modules
 import Protocol.Pool as Pool
-import Protocol.Position as Position
+import Protocol.PositionVault as Position
 import Protocol.Token (TokenType(..))
 
 -- Test helpers

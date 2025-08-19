@@ -17,7 +17,7 @@ module UI.PoolRegistry
   , getUserPositions
   , getAllPositions
   , getPositionsRef
-  -- , getPoolPositions -- TODO: Need to track pool-position relationship
+  , getPoolPositions
   ) where
 
 import Prelude
@@ -25,12 +25,12 @@ import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Array ((:), filter, concat, mapMaybe, fromFoldable)
 import Data.Array as Array
 import Data.Tuple (Tuple(..))
 import Protocol.Pool (PoolState)
-import Protocol.Position (Position)
+import Protocol.PositionVault (Position)
 import Protocol.Common (PoolId, PositionId)
 
 --------------------------------------------------------------------------------
@@ -41,6 +41,7 @@ import Protocol.Common (PoolId, PositionId)
 type PoolRegistry = Ref
   { pools :: Map PoolId PoolState           -- All pools by ID
   , positions :: Map PositionId Position    -- All positions by ID
+  , poolPositions :: Map PoolId (Array PositionId)  -- Track which positions belong to each pool
   , nextPositionId :: PositionId            -- Next available position ID
   }
 
@@ -53,6 +54,7 @@ initPoolRegistry :: Effect PoolRegistry
 initPoolRegistry = new
   { pools: Map.empty
   , positions: Map.empty
+  , poolPositions: Map.empty
   , nextPositionId: 1
   }
 
@@ -104,12 +106,17 @@ getNextPositionId registryRef = do
 --------------------------------------------------------------------------------
 
 -- | Add a position to the registry and its pool
-addPosition :: Position -> PoolRegistry -> Effect Unit
-addPosition position registryRef = do
-  -- Add to global position map
-  modify_ (\reg -> reg 
-    { positions = Map.insert position.id position reg.positions 
-    }) registryRef
+addPosition :: PoolId -> Position -> PoolRegistry -> Effect Unit
+addPosition poolId position registryRef = do
+  -- Add to global position map and track pool relationship
+  modify_ (\reg -> 
+    let updatedPositions = Map.insert position.id position reg.positions
+        currentPoolPositions = fromMaybe [] (Map.lookup poolId reg.poolPositions)
+        updatedPoolPositions = Map.insert poolId (position.id : currentPoolPositions) reg.poolPositions
+    in reg 
+      { positions = updatedPositions
+      , poolPositions = updatedPoolPositions
+      }) registryRef
   
   -- Position successfully added to registry
   pure unit
@@ -122,10 +129,15 @@ removePosition posId registryRef = do
   -- Find the position to get its pool ID
   case Map.lookup posId registry.positions of
     Just position -> do
-      -- Remove from global position map
-      modify_ (\reg -> reg 
-        { positions = Map.delete posId reg.positions 
-        }) registryRef
+      -- Remove from global position map and pool-position tracking
+      modify_ (\reg -> 
+        let updatedPositions = Map.delete posId reg.positions
+            -- Remove position ID from all pool mappings
+            updatedPoolPositions = map (filter (_ /= posId)) reg.poolPositions
+        in reg 
+          { positions = updatedPositions
+          , poolPositions = updatedPoolPositions
+          }) registryRef
       
       -- Pool cleanup would happen here if needed
       -- (e.g., updating pool liquidity if this was an LP position)
@@ -157,11 +169,13 @@ getPositionsRef registryRef = do
   new registry.positions
 
 -- | Get all positions in a specific pool
--- TODO: Position no longer has poolId field - need to track pool-position relationship separately
--- getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
--- getPoolPositions poolId registryRef = do
---   registry <- read registryRef
---   -- Filter all positions to find ones belonging to this pool
---   let allPositions = fromFoldable $ Map.values registry.positions
---       poolPositions = filter (\pos -> pos.poolId == poolId) allPositions
---   pure poolPositions
+getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
+getPoolPositions poolId registryRef = do
+  registry <- read registryRef
+  -- Get position IDs for this pool
+  case Map.lookup poolId registry.poolPositions of
+    Just positionIds -> do
+      -- Look up each position by ID
+      let positions = mapMaybe (\posId -> Map.lookup posId registry.positions) positionIds
+      pure positions
+    Nothing -> pure []  -- No positions in this pool

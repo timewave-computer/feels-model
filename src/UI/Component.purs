@@ -10,23 +10,29 @@ module UI.Component
   ) where
 
 import Prelude
-import Data.Array (length, null)
-import Data.String.Common (trim)
+import Data.Array (length, null, chunksOf, reverse)
+import Data.String.Common (trim, joinWith)
 import Data.String as String
-import Data.String (contains, Pattern(..), split, joinWith, take, drop)
+import Data.String (Pattern(..), split, take, drop)
+import Data.String.CodeUnits (fromCharArray, toCharArray)
 import Data.Number as Number
 import Data.Int as Int
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Either (Either(..), fromRight)
 import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
-import Unsafe.Coerce (unsafeCoerce)
+import Foreign (Foreign)
+import UI.Util.Codecs (safeTokenFromForeign, safePositionFromForeign, safeLenderOfferFromForeign)
 
 -- Import UI state and actions from State module
-import UI.State (UIState, Action(..), parseTokenType)
-import Protocol.Common (TokenMetadata, Position)
-import Protocol.Position (Duration(..))
+import UI.State (UIState, Action(..))
+import UI.Component.FormElements (renderTextInput, renderNumberInput, renderButton, renderFormGroup, renderSelect, defaultTextInputConfig, defaultNumberInputConfig, defaultButtonConfig, defaultSelectConfig, ButtonStyle(..), createAssetSelectOptions, createTermTypeOptions, createLeverageOptions, createMarketScenarioOptions)
+import UI.Component.DataDisplay (renderBalance, renderCompactBalance, renderMetric, renderPrimaryMetric, renderResultMetric, renderSupply, formatLargeNumber, formatCompactNumber, formatIntWithCommas)
+import UI.Component.Panel (renderPanel, renderSection, defaultPanelConfig, defaultSectionConfig, PanelStyle(..))
+import UI.Util.Validation (renderValidationWarnings)
+import Protocol.Common (Position)
 import Simulation.Analysis (SimulationResults)
 import Simulation.Scenario (MarketScenario(..))
 import Utils (formatAmount)
@@ -70,74 +76,12 @@ renderSystemPanel state =
               [ HH.h4_ [ HH.text "Token Supplies" ]
               , HH.div
                   [ HP.class_ (HH.ClassName "supplies-grid") ]
-                  [ renderSupply "FeelsSOL Supply" (formatLargeNumber stats.feelsSOLSupply)
-                  , renderSupply "JitoSOL Locked" (formatLargeNumber stats.jitoSOLLocked)
+                  [ renderSupply "FeelsSOL Supply" stats.feelsSOLSupply
+                  , renderSupply "JitoSOL Locked" stats.jitoSOLLocked
                   ]
               ]
           ]
     ]
-  where
-    renderPrimaryMetric label value unit =
-      HH.div
-        [ HP.class_ (HH.ClassName "primary-metric") ]
-        [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
-        , HH.div 
-            [ HP.class_ (HH.ClassName "metric-value-large") ] 
-            [ HH.span [ HP.class_ (HH.ClassName "value") ] [ HH.text value ]
-            , if unit /= "" 
-              then HH.span [ HP.class_ (HH.ClassName "unit") ] [ HH.text $ " " <> unit ]
-              else HH.text ""
-            ]
-        ]
-    
-    renderMetric label value =
-      HH.div
-        [ HP.class_ (HH.ClassName "metric-item") ]
-        [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
-        , HH.div [ HP.class_ (HH.ClassName "metric-value") ] [ HH.text value ]
-        ]
-    
-    renderSupply label value =
-      HH.div
-        [ HP.class_ (HH.ClassName "supply-item") ]
-        [ HH.span [ HP.class_ (HH.ClassName "supply-label") ] [ HH.text $ label <> ":" ]
-        , HH.span [ HP.class_ (HH.ClassName "supply-value") ] [ HH.text value ]
-        ]
-    
-    -- Format large numbers with comma separators
-    formatLargeNumber :: Number -> String
-    formatLargeNumber n = 
-      let str = formatAmount n
-          parts = split (Pattern ".") str
-      in case parts of
-           [whole, decimal] -> addCommas whole <> "." <> decimal
-           [whole] -> addCommas whole
-           _ -> str
-    
-    -- Format compact numbers (K/M notation)
-    formatCompactNumber :: Number -> String
-    formatCompactNumber n = 
-      if n >= 1000000.0 
-      then formatAmount (n / 1000000.0) <> "M"
-      else if n >= 1000.0
-      then formatAmount (n / 1000.0) <> "K"
-      else formatAmount n
-    
-    -- Format integers with commas
-    formatIntWithCommas :: Int -> String
-    formatIntWithCommas n = addCommas (show n)
-    
-    -- Add commas to number strings
-    addCommas :: String -> String
-    addCommas s = 
-      let len = String.length s
-      in if len <= 3 
-         then s
-         else if len <= 6
-         then take (len - 3) s <> "," <> drop (len - 3) s
-         else if len <= 9
-         then take (len - 6) s <> "," <> take 3 (drop (len - 6) s) <> "," <> drop (len - 3) s
-         else take (len - 9) s <> "," <> take 3 (drop (len - 9) s) <> "," <> take 3 (drop (len - 6) s) <> "," <> drop (len - 3) s
 
 --------------------------------------------------------------------------------
 -- Wallet Panel Components
@@ -155,8 +99,8 @@ renderWalletPanel state =
         [ HH.h3_ [ HH.text "Balances" ]
         , HH.div
             [ HP.class_ (HH.ClassName "balance-compact") ]
-            [ renderBalance "JitoSOL" state.jitoBalance
-            , renderBalance "FeelsSOL" state.feelsBalance
+            [ renderCompactBalance "JitoSOL" state.jitoBalance
+            , renderCompactBalance "FeelsSOL" state.feelsBalance
             ]
         ]
     -- Created tokens section
@@ -185,17 +129,8 @@ renderWalletPanel state =
         ]
     ]
   where
-    renderBalance label amount =
-      HH.div
-        [ HP.class_ (HH.ClassName "balance-line")
-        , HP.style "margin: 0; padding: 2px 0; line-height: 1.2;"
-        ]
-        [ HH.span [ HP.class_ (HH.ClassName "balance-label") ] [ HH.text $ label <> ": " ]
-        , HH.span [ HP.class_ (HH.ClassName "balance-value") ] [ HH.text $ formatAmount amount ]
-        ]
-    
     renderToken foreignToken =
-      let token = unsafeCoerce foreignToken :: { ticker :: String, name :: String, live :: Boolean }
+      let token = safeTokenFromForeign foreignToken
       in HH.div
         [ HP.class_ (HH.ClassName "list-item") ]
         [ HH.div
@@ -216,7 +151,7 @@ renderWalletPanel state =
         ]
     
     renderPosition foreignPos =
-      let pos = unsafeCoerce foreignPos :: { id :: Int, amount :: Number, leverage :: String, price :: Number, duration :: String, shares :: Number, value :: Number, accumulatedYield :: Number }
+      let pos = safePositionFromForeign foreignPos
       in HH.div
         [ HP.class_ (HH.ClassName "list-item") ]
         [ HH.div
@@ -228,7 +163,7 @@ renderWalletPanel state =
             ]
         , HH.div
             [ HP.class_ (HH.ClassName "list-item__content") ]
-            [ HH.div_ [ HH.text $ "Initial: " <> formatAmount pos.amount <> " @ " <> formatPrice pos.price ]
+            [ HH.div_ [ HH.text $ "Initial: " <> formatAmount pos.amount <> " @ " <> formatAmount pos.price ]
             , HH.div_ [ HH.text $ "Current Value: " <> formatAmount pos.value ]
             , HH.div_ [ HH.text $ "Yield Earned: " <> formatAmount pos.accumulatedYield ]
             , HH.div_ [ HH.text $ "Leverage: " <> pos.leverage <> " | Duration: " <> pos.duration ]
@@ -236,7 +171,6 @@ renderWalletPanel state =
             ]
         ]
     
-    formatPrice p = formatAmount p
 
 --------------------------------------------------------------------------------
 -- Token Creation Panel Components
@@ -245,56 +179,38 @@ renderWalletPanel state =
 -- Token creator panel (always visible)
 renderTokenCreatorPanel :: forall m. UIState -> H.ComponentHTML Action () m
 renderTokenCreatorPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Create Feels Token" ]
-    , HH.div
+  renderPanel (defaultPanelConfig { title = Just "Create Feels Token" })
+    [ HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "create-token-ticker" ] [ HH.text "Token Ticker:" ]
-        , HH.input
-            [ HP.type_ HP.InputText
-            , HP.id "create-token-ticker"
-            , HP.name "create-token-ticker"
-            , HP.placeholder "e.g., ALPHA"
-            , HP.class_ (HH.ClassName "form__input")
-            , HP.value state.tokenTicker
-            , HE.onValueChange \v -> UpdateTokenTicker (trim v)
-            ]
-        , HH.label [ HP.for "create-token-name" ] [ HH.text "Token Name:" ]
-        , HH.input
-            [ HP.type_ HP.InputText
-            , HP.id "create-token-name"
-            , HP.name "create-token-name"
-            , HP.placeholder "e.g., Alpha Protocol Token"
-            , HP.class_ (HH.ClassName "form__input")
-            , HP.value state.tokenName
-            , HE.onValueChange \v -> UpdateTokenName (trim v)
-            ]
+        [ renderTextInput (defaultTextInputConfig
+            { id = "create-token-ticker"
+            , name = "create-token-ticker"
+            , placeholder = "e.g., ALPHA"
+            , value = state.tokenTicker
+            , onChange = UpdateTokenTicker
+            , label = Just "Token Ticker:"
+            , required = true
+            })
+        , renderTextInput (defaultTextInputConfig
+            { id = "create-token-name"
+            , name = "create-token-name"
+            , placeholder = "e.g., Alpha Protocol Token"
+            , value = state.tokenName
+            , onChange = UpdateTokenName
+            , label = Just "Token Name:"
+            , required = true
+            })
         , renderValidationWarnings state.tokenValidationErrors
-        , HH.button
-            [ HE.onClick \_ -> CreateTokenUI
-            , HP.class_ (HH.ClassName "btn btn--primary")
-            ]
-            [ HH.text "Create Token" ]
+        , renderButton (defaultButtonConfig
+            { text = "Create Token"
+            , onClick = CreateTokenUI
+            , style = Primary
+            })
         ]
     , HH.p
         [ HP.class_ (HH.ClassName "info-text") ]
         [ HH.text "Tokens launch through the batch auction system" ]
     ]
-  where
-    renderValidationWarnings :: forall n. Array String -> H.ComponentHTML Action () n
-    renderValidationWarnings errors =
-      if null errors
-        then HH.text ""
-        else HH.div
-          [ HP.class_ (HH.ClassName "validation-warnings") ]
-          (map renderWarning errors)
-    
-    renderWarning :: forall n. String -> H.ComponentHTML Action () n  
-    renderWarning error =
-      HH.div
-        [ HP.class_ (HH.ClassName "warning-message") ]
-        [ HH.text error ]
 
 --------------------------------------------------------------------------------
 -- Exchange Panel Components
@@ -315,31 +231,27 @@ renderExchangePanel state =
             [ HH.h3_ [ HH.text "From" ]
             , HH.div
                 [ HP.class_ (HH.ClassName "form-group") ]
-                [ HH.label [ HP.for "from-asset" ] [ HH.text "Asset:" ]
-                , HH.select
-                    [ HP.id "from-asset"
-                    , HP.name "from-asset"
-                    , HE.onValueChange \v -> SelectFromAsset v
-                    , HP.class_ (HH.ClassName "form__select")
-                    ]
-                    [ HH.option [ HP.value "jitosol" ] [ HH.text "JitoSOL" ]
-                    , HH.option [ HP.value "feelssol" ] [ HH.text "FeelsSOL" ]
-                    , HH.option [ HP.value "position" ] [ HH.text "Existing Position" ]
-                    -- TODO: Add user tokens
-                    ]
+                [ renderSelect (defaultSelectConfig
+                    { id = "from-asset"
+                    , name = "from-asset"
+                    , options = createAssetSelectOptions
+                    , selectedValue = state.selectedFromAsset
+                    , onChange = SelectFromAsset
+                    , label = Just "Asset:"
+                    })
                 ]
             , HH.div
                 [ HP.class_ (HH.ClassName "form-group") ]
-                [ HH.label [ HP.for "from-amount" ] [ HH.text "Amount:" ]
-                , HH.input
-                    [ HP.type_ HP.InputNumber
-                    , HP.id "from-amount"
-                    , HP.name "from-amount"
-                    , HP.value (formatAmount state.inputAmount)
-                    , HE.onValueChange \v -> UpdateInputAmount (fromMaybe 0.0 (Number.fromString v))
-                    , HP.class_ (HH.ClassName "form__input")
-                    , HP.placeholder "Enter amount"
-                    ]
+                [ renderNumberInput (defaultNumberInputConfig
+                    { id = "from-amount"
+                    , name = "from-amount"
+                    , placeholder = "Enter amount"
+                    , value = state.inputAmount
+                    , onChange = UpdateInputAmount
+                    , label = Just "Amount:"
+                    , min = Just 0.0
+                    , required = true
+                    })
                 ]
             ]
         , -- Exchange arrow
@@ -352,19 +264,14 @@ renderExchangePanel state =
             [ HH.h3_ [ HH.text "To" ]
             , HH.div
                 [ HP.class_ (HH.ClassName "form-group") ]
-                [ HH.label [ HP.for "to-asset" ] [ HH.text "Asset/Position:" ]
-                , HH.select
-                    [ HP.id "to-asset"
-                    , HP.name "to-asset"
-                    , HE.onValueChange \v -> SelectToAsset v
-                    , HP.class_ (HH.ClassName "form__select")
-                    ]
-                    [ HH.option [ HP.value "position-spot" ] [ HH.text "Spot Position" ]
-                    , HH.option [ HP.value "position-term" ] [ HH.text "Term Position" ]
-                    , HH.option [ HP.value "jitosol" ] [ HH.text "JitoSOL" ]
-                    , HH.option [ HP.value "feelssol" ] [ HH.text "FeelsSOL" ]
-                    -- TODO: Add user tokens
-                    ]
+                [ renderSelect (defaultSelectConfig
+                    { id = "to-asset"
+                    , name = "to-asset"
+                    , options = createAssetSelectOptions
+                    , selectedValue = state.selectedToAsset
+                    , onChange = SelectToAsset
+                    , label = Just "Asset/Position:"
+                    })
                 ]
             , -- Show position options if converting to position
               renderPositionOptions state
@@ -406,6 +313,7 @@ renderExchangePanel state =
             "feelssol" -> "FeelsSOL"
             _ -> "Asset"
       in from <> " → " <> to <> " (Atomic transaction)"
+    
 
 -- Lending options component (shared between position creation panels)
 renderLendOptions :: forall m. UIState -> H.ComponentHTML Action () m
@@ -414,30 +322,26 @@ renderLendOptions state =
     [ -- Term selection
       HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "term-type" ] [ HH.text "Term Type:" ]
-        , HH.select
-            [ HP.id "term-type"
-            , HP.name "term-type"
-            , HE.onValueChange SetTermType
-            , HP.class_ (HH.ClassName "form__select")
-            ]
-            [ HH.option [ HP.value "spot", HP.selected true ] [ HH.text "Spot (Flexible)" ]
-            , HH.option [ HP.value "monthly" ] [ HH.text "Monthly Term (Join Current Cycle)" ]
-            ]
+        [ renderSelect (defaultSelectConfig
+            { id = "term-type"
+            , name = "term-type"
+            , options = createTermTypeOptions
+            , selectedValue = state.selectedTermType
+            , onChange = SetTermType
+            , label = Just "Term Type:"
+            })
         ]
     , -- Leverage tier
       HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "leverage-tier" ] [ HH.text "Risk Level:" ]
-        , HH.select
-            [ HP.id "leverage-tier"
-            , HP.name "leverage-tier"
-            , HE.onValueChange SetLeverageType
-            , HP.class_ (HH.ClassName "form__select")
-            ]
-            [ HH.option [ HP.value "senior", HP.selected true ] [ HH.text "Senior (1x - Protected)" ]
-            , HH.option [ HP.value "junior" ] [ HH.text "Junior (3x - Higher Risk/Reward)" ]
-            ]
+        [ renderSelect (defaultSelectConfig
+            { id = "leverage-tier"
+            , name = "leverage-tier"
+            , options = createLeverageOptions
+            , selectedValue = state.selectedLeverage
+            , onChange = SetLeverageType
+            , label = Just "Risk Level:"
+            })
         ]
     -- Duration info
     , renderDurationInfo state
@@ -466,11 +370,11 @@ renderLendOptions state =
     calculateTermInfo state' =
       case state'.api of
         Nothing -> "Term information unavailable"
-        Just api -> 
+        Just _ -> 
           -- Terms are 28 days (assuming ~5 blocks/minute = 201,600 blocks)
           -- This is simplified - in production would use actual term schedule
           let blocksPerTerm = 201600
-              currentBlock = 1000  -- TODO: Get from protocol state
+              currentBlock = state'.currentBlock
               currentTermNumber = Int.floor (Int.toNumber currentBlock / Int.toNumber blocksPerTerm) + 1
               blocksIntoTerm = currentBlock `mod` blocksPerTerm
               blocksRemaining = blocksPerTerm - blocksIntoTerm
@@ -532,7 +436,7 @@ renderLoanBookPanel offers =
     ]
   where
     renderOffer foreignOffer =
-      let offer = unsafeCoerce foreignOffer :: { id :: Int, owner :: String, leverage :: String, amount :: Number, lockedAmount :: Number }
+      let offer = safeLenderOfferFromForeign foreignOffer
       in
       HH.div
         [ HP.class_ (HH.ClassName "offer__item") ]
@@ -559,22 +463,13 @@ renderLoanBookPanel offers =
             [ renderOfferStatus offer ]
         ]
 
-    formatPositionTerms position = 
-      -- Since position is a foreign type, we need to handle this carefully
-      "Spot" -- Simplified for now to avoid type errors
 
     formatAddress addr = 
       if String.length addr > 12
         then String.take 6 addr <> "..." <> String.drop (String.length addr - 4) addr
         else addr
     
-    formatPrice p = 
-      formatAmount p
     
-    formatDuration d = 
-      if d == 0 
-      then "Spot" 
-      else show (d / 40320) <> " months"
     
     _formatCollateral offer = 
       -- Show the locked amount for position
@@ -605,54 +500,50 @@ renderLoanBookPanel offers =
 -- Simulation control panel
 renderSimulationPanel :: forall m. UIState -> H.ComponentHTML Action () m
 renderSimulationPanel state =
-  HH.div
-    [ HP.class_ (HH.ClassName "panel") ]
-    [ HH.h2_ [ HH.text "Market Simulation" ]
-    , HH.div
+  renderPanel (defaultPanelConfig { title = Just "Market Simulation" })
+    [ HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "simulation-blocks" ] [ HH.text "Simulation Blocks:" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.id "simulation-blocks"
-            , HP.name "simulation-blocks"
-            , HP.value (show state.simulationConfig.simulationBlocks)
-            , HE.onValueChange \v -> UpdateSimulationConfig \config -> 
-                config { simulationBlocks = fromMaybe config.simulationBlocks (Int.fromString (String.trim v)) }
-            , HP.class_ (HH.ClassName "form__input")
-            , HP.min 10.0
-            , HP.max 1000.0
-            ]
+        [ renderNumberInput (defaultNumberInputConfig
+            { id = "simulation-blocks"
+            , name = "simulation-blocks"
+            , placeholder = "10-1000"
+            , value = Int.toNumber state.simulationConfig.simulationBlocks
+            , onChange = \v -> UpdateSimulationConfig \config -> 
+                config { simulationBlocks = fromMaybe config.simulationBlocks (Int.fromString (show (Int.round v))) }
+            , label = Just "Simulation Blocks:"
+            , min = Just 10.0
+            , max = Just 1000.0
+            , step = Just 1.0
+            , required = true
+            })
         ]
     , HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "num-accounts" ] [ HH.text "Number of Accounts:" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.id "num-accounts"
-            , HP.name "num-accounts"
-            , HP.value (show state.simulationConfig.numAccounts)
-            , HE.onValueChange \v -> UpdateSimulationConfig \config -> 
-                config { numAccounts = fromMaybe config.numAccounts (Int.fromString v) }
-            , HP.class_ (HH.ClassName "form__input")
-            , HP.min 3.0
-            , HP.max 100.0
-            ]
+        [ renderNumberInput (defaultNumberInputConfig
+            { id = "num-accounts"
+            , name = "num-accounts"  
+            , placeholder = "3-100"
+            , value = Int.toNumber state.simulationConfig.numAccounts
+            , onChange = \v -> UpdateSimulationConfig \config -> 
+                config { numAccounts = fromMaybe config.numAccounts (Int.fromString (show (Int.round v))) }
+            , label = Just "Number of Accounts:"
+            , min = Just 3.0
+            , max = Just 100.0
+            , step = Just 1.0
+            , required = true
+            })
         ]
     , HH.div
         [ HP.class_ (HH.ClassName "form-group") ]
-        [ HH.label [ HP.for "market-scenario" ] [ HH.text "Market Scenario:" ]
-        , HH.select
-            [ HP.id "market-scenario"
-            , HP.name "market-scenario"
-            , HE.onValueChange \v -> UpdateSimulationConfig \config -> 
+        [ renderSelect (defaultSelectConfig
+            { id = "market-scenario"
+            , name = "market-scenario"
+            , options = createMarketScenarioOptions
+            , selectedValue = show state.simulationConfig.scenario
+            , onChange = \v -> UpdateSimulationConfig \config -> 
                 config { scenario = parseMarketScenario v }
-            , HP.class_ (HH.ClassName "form__select")
-            ]
-            [ HH.option [ HP.value "BullMarket" ] [ HH.text "Bull Market" ]
-            , HH.option [ HP.value "BearMarket" ] [ HH.text "Bear Market" ]
-            , HH.option [ HP.value "SidewaysMarket" ] [ HH.text "Sideways Market" ]
-            , HH.option [ HP.value "VolatileMarket" ] [ HH.text "Volatile Market" ]
-            ]
+            , label = Just "Market Scenario:"
+            })
         ]
     , if state.simulationRunning
       then HH.div
@@ -689,13 +580,6 @@ renderSimulationResults results =
         ]
     ]
   where
-    renderResultMetric label value =
-      HH.div
-        [ HP.class_ (HH.ClassName "result-metric") ]
-        [ HH.div [ HP.class_ (HH.ClassName "metric-label") ] [ HH.text label ]
-        , HH.div [ HP.class_ (HH.ClassName "metric-value") ] [ HH.text value ]
-        ]
-    
     formatPercentage :: Number -> String
     formatPercentage change = 
       let percent = change * 100.0

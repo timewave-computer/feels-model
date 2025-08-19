@@ -78,8 +78,11 @@ type TickAnalytics =
 -- | Comprehensive metrics derived from tick event history and activity patterns
 -- | Provides multi-dimensional analysis of tick performance and characteristics
 type TickMetrics =
-  { -- Core trading metrics
-    support :: Number              -- Net buy/sell pressure (normalized percentage)
+  { -- Tick identification
+    tick :: Int                    -- The tick index this metrics data represents
+  
+  -- Core trading metrics
+  , support :: Number              -- Net buy/sell pressure (normalized percentage)
   , temperature :: Number          -- Activity intensity (0=cold, 100=hot)
   , reliability :: Number          -- Consistency of liquidity provision
   , velocity :: Number             -- Rate of liquidity change over time
@@ -178,8 +181,8 @@ data EventType
 
 -- | Calculate comprehensive tick metrics from historical event data
 -- | Processes all available events to generate complete metric profile
-calculateMetrics :: Array Event -> TickMetrics
-calculateMetrics events =
+calculateMetrics :: Int -> Array Event -> TickMetrics
+calculateMetrics tickIndex events =
   let
     -- Calculate volume metrics over different time windows
     volume24h = calculateVolume events 86400000.0   -- 24 hours in milliseconds
@@ -192,7 +195,8 @@ calculateMetrics events =
     priceHistory = map _.price events
     volumeHistory = map _.amount events
     
-  in { support: calculateSupport events
+  in { tick: tickIndex  -- Add the tick index
+     , support: calculateSupport events
      , temperature: calculateTemperature events
      , reliability: calculateReliability events
      , velocity: calculateVelocity events
@@ -213,7 +217,7 @@ analyzeTickHistory :: Number -> Int -> Number -> Array Event -> TickAnalytics
 analyzeTickHistory now tickIndex price events =
   let
     -- Calculate comprehensive metrics
-    metrics = calculateMetrics events
+    metrics = calculateMetrics tickIndex events
     state = determineTickState metrics
     volume24h = calculateVolume events 86400000.0
     volume7d = calculateVolume events 604800000.0

@@ -29,6 +29,8 @@ type UIState =
     currentUser :: String
   -- Protocol API runtime
   , api :: Maybe AppRuntime
+  -- Protocol state cache
+  , currentBlock :: Int            -- Current block from protocol state
   -- Exchange Form
   , inputAmount :: Number
   , selectedFromAsset :: String  -- "jitosol", "feelssol", "position", etc.
@@ -119,6 +121,7 @@ initialUIState :: UIState
 initialUIState =
   { currentUser: "main-user"
   , api: Nothing
+  , currentBlock: 1000  -- Default starting block
   -- Exchange Form
   , inputAmount: 100.0
   , selectedFromAsset: "jitosol"

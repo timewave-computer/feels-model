@@ -11,27 +11,27 @@ import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse)
+import Data.Foldable (sum)
 import Effect (Effect)
 import Effect.Ref (read, write)
 import Data.Map as Map
-import FFI (log, floor)
+import FFI (log, floor, currentTime)
 import Data.Array (length, drop)
 import Unsafe.Coerce (unsafeCoerce)
 
 -- Import app state types
 import UI.ProtocolState (ProtocolState, AppRuntime, ProtocolCommand(..))
 import Protocol.Common (CommandResult(..))
-import Protocol.Token (TokenType(..))
+import Protocol.Token (TokenType)
 
 -- Import domain modules
-import Protocol.Position (Duration, Leverage)
-import Protocol.FeelsSOL (getTotalSupply)
-import Protocol.POL (contribute, getTotalPOL)
+import Protocol.PositionVault (Duration, Leverage)
+import Protocol.FeelsSOLVault (FeelsSOLVault, updateOraclePrice)
+import Protocol.POLVault (contribute, getTotalPOL)
 import Protocol.Oracle (takeMarketSnapshot)
-import FFI (currentTime)
 import Protocol.Error (ProtocolError(..))
-import Protocol.Launch as Launch
-import Protocol.Launch (LaunchPhase(..), LaunchConfig, PhaseConfig)
+import Protocol.LaunchVault as Launch
+import Protocol.LaunchVault (LaunchPhase(..))
 
 -- Import action modules
 import UI.Action.TokenActions as TokenActions
@@ -57,8 +57,9 @@ captureRebaseDifferential runtime = do
       
   -- Only capture if price has increased (staking rewards)
   when (currentJitoPrice > previousPrice) $ do
-        -- Get total FeelsSOL supply from FeelsSOL state
-        totalSupply <- getTotalSupply state.feelsSOL
+        -- Get total FeelsSOL supply from vault's balance sheet
+        vault <- read state.feelsSOL
+        let totalSupply = vault.state.balanceSheet.totalShares
         
         -- Calculate differential value
         let priceAppreciation = currentJitoPrice - previousPrice
@@ -128,6 +129,23 @@ handleCreatePosition user lendAsset amount collateralAsset collateralAmount term
       let convertedPosition = unsafeCoerce position
       pure $ Right $ Tuple newState (PositionCreated convertedPosition)
 
+-- | Perform solvency check for FeelsSOL protocol
+-- | Ensures total FeelsSOL supply is backed by sufficient JitoSOL reserves
+checkFeelsSOLSolvency :: ProtocolState -> Effect Boolean
+checkFeelsSOLSolvency state = do
+  vault <- read state.feelsSOL
+  let totalFeelsSOL = vault.state.balanceSheet.totalShares
+      totalAssets = sum $ map _.amount vault.state.balanceSheet.assets
+      strategy = vault.state.strategyState
+  
+  -- Update oracle price to get current exchange rate
+  updatedStrategy <- updateOraclePrice strategy
+  let requiredJitoSOL = case updatedStrategy.cachedPrice of
+        Just oracle -> totalFeelsSOL / oracle.price
+        Nothing -> totalFeelsSOL / 1.05
+  
+  pure $ totalAssets >= requiredJitoSOL
+
 -- | Handle token transfer command
 handleTransferTokens :: String -> String -> TokenType -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
 handleTransferTokens from to token amount state = do
@@ -148,8 +166,11 @@ handleEnterFeelsSOL user jitoAmount state = do
     Right mintResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      -- TODO: Add solvency check
-      pure $ Right $ Tuple newState (FeelsSOLMinted mintResult)
+      -- Perform solvency check
+      isSolvent <- checkFeelsSOLSolvency newState
+      if isSolvent
+        then pure $ Right $ Tuple newState (FeelsSOLMinted mintResult)
+        else pure $ Left InsufficientReserves
 
 -- | Handle FeelsSOL exit command
 handleExitFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -160,8 +181,11 @@ handleExitFeelsSOL user feelsAmount state = do
     Right burnResult -> do
       timestamp <- currentTime
       let newState = state { timestamp = timestamp }
-      -- TODO: Add solvency check
-      pure $ Right $ Tuple newState (FeelsSOLBurned burnResult)
+      -- Perform solvency check
+      isSolvent <- checkFeelsSOLSolvency newState
+      if isSolvent
+        then pure $ Right $ Tuple newState (FeelsSOLBurned burnResult)
+        else pure $ Left InsufficientReserves
 
 -- | Handle unbonding initiation
 handleInitiateUnbonding :: String -> Int -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -196,7 +220,7 @@ handleCreateLaunch ticker totalTokens phases state = do
                , treasuryAddress: "treasury"
                }
   
-  launchResult <- Launch.initLaunch config
+  launchResult <- Launch.initializeLaunchVault config
   case launchResult of
     Left err -> pure $ Left err
     Right launchState -> do
@@ -213,6 +237,7 @@ handleCreateLaunch ticker totalTokens phases state = do
       , priceRangeUpper: p.priceUpper
       , tickLower: priceToTick p.priceLower
       , tickUpper: priceToTick p.priceUpper
+      , lockDuration: if parsePhase p.phase == MonthlyPhase then 216000 else 0  -- 30 days for monthly, 0 for spot
       }
     parsePhase "Monthly" = MonthlyPhase
     parsePhase _ = SpotPhase
@@ -229,12 +254,12 @@ handleStartLaunchPhase poolId state = do
       case pool of
         Nothing -> pure $ Left $ InvalidCommandError "Pool not found"
         Just poolState -> do
-          result <- Launch.startPhase launchRef poolState state.currentBlock
+          result <- Launch.provisionPhase launchRef poolState state.currentBlock
           case result of
             Left err -> pure $ Left err
             Right _ -> do
-              launch <- read launchRef
-              pure $ Right $ Tuple state (LaunchPhaseStarted poolId (show launch.currentPhase))
+              status <- Launch.getLaunchStatus launchRef
+              pure $ Right $ Tuple state (LaunchPhaseStarted poolId (show status.phase))
 
 -- | Handle launch phase completion
 handleCompleteLaunchPhase :: String -> ProtocolState -> Effect (Either ProtocolError (Tuple ProtocolState CommandResult))
@@ -245,13 +270,13 @@ handleCompleteLaunchPhase poolId state = do
       pool <- lookupPool poolId state.poolRegistry
       case pool of
         Nothing -> pure $ Left $ InvalidCommandError "Pool not found"
-        Just poolState -> do
+        Just _ -> do
           -- Check if phase is complete
-          isComplete <- Launch.checkPhaseComplete launchRef poolState
+          isComplete <- Launch.checkPhaseComplete launchRef
           if not isComplete
             then pure $ Left $ InvalidCommandError "Phase not complete"
             else do
-              result <- Launch.completeLaunch launchRef
+              result <- Launch.transitionPhase launchRef
               case result of
                 Left err -> pure $ Left err
                 Right nextPhase -> pure $ Right $ Tuple state (LaunchPhaseCompleted poolId (show nextPhase))

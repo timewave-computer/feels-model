@@ -21,6 +21,18 @@ package:
     - now
     - functions
     - foldable-traversable
+    # Library replacement dependencies
+    - validation
+    - codec-argonaut
+    - profunctor-lenses
+    - formatters
+    - parallel
+    - parsing
+    - spec
+    - random
+    - gen
+    - ordered-collections
+    - simple-json
   test:
     main: Test.Main
     dependencies:

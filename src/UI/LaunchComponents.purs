@@ -2,18 +2,22 @@
 module UI.LaunchComponents where
 
 import Prelude
-import Data.Maybe (Maybe(..), isJust)
+import Data.Maybe (Maybe(..), isJust, fromMaybe)
 import Data.Array (length, head, filter)
-import Unsafe.Coerce (unsafeCoerce)
+import Data.Number as Number
+import UI.Util.Codecs (intToNumber)
 import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
 import Halogen.HTML.Properties as HP
 
-import Protocol.Launch (LaunchPhase(..))
+import Protocol.LaunchVault (LaunchPhase(..))
 import Utils (formatAmount)
+import UI.Component.FormElements (renderNumberInput, renderButton, renderFormGroup, defaultNumberInputConfig, defaultButtonConfig, ButtonStyle(..))
+import UI.Component.Panel (renderPanel, renderSection, defaultPanelConfig, defaultSectionConfig, PanelStyle(..))
+import UI.Component.DataDisplay (renderMetric, formatPercentage)
 
--- LaunchPhase imported from Protocol.Launch
+-- LaunchPhase imported from Protocol.LaunchVault
 type BatchResult = 
   { success :: Boolean
   , batchNumber :: Int
@@ -59,15 +63,12 @@ data LaunchAction
 
 renderLaunchCreator :: forall m. LaunchUIState -> H.ComponentHTML LaunchAction () m
 renderLaunchCreator _ =
-  HH.div
-    [ HP.class_ (HH.ClassName "launch-creator panel") ]
-    [ HH.h3_ [ HH.text "Create Token Launch" ]
-    , HH.p 
+  renderPanel (defaultPanelConfig { title = Just "Create Token Launch", style = Standard })
+    [ HH.p 
         [ HP.class_ (HH.ClassName "info-text") ]
         [ HH.text "Launch your token through our cascading batch auction system" ]
     -- Token creation form would go here, reusing existing token creation UI
-    , HH.div
-        [ HP.class_ (HH.ClassName "launch-info") ]
+    , renderSection (defaultSectionConfig { title = Just "Launch Information" })
         [ HH.ul_
             [ HH.li_ [ HH.text "Monthly Phase: 28-day commitment, lowest price" ]
             , HH.li_ [ HH.text "Spot Phase: Immediate liquidity, higher price" ]
@@ -81,10 +82,8 @@ renderLaunchCreator _ =
 
 renderBidSubmission :: forall m. LaunchUIState -> H.ComponentHTML LaunchAction () m
 renderBidSubmission state =
-  HH.div
-    [ HP.class_ (HH.ClassName "bid-submission panel") ]
-    [ HH.h3_ [ HH.text "Submit Launch Bid" ]
-    , case state.selectedLaunch of
+  renderPanel (defaultPanelConfig { title = Just "Submit Launch Bid", style = Standard })
+    [ case state.selectedLaunch of
         Nothing -> 
           HH.p 
             [ HP.class_ (HH.ClassName "info-text") ]
@@ -109,55 +108,56 @@ renderBidForm launch state =
             [ HP.class_ (HH.ClassName $ "phase-badge " <> phaseClass launch.currentPhase) ]
             [ HH.text $ show launch.currentPhase ]
         ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "price-info") ]
-        [ HH.p_ [ HH.text $ "Current Base Price: " <> formatAmount launch.currentPrice <> " FeelsSOL" ]
-        , HH.p_ [ HH.text $ "Last Batch Priority Fee: " <> formatPercent launch.lastBatchFeeRatio ]
+    , renderSection (defaultSectionConfig { title = Just "Price Information" })
+        [ renderMetric "Current Base Price" (formatAmount launch.currentPrice <> " FeelsSOL")
+        , renderMetric "Last Batch Priority Fee" (formatPercent launch.lastBatchFeeRatio)
         ]
     , HH.div
-        [ HP.class_ (HH.ClassName "input-group") ]
-        [ HH.label_ [ HH.text "Bid Amount (FeelsSOL)" ]
-        , HH.input
-            [ HP.type_ HP.InputNumber
-            , HP.value $ show state.bidAmount
-            , HP.min 0.0
-            , HP.step (HP.Step 10.0)
-            , HE.onValueInput \v -> UpdateBidAmount (parseNumber v)
-            ]
-        ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "input-group") ]
-        [ HH.label_ [ HH.text $ "Priority Fee: " <> formatPercent (state.priorityFeePercent / 100.0) ]
-        , HH.input
-            [ HP.type_ HP.InputRange
-            , HP.value $ show state.priorityFeePercent
-            , HP.min 0.0
-            , HP.max 50.0
-            , HP.step (HP.Step 1.0)
-            , HE.onValueInput \v -> UpdatePriorityFee (parseNumber v)
-            ]
+        [ HP.class_ (HH.ClassName "form-inputs") ]
+        [ renderNumberInput (defaultNumberInputConfig
+            { id = "bid-amount"
+            , name = "bid-amount"
+            , placeholder = "Enter amount"
+            , value = state.bidAmount
+            , onChange = UpdateBidAmount
+            , label = Just "Bid Amount (FeelsSOL)"
+            , min = Just 0.0
+            , step = Just 10.0
+            , required = true
+            })
         , HH.div
-            [ HP.class_ (HH.ClassName "fee-labels") ]
-            [ HH.span_ [ HH.text "0%" ]
-            , HH.span_ [ HH.text "25%" ]
-            , HH.span_ [ HH.text "50%" ]
+            [ HP.class_ (HH.ClassName "input-group") ]
+            [ HH.label_ [ HH.text $ "Priority Fee: " <> formatPercent (state.priorityFeePercent / 100.0) ]
+            , HH.input
+                [ HP.type_ HP.InputRange
+                , HP.value $ show state.priorityFeePercent
+                , HP.min 0.0
+                , HP.max 50.0
+                , HP.step (HP.Step 1.0)
+                , HE.onValueInput \v -> UpdatePriorityFee (parseNumber v)
+                ]
+            , HH.div
+                [ HP.class_ (HH.ClassName "fee-labels") ]
+                [ HH.span_ [ HH.text "0%" ]
+                , HH.span_ [ HH.text "25%" ]
+                , HH.span_ [ HH.text "50%" ]
+                ]
             ]
         ]
-    , HH.div
-        [ HP.class_ (HH.ClassName "bid-summary") ]
-        [ HH.p_ [ HH.text $ "Base Payment: " <> formatAmount state.bidAmount <> " FeelsSOL" ]
-        , HH.p_ [ HH.text $ "Priority Fee: " <> formatAmount (state.bidAmount * state.priorityFeePercent / 100.0) <> " FeelsSOL" ]
+    , renderSection (defaultSectionConfig { title = Just "Bid Summary" })
+        [ renderMetric "Base Payment" (formatAmount state.bidAmount <> " FeelsSOL")
+        , renderMetric "Priority Fee" (formatAmount (state.bidAmount * state.priorityFeePercent / 100.0) <> " FeelsSOL")
         , HH.hr_
         , HH.p 
             [ HP.class_ (HH.ClassName "total") ]
             [ HH.text $ "Total Payment: " <> formatAmount (state.bidAmount * (1.0 + state.priorityFeePercent / 100.0)) <> " FeelsSOL" ]
         ]
-    , HH.button
-        [ HP.class_ (HH.ClassName "btn primary submit-bid")
-        , HP.disabled (state.bidAmount <= 0.0)
-        , HE.onClick \_ -> SubmitBid
-        ]
-        [ HH.text "Submit Bid" ]
+    , renderButton (defaultButtonConfig
+        { text = "Submit Bid"
+        , onClick = SubmitBid
+        , style = Primary
+        , disabled = state.bidAmount <= 0.0
+        })
     ]
 
 --------------------------------------------------------------------------------
@@ -166,16 +166,14 @@ renderBidForm launch state =
 
 renderActiveLaunches :: forall m. LaunchUIState -> H.ComponentHTML LaunchAction () m
 renderActiveLaunches state =
-  HH.div
-    [ HP.class_ (HH.ClassName "active-launches panel") ]
+  renderPanel (defaultPanelConfig { title = Just "Active Launches", style = Standard })
     [ HH.div
-        [ HP.class_ (HH.ClassName "panel-header") ]
-        [ HH.h3_ [ HH.text "Active Launches" ]
-        , HH.button
-            [ HP.class_ (HH.ClassName "btn secondary refresh")
-            , HE.onClick \_ -> RefreshLaunches
-            ]
-            [ HH.text "Refresh" ]
+        [ HP.class_ (HH.ClassName "panel-actions") ]
+        [ renderButton (defaultButtonConfig
+            { text = "Refresh"
+            , onClick = RefreshLaunches
+            , style = Secondary
+            })
         ]
     , if length state.activeLaunches == 0
         then HH.p 
@@ -201,22 +199,8 @@ renderLaunchCard launch =
         ]
     , HH.div
         [ HP.class_ (HH.ClassName "launch-stats") ]
-        [ HH.div_
-            [ HH.span 
-                [ HP.class_ (HH.ClassName "label") ]
-                [ HH.text "Price" ]
-            , HH.span 
-                [ HP.class_ (HH.ClassName "value") ]
-                [ HH.text $ formatAmount launch.currentPrice ]
-            ]
-        , HH.div_
-            [ HH.span 
-                [ HP.class_ (HH.ClassName "label") ]
-                [ HH.text "Progress" ]
-            , HH.span 
-                [ HP.class_ (HH.ClassName "value") ]
-                [ HH.text $ formatPercent (launch.totalDistributed / launch.totalSupply) ]
-            ]
+        [ renderMetric "Price" (formatAmount launch.currentPrice)
+        , renderMetric "Progress" (formatPercent (launch.totalDistributed / launch.totalSupply))
         ]
     , HH.div
         [ HP.class_ (HH.ClassName "progress-bar") ]
@@ -226,11 +210,12 @@ renderLaunchCard launch =
             ]
             []
         ]
-    , HH.button
-        [ HP.class_ (HH.ClassName "btn link view-history")
-        , HE.onClick \_ -> ViewBatchHistory launch.launchId
-        ]
-        [ HH.text "View History" ]
+    , renderButton (defaultButtonConfig
+        { text = "View History"
+        , onClick = ViewBatchHistory launch.launchId
+        , style = Secondary
+        , className = "btn--link"
+        })
     ]
 
 --------------------------------------------------------------------------------
@@ -239,10 +224,8 @@ renderLaunchCard launch =
 
 renderBatchHistory :: forall m. LaunchUIState -> H.ComponentHTML LaunchAction () m
 renderBatchHistory state =
-  HH.div
-    [ HP.class_ (HH.ClassName "batch-history panel") ]
-    [ HH.h3_ [ HH.text "Batch Auction History" ]
-    , if length state.launchHistory == 0
+  renderPanel (defaultPanelConfig { title = Just "Batch Auction History", style = Standard })
+    [ if length state.launchHistory == 0
         then HH.p 
           [ HP.class_ (HH.ClassName "info-text") ]
           [ HH.text "No batch history available" ]
@@ -273,7 +256,7 @@ renderBatchRow batch =
     ]
   where
     toNumber :: Int -> Number
-    toNumber n = unsafeCoerce n
+    toNumber n = intToNumber n
 
 --------------------------------------------------------------------------------
 -- Helper Functions
@@ -286,15 +269,7 @@ phaseClass = case _ of
   Completed -> "phase-completed"
 
 formatPercent :: Number -> String
-formatPercent n = show (n * 100.0) <> "%"
+formatPercent = formatPercentage
 
-parseNumber :: String -> Number
-parseNumber s = case parseFloat s of
-  n | isNaN n -> 0.0
-  n -> n
-  where
-    parseFloat :: String -> Number
-    parseFloat = unsafeCoerce
-    
-    isNaN :: Number -> Boolean
-    isNaN n = n /= n
+parseNumber :: String -> Number  
+parseNumber s = fromMaybe 0.0 (Number.fromString s)

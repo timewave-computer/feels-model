@@ -41,64 +41,41 @@ module Simulation.Engine
 
 import Prelude
 import Data.Array (length, range, (:))
-import Data.Foldable (sum, foldl)
+import Data.Foldable (sum, foldl, foldM)
 import Data.Map as Map
-import Effect.Ref (new)
 import Effect (Effect)
 import Effect.Console (log)
+import Effect.Ref (Ref, read, write)
 
 -- Core protocol and UI system imports
 import Protocol.Token (TokenType(..))
-import UI.PoolRegistry (PoolRegistry, initPoolRegistry)
-import Protocol.FeelsSOL (FeelsSOLState, initFeelsSOL)
-import UI.Account (initAccountRegistry)
+import UI.PoolRegistry (PoolRegistry, initPoolRegistry, getPool, updatePool)
+import Protocol.FeelsSOLVault (FeelsSOLState, createFeelsSOLVault, FeelsSOLStrategy)
+import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance, getChainAccountBalance)
 import Utils (formatAmount)
-import Protocol.POL (initPOL)
+import Protocol.POLVault (initPOL)
 import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot, updatePrice)
 
 -- Import simulation subsystem modules
 import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
 import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
-import Simulation.Action (TradingAction(..), generateTradingSequence)
-import Simulation.Analysis (SimulationResults, calculateResults)
-
--- Re-export from Agent module
-import Simulation.Agent (AccountProfile(..), SimulatedAccount, generateAccounts)
-
--- Re-export from Action module
 import Simulation.Action (TradingAction(..), generateTradingSequence, getRecentlyCreatedTokens)
-
--- Re-export from Scenario module  
-import Simulation.Scenario (MarketScenario(..), SimulationConfig, generateMarketScenario)
-
--- Re-export from Action module
-import Simulation.Action (generateTradingSequence)
-
--- Re-export from Analysis module
 import Simulation.Analysis (SimulationResults, calculateResults)
 
 -- Additional imports for protocol engine functionality
 import Data.Either (Either(..))
-import Data.Tuple (Tuple(..), fst, snd)
+import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse_)
 import Data.Maybe (Maybe(..))
-import Data.Int (toNumber)
-import Data.Ord (abs, min)
-import Effect.Ref (Ref, read, write)
-import Control.Monad (when)
+import Data.Ord (abs)
 
 -- Import protocol types and functions for protocol engine
 import Protocol.Common (CommandResult(..))
-import Protocol.Error (ProtocolError)
-import Protocol.Position (Duration(..), Leverage(..))
-import UI.ProtocolState (ProtocolState, ProtocolCommand)
-import UI.Command (executeCommand)
-import UI.ProtocolState as PS
+import Protocol.PositionVault (Leverage(..))
+import UI.ProtocolState (ProtocolState)
 import UI.ProtocolState (ProtocolCommand(..)) as PS
-import Protocol.POL (getAllAllocations)
-import Protocol.Pool (PoolState, swap, SwapParams)
-import UI.PoolRegistry (getAllPools, getPool, updatePool)
-import UI.Account (AccountRegistry, updateChainAccountBalance, getChainAccountBalance)
+import UI.Command (executeCommand)
+import Protocol.Pool (swap)
 import UI.Clock (runProtocolBlock)
 
 --------------------------------------------------------------------------------
@@ -146,17 +123,24 @@ initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   accounts <- generateAccounts { numAccounts: config.numAccounts, accountProfiles: config.accountProfiles }
   
   -- Initialize Protocol-Owned Liquidity system
-  pol <- initPOL
-  
-  -- Create price oracle function for FeelsSOL integration
-  let priceOracle = pure config.initialJitoSOLPrice
+  _ <- initPOL
   
   -- Initialize account registry for user management
-  accountRegistry <- initAccountRegistry
+  _ <- initAccountRegistry
   
-  -- Initialize FeelsSOL protocol with realistic parameters
+  -- Initialize FeelsSOL vault with realistic parameters
   -- Entry fee: 0.1%, Exit fee: 0.2% (typical DeFi protocol rates)
-  feelsSOL <- initFeelsSOL priceOracle 0.001 0.002
+  let initialStrategy =
+        { priceOracle: pure config.initialJitoSOLPrice
+        , lastOracleUpdate: 0.0
+        , cachedPrice: Nothing
+        , entryFee: 0.001
+        , exitFee: 0.002
+        , polAllocationRate: 0.25  -- Default 25% to POL
+        , bufferTargetRatio: 0.01  -- Default 1% buffer target
+        , jitoSOLBuffer: 0.0
+        }
+  feelsSOL <- createFeelsSOLVault "FeelsSOL-System" initialStrategy
   
   -- Assemble complete initial simulation state
   pure { accounts: accounts
@@ -238,7 +222,7 @@ executeSimulation config initialState = do
   log "Simulation: Established initial market conditions"
   
   -- Execute simulation blocks sequentially with state accumulation
-  finalState <- foldl executeBlock (pure initialState) (range 1 config.simulationBlocks)
+  finalState <- foldM (\state blockNum -> executeSimulationBlock config state blockNum) initialState (range 1 config.simulationBlocks)
   
   -- Capture final market state for analysis
   log "Simulation: Capturing final market state for analysis"
@@ -246,11 +230,6 @@ executeSimulation config initialState = do
   
   log $ "Simulation execution completed: " <> show config.simulationBlocks <> " blocks processed"
   pure finalState
-  where
-    -- | Execute individual simulation block with state transformation
-    executeBlock stateEffect blockNum = do
-      state <- stateEffect
-      executeSimulationBlock config state blockNum
 
 -- | Execute single simulation block with comprehensive market dynamics
 -- | Processes market scenario, generates actions, executes trades, and updates state

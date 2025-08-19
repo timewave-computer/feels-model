@@ -15,7 +15,7 @@ import Effect (Effect)
 -- Import types
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..), TokenMetadata)
-import Protocol.Position (Position, Duration, Leverage)
+import Protocol.PositionVault (Position, Duration, Leverage)
 import Protocol.Error (ProtocolError(..))
 
 -- Import actions
