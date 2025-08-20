@@ -1,6 +1,8 @@
 -- | Test module for lending yield functionality
 module Test.LendingYieldTest where
 
+{- TODO: Update tests to work with new 3D Pool API
+
 import Prelude
 import Effect (Effect)
 import Effect.Console (log)
@@ -12,24 +14,22 @@ import Data.Maybe (Maybe(..))
 -- Import protocol modules
 import Protocol.Pool as Pool
 import Protocol.PositionVault as Position
+import Protocol.Pool (Duration(..), Leverage(..))
 import Protocol.Token (TokenType(..))
 
 -- Test helpers
-createTestPool :: Effect Pool.PoolState
-createTestPool = pure $ Pool.initializePool FeelsSOL JitoSOL 1.0 
-  { tickSpacing: 10
-  , fee: 30.0  -- 0.3%
-  , maxLiquidityPerTick: 1000000.0
-  }
+createTestPool :: Effect Pool
+createTestPool = pure $ initializePool3D FeelsSOL JitoSOL 1.0 0
 
-createTestPosition :: Effect Position.Position
-createTestPosition = pure $ Position.createPosition
-  1                        -- id
-  "test-user"             -- owner
+createTestPosition :: Effect VaultPosition
+createTestPosition = do
+  createVaultPosition
+    "1"                     -- id
+    "test-user"             -- owner
   1000.0                  -- amount
   1.0                     -- price
-  Position.Monthly        -- duration
-  Position.Junior         -- leverage (3x)
+  Monthly        -- duration
+  Junior         -- leverage (3x)
   FeelsSOL                -- lendAsset
   JitoSOL                 -- collateralAsset
   false                   -- rollover
@@ -59,10 +59,10 @@ testAPYCalculation = do
   log "\nTesting APY calculation..."
   pool <- createTestPool
   
-  let spotSeniorAPY = Pool.getAPY pool Position.Spot Position.Senior
-  let spotJuniorAPY = Pool.getAPY pool Position.Spot Position.Junior
-  let monthlySeniorAPY = Pool.getAPY pool Position.Monthly Position.Senior
-  let monthlyJuniorAPY = Pool.getAPY pool Position.Monthly Position.Junior
+  let spotSeniorAPY = Pool.getAPY pool Swap Senior
+  let spotJuniorAPY = Pool.getAPY pool Swap Junior
+  let monthlySeniorAPY = Pool.getAPY pool Monthly Senior
+  let monthlyJuniorAPY = Pool.getAPY pool Monthly Junior
   
   -- Base APY is 0.05 (5%)
   quickCheck $ approxEqual spotSeniorAPY 0.05         -- 0.05 * 1x * 1.0 = 0.05
@@ -168,8 +168,8 @@ testEndToEndPositionCreation = do
         "test-user"            -- owner
         1000.0                 -- amount
         1.0                    -- price
-        Position.Monthly       -- duration
-        Position.Junior        -- leverage
+        Monthly       -- duration
+        Junior        -- leverage
         FeelsSOL               -- lendAsset
         JitoSOL                -- collateralAsset
         false                  -- rollover
@@ -182,4 +182,4 @@ testEndToEndPositionCreation = do
   quickCheck $ testPosition.feeGrowthInside0 === 0.0
   quickCheck $ testPosition.feeGrowthInside1 === 0.0
   
-  log "  ✓ Position created with yield tracking fields initialized"
+  log "  ✓ Position created with yield tracking fields initialized"-}

@@ -307,7 +307,7 @@ renderExchangePanel state =
             "position" -> "Position"
             _ -> "Asset"
           to = case state'.selectedToAsset of
-            "position-spot" -> "Spot Position"
+            "position-swap" -> "Swap Position"
             "position-term" -> "Term Position"
             "jitosol" -> "JitoSOL"
             "feelssol" -> "FeelsSOL"
@@ -363,7 +363,7 @@ renderLendOptions state =
                     [ HH.text termInfo ]
                 ]
             _ -> HH.p_ 
-              [ HH.text "Spot: No term commitment. Withdraw anytime with immediate liquidity. Lower yields than term positions." ]
+              [ HH.text "Swap: No term commitment. Withdraw anytime with immediate liquidity. Lower yields than term positions." ]
         ]
     
     -- Calculate current term information
@@ -384,7 +384,7 @@ renderLendOptions state =
     renderAPY state' =
       let duration = case state'.selectedTermType of
             "monthly" -> "Monthly Term"
-            _ -> "Spot"
+            _ -> "Swap"
           leverage = case state'.selectedLeverage of
             "junior" -> "Junior (3x)"
             _ -> "Senior (1x)"
@@ -457,7 +457,7 @@ renderLoanBookPanel offers =
             [ HH.text $ "Locked: " <> formatAmount offer.lockedAmount ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__terms") ]
-            [ HH.text "Spot" ]
+            [ HH.text "Swap" ]
         , HH.div
             [ HP.class_ (HH.ClassName "offer__status") ]
             [ renderOfferStatus offer ]

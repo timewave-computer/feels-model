@@ -36,7 +36,7 @@ import Data.Enum (toEnum)
 
 -- Core protocol system imports
 import Protocol.Token (TokenType(..))
-import Protocol.PositionVault (Duration(..), Leverage(..), monthlyDuration, spotDuration)
+import Protocol.Pool (Duration(..), Leverage(..))
 import Utils (formatAmount)
 
 -- Import simulation subsystem dependencies
@@ -249,8 +249,8 @@ generateTokenSwapAction config state account = do
           -- 50% chance to create offer, 50% chance to take existing offer
           actionChoice <- random
           if actionChoice < 0.5
-            then pure $ CreateLendOffer account.id (Token tokenTicker) actualAmount positionConfig.lendAsset priceWithSpread positionConfig.duration positionConfig.leverage Nothing
-            else pure $ TakeLoan account.id (Token tokenTicker) actualAmount positionConfig.lendAsset actualAmount positionConfig.duration positionConfig.leverage
+            then pure $ CreateLendOffer account.id (Custom tokenTicker) actualAmount positionConfig.lendAsset priceWithSpread positionConfig.duration positionConfig.leverage Nothing
+            else pure $ TakeLoan account.id (Custom tokenTicker) actualAmount positionConfig.lendAsset actualAmount positionConfig.duration positionConfig.leverage
           
         -- Execute sell orders (Token → FeelsSOL)
         else if account.feelsSOLBalance >= 20.0
@@ -282,8 +282,8 @@ generateTokenSwapAction config state account = do
             -- 50% chance to create offer, 50% chance to take existing offer
             actionChoice <- random
             if actionChoice < 0.5
-              then pure $ CreateLendOffer account.id positionConfig.lendAsset actualAmount (Token tokenTicker) priceWithSpread positionConfig.duration positionConfig.leverage Nothing
-              else pure $ TakeLoan account.id positionConfig.lendAsset actualAmount (Token tokenTicker) actualAmount positionConfig.duration positionConfig.leverage
+              then pure $ CreateLendOffer account.id positionConfig.lendAsset actualAmount (Custom tokenTicker) priceWithSpread positionConfig.duration positionConfig.leverage Nothing
+              else pure $ TakeLoan account.id positionConfig.lendAsset actualAmount (Custom tokenTicker) actualAmount positionConfig.duration positionConfig.leverage
           else pure $ WaitBlocks 1  -- Insufficient balance for trading
 
 --------------------------------------------------------------------------------
@@ -401,7 +401,7 @@ generateRandomAction config state = do
                       
                       -- Standard 100 FeelsSOL stake for token launch support
                       -- Force Monthly duration for token staking to support launches
-                      pure $ CreateLendOffer account.id positionConfig.lendAsset 100.0 (Token tokenTicker) 100.0 Monthly positionConfig.leverage (Just tokenTicker)
+                      pure $ CreateLendOffer account.id positionConfig.lendAsset 100.0 (Custom tokenTicker) 100.0 Monthly positionConfig.leverage (Just tokenTicker)
                     else pure $ WaitBlocks 1  -- Insufficient balance for staking
                 Nothing -> pure $ WaitBlocks 1  -- Token selection failed
         else pure $ WaitBlocks 1  -- Default wait action for pacing

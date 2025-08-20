@@ -1,330 +1,383 @@
--- | Vault Abstraction - Core balance sheet and strategy framework
+-- | Vault Abstraction - Generic ledger-based vault framework
 -- |
--- | This module provides a minimal vault abstraction that can be used as a foundation
--- | for various protocol components. A vault accepts capital (assets) and issues shares
--- | (liabilities) in return, maintaining a balance sheet and executing allocation strategies.
+-- | This module provides a powerful ledger-based vault abstraction that maintains
+-- | a complete audit trail of all user actions. Each vault defines custom entry types
+-- | for maximum flexibility while sharing common ledger operations.
 -- |
 -- | Key concepts:
--- | - Assets: Capital deposited into the vault
--- | - Liabilities: Shares issued to depositors  
--- | - State: Internal state for allocation strategy
--- | - Functions: Operations to manage capital and execute strategy
--- | - Dimensions: Vaults can be 1D (price only) or 3D (price, duration, leverage)
+-- | - Ledger: Complete history of all user deposits/actions
+-- | - Entry Type: Vault-specific data for each ledger entry
+-- | - Aggregation: Automatic balance calculation from ledger entries
+-- | - Type Safety: Each vault defines its own entry type
 module Protocol.Vault
-  ( -- Core types
-    Vault
-  , VaultState
-  , BalanceSheet
-  , Asset
-  , Liability
+  ( -- Balance Sheet types
+    LedgerEntry(..)
   , ShareAmount
-  -- Vault dimensions
-  , class VaultDimension
-  , Dimension1D(..)
-  , Dimension3D(..)
-  , getDimensionInfo
-  -- Result types
   , DepositResult
   , WithdrawResult
-  , WithdrawRequest
-  , WithdrawRequestResult
-  -- Vault operations
-  , deposit
-  , withdraw
-  , requestWithdraw
-  , processWithdrawRequest
-  , allocate
-  , updateStrategy
-  -- Balance sheet queries
-  , totalAssets
-  , totalLiabilities
-  , netAssetValue
-  , defaultSharePrice
-  -- State management
-  , getVaultState
-  , updateVaultState
+  -- State types
+  , LedgerVaultState
+  , LedgerVault
+  , LedgerOpsDict
+  -- Ledger operations class
+  , class LedgerOps
+  , entryValue
+  , isActive
+  , aggregateEntries
+  , applyStrategy
+  -- Query functions
+  , getAccountBalance
+  , getAccountEntries
+  , getActiveEntries
+  , getTotalBalance
+  , getAllAccounts
+  -- Mutation functions
+  , addLedgerEntry
+  , updateLedgerEntry
+  , removeLedgerEntry
+  -- Vault creation functions
+  , createEmptyLedgerState
+  , createLedgerVault
   ) where
 
 import Prelude
-import Data.Maybe (Maybe(..))
-import Data.Array ((:), find, filter)
-import Data.Foldable (sum)
+import Data.Map (Map)
+import Data.Map as Map
+import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Array ((:), filter, find, findIndex, updateAt, deleteAt)
+import Data.Array as Array
+import Data.Foldable (sum, foldl)
+import Data.Tuple (Tuple(..))
 import Effect (Effect)
-import Protocol.Token (TokenType)
+import Effect.Ref (Ref, read, write, modify_)
 import Protocol.Common (BlockNumber)
-import Protocol.PositionVault (Duration(..), Leverage(..))
+import FFI (currentTime)
 
 --------------------------------------------------------------------------------
--- CORE TYPES
+-- BALANCE SHEET
 --------------------------------------------------------------------------------
 
--- | Represents an asset held by the vault
-type Asset =
-  { tokenType :: TokenType
-  , amount :: Number
-  , venue :: String              -- Where the asset is deployed (e.g., "POL", "Pool-X")
+-- | Generic ledger entry type parameterized by custom data
+newtype LedgerEntry a = LedgerEntry
+  { accountId :: String          -- Account identifier
+  , timestamp :: Number          -- When entry was created
+  , blockNumber :: BlockNumber   -- Block when entry was created
+  , data :: a                    -- Vault-specific entry data
   }
 
--- | Represents a liability (shares issued) with dimensional information
-type Liability d =
-  { holder :: String             -- Address of share holder
-  , shares :: ShareAmount        -- Number of shares held
-  , depositBlock :: BlockNumber  -- When shares were issued
-  , maturityBlock :: Maybe BlockNumber -- Optional: when shares can be withdrawn
-  , locked :: Boolean            -- Whether shares are locked until maturity
-  , dimensions :: d              -- Dimensional information (1D or 3D)
-  }
+derive instance eqLedgerEntry :: Eq a => Eq (LedgerEntry a)
 
 -- | Share amount type for type safety
 type ShareAmount = Number
 
--- | Balance sheet tracking assets and liabilities
-type BalanceSheet d =
-  { assets :: Array Asset        -- All assets held by vault
-  , liabilities :: Array (Liability d) -- All shares issued with dimensions
-  , totalShares :: ShareAmount   -- Total shares outstanding
-  }
-
--- | Generic vault state that can be extended by specific implementations
-type VaultState d a =
-  { balanceSheet :: BalanceSheet d
-  , strategyState :: a           -- Strategy-specific state
-  , lastUpdateBlock :: BlockNumber
-  }
-
--- | Core vault abstraction parameterized by dimension type
-type Vault d a =
-  { name :: String               -- Vault identifier
-  , state :: VaultState d a      -- Current vault state
-  -- Core vault functions
-  , deposit :: TokenType -> Number -> String -> d -> Effect ShareAmount
-  , withdraw :: ShareAmount -> String -> Effect Number
-  , allocate :: Effect Unit      -- Execute allocation strategy
-  , updateStrategy :: a -> Effect Unit -- Update strategy parameters
-  -- Customizable share price calculation
-  , sharePrice :: BalanceSheet d -> Number  -- Allows under/over-collateralization
-  }
-
---------------------------------------------------------------------------------
--- BALANCE SHEET OPERATIONS
---------------------------------------------------------------------------------
-
--- | Calculate total assets value
-totalAssets :: forall d. BalanceSheet d -> Number
-totalAssets bs = sum $ map _.amount bs.assets
-
--- | Calculate total liabilities (shares * price)
-totalLiabilities :: forall d. BalanceSheet d -> Number
-totalLiabilities bs = bs.totalShares
-
--- | Calculate net asset value (assets - liabilities)
-netAssetValue :: forall d. BalanceSheet d -> Number
-netAssetValue bs = totalAssets bs
-
--- | Default share price calculation (assets / shares)
--- | Specific vault implementations can override this in their sharePrice function
--- | to implement under-collateralization or over-collateralization strategies
-defaultSharePrice :: forall d. BalanceSheet d -> Number
-defaultSharePrice bs = 
-  if bs.totalShares > 0.0
-  then totalAssets bs / bs.totalShares
-  else 1.0  -- Initial share price
-
---------------------------------------------------------------------------------
--- VAULT OPERATIONS
---------------------------------------------------------------------------------
-
 -- | Result of deposit operation
-type DepositResult d a = 
-  { state :: VaultState d a
+type DepositResult a s = 
+  { state :: LedgerVaultState a s
   , shares :: ShareAmount 
+  , entry :: LedgerEntry a
   }
 
 -- | Result of withdraw operation
-type WithdrawResult d a = 
-  { state :: VaultState d a
-  , amount :: Number 
+type WithdrawResult a s = 
+  { state :: LedgerVaultState a s
+  , amount :: Number
+  , removedEntries :: Array (LedgerEntry a)
   }
 
--- | Represents a pending withdrawal request
-type WithdrawRequest =
-  { holder :: String             -- Address requesting withdrawal
-  , shares :: ShareAmount        -- Number of shares to burn
-  , requestBlock :: BlockNumber  -- When withdrawal was requested
-  , maturityBlock :: BlockNumber -- When withdrawal can be processed
+--------------------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------------------
+
+-- | Ledger-based vault state
+type LedgerVaultState a s =
+  { ledger :: Map String (Array (LedgerEntry a))  -- AccountId -> Entries
+  , totalBalance :: Number                         -- Cached total balance
+  , totalEntries :: Int                            -- Total number of entries
+  , lastUpdateBlock :: BlockNumber                 -- Last state update
+  , strategyState :: s                             -- Vault-specific strategy
   }
 
--- | Result of withdraw request operation
-type WithdrawRequestResult d a = 
-  { state :: VaultState d a
-  , request :: WithdrawRequest
+-- | Ledger-based vault type with operations
+type LedgerVault a s =
+  { name :: String                                         -- Vault identifier
+  , state :: Ref (LedgerVaultState a s)                   -- Current vault state
+  -- Core vault operations
+  , deposit :: String -> a -> BlockNumber -> Effect (DepositResult a s)
+  , withdraw :: String -> ShareAmount -> BlockNumber -> Effect (Maybe (WithdrawResult a s))
+  , getBalance :: String -> Effect ShareAmount
+  , getTotalBalance :: Effect ShareAmount
+  -- Strategy operations
+  , allocate :: Effect Unit
+  , updateStrategy :: s -> Effect Unit
+  -- Ledger operations instance
+  , ledgerOps :: LedgerOpsDict a s
   }
 
--- | Deposit assets into vault and receive shares
-deposit :: forall d a. (BalanceSheet d -> Number) -> VaultState d a -> TokenType -> Number -> String -> d -> DepositResult d a
-deposit sharePriceFn vaultState tokenType amount depositor dimensions =
+-- | Dictionary for ledger operations (to avoid orphan instances)
+type LedgerOpsDict a s =
+  { entryValue :: LedgerEntry a -> ShareAmount
+  , isActive :: BlockNumber -> LedgerEntry a -> Boolean
+  , aggregateEntries :: Array (LedgerEntry a) -> ShareAmount
+  , applyStrategy :: s -> Array (LedgerEntry a) -> Array (LedgerEntry a)
+  , selectForWithdrawal :: ShareAmount -> Array (LedgerEntry a) -> Maybe (Array { entry :: LedgerEntry a, index :: Int })
+  }
+
+-- | Type class for ledger entry operations
+class LedgerOps a where
+  -- | Extract balance contribution from entry
+  entryValue :: LedgerEntry a -> ShareAmount
+  
+  -- | Check if entry is still valid/active at given block
+  isActive :: BlockNumber -> LedgerEntry a -> Boolean
+  
+  -- | Aggregate multiple entries into total balance
+  aggregateEntries :: Array (LedgerEntry a) -> ShareAmount
+  
+  -- | Apply strategy transformations to entries
+  applyStrategy :: forall s. s -> Array (LedgerEntry a) -> Array (LedgerEntry a)
+  
+  -- | Select entries for withdrawal based on vault-specific strategy
+  -- | Returns entries and their indices in priority order
+  selectForWithdrawal :: ShareAmount -> Array (LedgerEntry a) -> Maybe (Array { entry :: LedgerEntry a, index :: Int })
+
+--------------------------------------------------------------------------------
+-- FUNCTIONS
+--------------------------------------------------------------------------------
+
+-- Query Functions
+
+-- | Get account balance from ledger
+getAccountBalance :: forall a s. LedgerOps a => LedgerVaultState a s -> String -> BlockNumber -> ShareAmount
+getAccountBalance state accountId currentBlock =
+  case Map.lookup accountId state.ledger of
+    Nothing -> 0.0
+    Just entries ->
+      let activeEntries = filter (isActive currentBlock) entries
+      in aggregateEntries activeEntries
+
+-- | Get all entries for an account
+getAccountEntries :: forall a s. LedgerVaultState a s -> String -> Array (LedgerEntry a)
+getAccountEntries state accountId =
+  fromMaybe [] (Map.lookup accountId state.ledger)
+
+-- | Get all active entries across all accounts
+getActiveEntries :: forall a s. LedgerOps a => LedgerVaultState a s -> BlockNumber -> Array (LedgerEntry a)
+getActiveEntries state currentBlock =
+  let allEntries = Array.concat $ Array.fromFoldable $ Map.values state.ledger
+  in filter (isActive currentBlock) allEntries
+
+-- | Get total balance across all accounts
+getTotalBalance :: forall a s. LedgerOps a => LedgerVaultState a s -> BlockNumber -> ShareAmount
+getTotalBalance state currentBlock =
+  let activeEntries = getActiveEntries state currentBlock
+  in aggregateEntries activeEntries
+
+-- | Get list of all accounts
+getAllAccounts :: forall a s. LedgerVaultState a s -> Array String
+getAllAccounts state = Array.fromFoldable $ Map.keys state.ledger
+
+-- Mutation Functions
+
+-- | Add entry to ledger
+addLedgerEntry :: forall a s. LedgerOps a => 
+  LedgerVaultState a s -> 
+  String -> 
+  a -> 
+  BlockNumber -> 
+  Number -> 
+  Tuple (LedgerVaultState a s) (LedgerEntry a)
+addLedgerEntry state accountId entryData blockNumber timestamp =
   let
-    -- Calculate shares to mint based on vault's share price function
-    currentSharePrice = sharePriceFn vaultState.balanceSheet
-    sharesToMint = amount / currentSharePrice
-    
-    -- Create new asset entry
-    newAsset = { tokenType, amount, venue: "unallocated" }
-    
-    -- Create new liability entry with dimensions
-    newLiability = { holder: depositor, shares: sharesToMint, depositBlock: vaultState.lastUpdateBlock, maturityBlock: Nothing, locked: false, dimensions: dimensions }
-    
-    -- Update balance sheet
-    updatedBalanceSheet = vaultState.balanceSheet
-      { assets = newAsset : vaultState.balanceSheet.assets
-      , liabilities = newLiability : vaultState.balanceSheet.liabilities
-      , totalShares = vaultState.balanceSheet.totalShares + sharesToMint
+    -- Create new entry
+    newEntry = LedgerEntry
+      { accountId: accountId
+      , timestamp: timestamp
+      , blockNumber: blockNumber
+      , data: entryData
       }
     
-    -- Return updated state and shares minted
-    updatedState = vaultState { balanceSheet = updatedBalanceSheet }
+    -- Get existing entries for account
+    existingEntries = fromMaybe [] (Map.lookup accountId state.ledger)
+    updatedEntries = newEntry : existingEntries
     
-  in { state: updatedState, shares: sharesToMint }
+    -- Update ledger
+    updatedLedger = Map.insert accountId updatedEntries state.ledger
+    
+    -- Recalculate total balance
+    entryVal = entryValue newEntry
+    newTotalBalance = state.totalBalance + entryVal
+    
+    -- Update state
+    updatedState = state
+      { ledger = updatedLedger
+      , totalBalance = newTotalBalance
+      , totalEntries = state.totalEntries + 1
+      , lastUpdateBlock = blockNumber
+      }
+    
+  in Tuple updatedState newEntry
 
--- | Withdraw assets from vault by burning shares
-withdraw :: forall d a. (BalanceSheet d -> Number) -> VaultState d a -> ShareAmount -> String -> Maybe (WithdrawResult d a)
-withdraw sharePriceFn vaultState sharesToBurn withdrawer =
-  let
-    -- Find user's liability
-    userLiability = find (\l -> l.holder == withdrawer) vaultState.balanceSheet.liabilities
-    
-  in case userLiability of
+-- | Update an existing ledger entry
+updateLedgerEntry :: forall a s. LedgerOps a =>
+  LedgerVaultState a s ->
+  String ->
+  Int ->  -- Entry index
+  (LedgerEntry a -> LedgerEntry a) ->
+  Maybe (LedgerVaultState a s)
+updateLedgerEntry state accountId index updateFn =
+  case Map.lookup accountId state.ledger of
     Nothing -> Nothing
-    Just liability ->
-      if liability.shares < sharesToBurn
-      then Nothing
-      else
-        let
-          -- Calculate amount to return based on vault's share price function
-          currentSharePrice = sharePriceFn vaultState.balanceSheet
-          amountToReturn = sharesToBurn * currentSharePrice
-          
-          -- Update liabilities
-          updatedLiabilities = map (\l -> 
-            if l.holder == withdrawer
-            then l { shares = l.shares - sharesToBurn }
-            else l
-          ) vaultState.balanceSheet.liabilities
-          
-          -- Remove assets proportionally
-          totalAssetValue = totalAssets vaultState.balanceSheet
-          removalRatio = amountToReturn / totalAssetValue
-          
-          updatedAssets = map (\a -> 
-            a { amount = a.amount * (1.0 - removalRatio) }
-          ) vaultState.balanceSheet.assets
-          
-          -- Update balance sheet
-          updatedBalanceSheet = vaultState.balanceSheet
-            { assets = updatedAssets
-            , liabilities = filter (\l -> l.shares > 0.0) updatedLiabilities
-            , totalShares = vaultState.balanceSheet.totalShares - sharesToBurn
-            }
-          
-          -- Return updated state and amount
-          updatedState = vaultState { balanceSheet = updatedBalanceSheet }
-          
-        in Just { state: updatedState, amount: amountToReturn }
+    Just entries ->
+      case updateAt index updateFn entries of
+        Nothing -> Nothing
+        Just updatedEntries ->
+          let
+            -- Recalculate total balance
+            oldTotal = aggregateEntries entries
+            newTotal = aggregateEntries updatedEntries
+            balanceDiff = newTotal - oldTotal
+            
+            updatedLedger = Map.insert accountId updatedEntries state.ledger
+            updatedState = state
+              { ledger = updatedLedger
+              , totalBalance = state.totalBalance + balanceDiff
+              }
+          in Just updatedState
 
--- | Execute vault's allocation strategy
--- | This is implemented by specific vault types
-allocate :: forall d a. VaultState d a -> (a -> Array Asset -> Array Asset) -> VaultState d a
-allocate vaultState strategyFn =
-  let
-    -- Apply strategy function to current assets
-    newAssets = strategyFn vaultState.strategyState vaultState.balanceSheet.assets
-    
-    -- Update balance sheet with new asset allocation
-    updatedBalanceSheet = vaultState.balanceSheet { assets = newAssets }
-    
-  in vaultState { balanceSheet = updatedBalanceSheet }
+-- | Remove entry from ledger
+removeLedgerEntry :: forall a s. LedgerOps a =>
+  LedgerVaultState a s ->
+  String ->
+  Int ->  -- Entry index
+  Maybe (Tuple (LedgerVaultState a s) (LedgerEntry a))
+removeLedgerEntry state accountId index =
+  case Map.lookup accountId state.ledger of
+    Nothing -> Nothing
+    Just entries ->
+      case Array.index entries index of
+        Nothing -> Nothing
+        Just removedEntry ->
+          case deleteAt index entries of
+            Nothing -> Nothing
+            Just remainingEntries ->
+              let
+                -- Update or remove account entry
+                updatedLedger = if Array.null remainingEntries
+                                then Map.delete accountId state.ledger
+                                else Map.insert accountId remainingEntries state.ledger
+                
+                -- Update total balance
+                removedValue = entryValue removedEntry
+                updatedState = state
+                  { ledger = updatedLedger
+                  , totalBalance = state.totalBalance - removedValue
+                  , totalEntries = state.totalEntries - 1
+                  }
+              in Just (Tuple updatedState removedEntry)
 
--- | Update vault's strategy parameters
-updateStrategy :: forall d a. VaultState d a -> a -> VaultState d a
-updateStrategy vaultState newStrategy = 
-  vaultState { strategyState = newStrategy }
+-- Vault Creation Functions
 
---------------------------------------------------------------------------------
--- STATE QUERIES
---------------------------------------------------------------------------------
+-- | Create empty ledger state
+createEmptyLedgerState :: forall a s. s -> BlockNumber -> LedgerVaultState a s
+createEmptyLedgerState strategyState currentBlock =
+  { ledger: Map.empty
+  , totalBalance: 0.0
+  , totalEntries: 0
+  , lastUpdateBlock: currentBlock
+  , strategyState: strategyState
+  }
 
--- | Request withdrawal with optional lock period
-requestWithdraw :: forall d a. VaultState d a -> ShareAmount -> String -> BlockNumber -> Maybe BlockNumber -> WithdrawRequestResult d a
-requestWithdraw vaultState sharesToBurn withdrawer currentBlock maturityBlock =
-  let
-    -- Find user's liability
-    userLiability = find (\l -> l.holder == withdrawer) vaultState.balanceSheet.liabilities
-    
-    -- Determine maturity block
-    maturity = case maturityBlock of
-      Just mb -> mb
-      Nothing -> currentBlock  -- Immediate withdrawal if no maturity specified
-    
-    -- Create withdrawal request
-    request = 
-      { holder: withdrawer
-      , shares: sharesToBurn
-      , requestBlock: currentBlock
-      , maturityBlock: maturity
+-- | Create a ledger-based vault
+createLedgerVault :: forall a s. LedgerOps a =>
+  String ->
+  LedgerVaultState a s ->
+  Ref (LedgerVaultState a s) ->
+  LedgerVault a s
+createLedgerVault name initialState stateRef =
+  { name: name
+  , state: stateRef
+  
+  -- Deposit implementation
+  , deposit: \accountId entryData currentBlock -> do
+      timestamp <- currentTime
+      modify_ (\s -> 
+        let (Tuple newState entry) = addLedgerEntry s accountId entryData currentBlock timestamp
+        in newState
+      ) stateRef
+      
+      currentState <- read stateRef
+      let entry = LedgerEntry { accountId, timestamp, blockNumber: currentBlock, data: entryData }
+          shares = entryValue entry
+      pure { state: currentState, shares: shares, entry: entry }
+  
+  -- Withdraw implementation
+  , withdraw: \accountId requestedAmount currentBlock -> do
+      currentState <- read stateRef
+      let balance = getAccountBalance currentState accountId currentBlock
+      
+      if balance < requestedAmount
+        then pure Nothing
+        else do
+          -- Get entries and use vault-specific selection strategy
+          let entries = getAccountEntries currentState accountId
+              activeEntries = filter (isActive currentBlock) entries
+              
+              -- Use the selectForWithdrawal strategy from LedgerOps
+              selectedEntries = selectForWithdrawal requestedAmount activeEntries
+          
+          case selectedEntries of
+            Nothing -> pure Nothing
+            Just entriesToRemove -> do
+              -- Remove entries in reverse order to maintain indices
+              let sortedEntries = Array.reverse $ Array.sortBy (\a b -> compare a.index b.index) entriesToRemove
+              
+              removedEntries <- foldl (\acc entryInfo -> do
+                accVal <- acc
+                currentState' <- read stateRef
+                case removeLedgerEntry currentState' accountId entryInfo.index of
+                  Nothing -> pure accVal
+                  Just (Tuple newState removed) -> do
+                    _ <- write newState stateRef
+                    pure (removed : accVal)
+              ) (pure []) sortedEntries
+              
+              finalState <- read stateRef
+              pure $ Just { state: finalState, amount: requestedAmount, removedEntries: removedEntries }
+  
+  -- Get balance implementation
+  , getBalance: \accountId -> do
+      currentState <- read stateRef
+      let currentBlock = currentState.lastUpdateBlock
+      pure $ getAccountBalance currentState accountId currentBlock
+  
+  -- Get total balance implementation
+  , getTotalBalance: do
+      currentState <- read stateRef
+      pure currentState.totalBalance
+  
+  -- Allocate implementation (applies strategy to entries)
+  , allocate: do
+      modify_ (\s ->
+        let allEntries = Array.concat $ Array.fromFoldable $ Map.values s.ledger
+            transformedEntries = applyStrategy s.strategyState allEntries
+            -- Rebuild ledger from transformed entries
+            newLedger = foldl (\acc (LedgerEntry e) ->
+              let existing = fromMaybe [] (Map.lookup e.accountId acc)
+              in Map.insert e.accountId (LedgerEntry e : existing) acc
+            ) Map.empty transformedEntries
+        in s { ledger = newLedger }
+      ) stateRef
+  
+  -- Update strategy implementation
+  , updateStrategy: \newStrategy -> do
+      modify_ (\s -> s { strategyState = newStrategy }) stateRef
+  
+  -- Ledger operations dictionary
+  , ledgerOps:
+      { entryValue: entryValue
+      , isActive: isActive
+      , aggregateEntries: aggregateEntries
+      , applyStrategy: applyStrategy
+      , selectForWithdrawal: selectForWithdrawal
       }
-    
-    -- Update liability to mark shares as locked if future maturity
-    updatedLiabilities = map (\l -> 
-      if l.holder == withdrawer && maturity > currentBlock
-      then l { locked = true, maturityBlock = Just maturity }
-      else l
-    ) vaultState.balanceSheet.liabilities
-    
-    updatedBalanceSheet = vaultState.balanceSheet { liabilities = updatedLiabilities }
-    updatedState = vaultState { balanceSheet = updatedBalanceSheet }
-    
-  in { state: updatedState, request: request }
-
--- | Process a withdrawal request after maturity
-processWithdrawRequest :: forall d a. (BalanceSheet d -> Number) -> VaultState d a -> WithdrawRequest -> BlockNumber -> Maybe (WithdrawResult d a)
-processWithdrawRequest sharePriceFn vaultState request currentBlock =
-  if request.maturityBlock > currentBlock
-  then Nothing  -- Not yet mature
-  else withdraw sharePriceFn vaultState request.shares request.holder
-
--- | Get current vault state
-getVaultState :: forall d a. Vault d a -> VaultState d a
-getVaultState vault = vault.state
-
--- | Update vault state
-updateVaultState :: forall d a. Vault d a -> VaultState d a -> Vault d a
-updateVaultState vault newState = vault { state = newState }
-
---------------------------------------------------------------------------------
--- VAULT DIMENSIONS
---------------------------------------------------------------------------------
-
--- | Type class for vault dimensions
-class VaultDimension d where
-  getDimensionInfo :: d -> String
-
--- | 1D vault dimension - just price
-data Dimension1D = Dimension1D 
-  { price :: Number              -- Price level for liquidity
   }
-
-instance vaultDimension1D :: VaultDimension Dimension1D where
-  getDimensionInfo (Dimension1D d) = "Price: " <> show d.price
-
--- | 3D vault dimension - price, duration, leverage
-data Dimension3D = Dimension3D
-  { price :: Number              -- Price level for liquidity
-  , duration :: Duration         -- Time commitment (Flash, Monthly, Spot)
-  , leverage :: Leverage         -- Risk tier (Senior 1x, Junior 3x)
-  }
-
-instance vaultDimension3D :: VaultDimension Dimension3D where
-  getDimensionInfo (Dimension3D d) = 
-    "Price: " <> show d.price <> 
-    ", Duration: " <> show d.duration <> 
-    ", Leverage: " <> show d.leverage

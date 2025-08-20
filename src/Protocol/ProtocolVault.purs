@@ -1,118 +1,139 @@
--- | Protocol Vault Implementation - Protocol-level strategy and metrics
+-- | Protocol Vault - Protocol-level capital management using ledger-based vault abstraction
 -- |
--- | This module manages the top-level protocol strategy that:
--- | - Collects protocol-wide metrics across all pools
--- | - Makes allocation decisions for POL distribution
--- | - Manages pool vaults and their parameters
--- | - Implements the protocol's capital allocation strategy
+-- | This module implements the protocol's capital management system as a ledger-based vault where:
+-- | - Ledger entries track POL allocations to different pools
+-- | - Each entry represents capital allocated to a specific pool with performance tracking
+-- | - Strategy state manages allocation decisions and rebalancing
+-- |
+-- | Key Features:
+-- | - Multi-pool capital allocation with performance tracking
+-- | - Automatic rebalancing based on configurable strategies
+-- | - Complete audit trail of all POL movements
+-- | - Fee collection and distribution management
 module Protocol.ProtocolVault
-  ( -- Core types
-    ProtocolVault
-  , ProtocolStrategy
-  , ProtocolMetrics
+  ( -- Balance Sheet types
+    ProtocolEntry
   , AllocationDecision
+  , ProtocolMetrics
+  , PerformanceSnapshot
+  -- State types
+  , ProtocolStrategy
   , AllocationStrategy(..)
-  -- Metric types (from old Metric.purs)
-  , FeelsSOLHealthMetrics
-  , POLMetrics
-  -- Vault creation
+  -- Vault creation functions
   , createProtocolVault
-  -- Balance sheet operations
-  , getTotalProtocolPOL
-  , getPoolAllocations
-  , getProtocolPerformance
-  -- State management
-  , registerPoolVault
-  , unregisterPoolVault
-  , getPoolVault
-  , updatePoolParameters
-  , updateProtocolMetrics
-  , calculateProtocolHealth
-  , getProtocolMetrics
-  , updateStrategyParameters
-  -- Functions
-  , allocateToPools
-  , rebalancePOL
+  , initializeProtocolVault
+  -- POL management functions
+  , allocatePOL
+  , withdrawPOL
+  , rebalancePools
+  -- Fee management functions
   , collectProtocolFees
-  , executeAllocationStrategy
-  -- Metric functions (from old Metric.purs)
-  , getPOLMetrics
-  , calculateGrowthRate24h
-  , getFeelsSOLHealthMetrics
-  , getProtocolTotalFeesCollected
-  -- Vol Harvester metrics
-  , calculateEstimatedLVRPayment
-  , calculateVolatilityYield
-  , processMonthlyPositionCompensation
+  , distributeFees
+  -- Query functions
+  , getProtocolMetrics
+  , getPoolAllocation
+  , calculateHealthScore
+  -- Strategy management functions
+  , updateAllocationStrategy
+  , setRebalanceParameters
   ) where
 
 import Prelude
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write, modify_)
+import Effect.Ref (Ref, new, read)
 import Effect.Console (log)
+import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Either (Either(..))
+import Data.Array (filter, sortBy, find, take, mapWithIndex)
+import Data.Array as Array
+import Data.Foldable (sum, traverse_, foldM)
+import Data.Ord (compare)
+import Data.Number (abs)
+import Data.Int (toNumber)
 import Data.Map (Map)
 import Data.Map as Map
-import Data.Maybe (Maybe(..))
-import Data.Array ((:), fromFoldable, filter, sortBy, take, find)
-import Data.Tuple (Tuple(..), fst, snd)
-import Data.Foldable (sum, traverse_, foldM)
-import Data.Ord (compare, min, max)
-import Data.Int (toNumber)
-import Unsafe.Coerce (unsafeCoerce)
-import Control.Monad (when)
-
-import Protocol.Vault (Vault, VaultState, BalanceSheet, Asset, deposit, withdraw, allocate, updateStrategy, totalAssets, defaultSharePrice)
-import Protocol.Token (TokenType(..))
+import Data.Tuple (Tuple(..))
+import Protocol.Vault 
+  ( LedgerEntry(..), LedgerVaultState, LedgerVault, ShareAmount
+  , class LedgerOps, createEmptyLedgerState, createLedgerVault
+  , getAccountEntries, getAllAccounts, getActiveEntries
+  , entryValue, isActive, aggregateEntries, applyStrategy
+  )
 import Protocol.Common (BlockNumber)
-import Protocol.PoolVault (PoolVault, getPoolMetrics, updatePoolMetrics)
-import Protocol.PositionVault (Position, isVolHarvesterPosition)
-import Protocol.Pool (PoolState)
-import Protocol.FeelsSOLVault (FeelsSOLState)
-import Protocol.Vault as Vault
-import FFI (currentTime, sqrt, pow)
+import Protocol.Token (TokenType(..))
+import Protocol.Error (ProtocolError(..))
+import Protocol.Config (defaultProtocolConfig)
+import FFI (currentTime)
 
 --------------------------------------------------------------------------------
--- SECTION 1: BALANCE SHEET
+-- BALANCE SHEET
 --------------------------------------------------------------------------------
 
--- | FeelsSOL health metrics
-type FeelsSOLHealthMetrics =
-  { collateralRatio :: Number
-  , totalLocked :: Number
-  , totalMinted :: Number
-  , bufferRatio :: Number
-  , isHealthy :: Boolean
+-- | Protocol-specific ledger entry for POL allocations
+type ProtocolEntry =
+  { poolId :: String                -- Pool receiving allocation
+  , polAmount :: ShareAmount         -- Amount of POL allocated
+  , allocationBlock :: BlockNumber   -- When allocation was made
+  , performance :: Number            -- Pool performance metric (0-1)
+  , feesCollected :: Number          -- Fees collected from this allocation
+  , isActive :: Boolean              -- Whether allocation is currently active
   }
 
--- | POL metrics (simplified, now part of ProtocolMetrics)
-type POLMetrics = ProtocolMetrics
-
--- | Protocol-wide metrics (from Metric.purs)
-type ProtocolMetrics =
-  { totalValueLocked :: Number         -- Total TVL across protocol
-  , totalPOL :: Number                 -- Total POL value
-  , polUtilization :: Number           -- Overall POL utilization
-  , totalFeesCollected :: Number       -- Lifetime fees collected
-  , avgPoolPerformance :: Number       -- Average pool performance
-  , poolCount :: Int                   -- Number of active pools
-  , growthRate24h :: Number            -- 24h POL growth rate
-  , healthScore :: Number              -- Overall protocol health (0-1)
-  -- FeelsSOL metrics
-  , feelsSOLCollateralRatio :: Number
-  , feelsSOLMinted :: Number
-  , jitoSOLLocked :: Number
-  -- Risk metrics
-  , systemRisk :: Number               -- Aggregate risk score
-  , concentrationRisk :: Number        -- POL concentration risk
-  }
-
--- | Allocation decision for a pool
+-- | Allocation decision for rebalancing
 type AllocationDecision =
   { poolId :: String
   , currentAllocation :: Number
   , targetAllocation :: Number
-  , allocationDelta :: Number          -- Change needed
-  , priority :: Number                 -- Urgency of reallocation
+  , allocationDelta :: Number      -- Change needed
+  , priority :: Number             -- Urgency of reallocation
+  }
+
+-- | Protocol-wide metrics
+type ProtocolMetrics =
+  { totalPOL :: Number                 -- Total POL under management
+  , deployedPOL :: Number              -- POL allocated to pools
+  , utilization :: Number              -- Deployment ratio
+  , totalFeesCollected :: Number       -- Lifetime fees
+  , avgPoolPerformance :: Number       -- Average performance across pools
+  , poolCount :: Int                   -- Number of active pools
+  , healthScore :: Number              -- Overall health (0-1)
+  , concentrationRisk :: Number        -- Herfindahl index
+  }
+
+-- | Performance snapshot for tracking
+type PerformanceSnapshot =
+  { timestamp :: Number
+  , totalPOL :: Number
+  , utilization :: Number
+  , feesCollected :: Number
+  }
+
+--------------------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------------------
+
+-- | Protocol strategy state
+type ProtocolStrategy =
+  { allocationStrategy :: AllocationStrategy
+  -- Allocation parameters
+  , maxPoolAllocation :: Number        -- Max % per pool
+  , minPoolAllocation :: Number        -- Min % per pool
+  , rebalanceThreshold :: Number       -- Min delta to trigger
+  , rebalanceFrequency :: Int          -- Blocks between rebalances
+  , lastRebalanceBlock :: BlockNumber
+  -- Fee parameters
+  , protocolFeeShare :: Number         -- % of fees to protocol
+  , feeDistribution ::                 -- How to distribute fees
+    { stakers :: Number
+    , pol :: Number
+    , treasury :: Number
+    }
+  -- Risk parameters
+  , maxConcentrationRisk :: Number     -- Max acceptable concentration
+  , minHealthScore :: Number           -- Min acceptable health
+  -- Performance tracking
+  , performanceHistory :: Array PerformanceSnapshot
+  , totalProtocolFees :: Number        -- Total fees collected
   }
 
 -- | Allocation strategy types
@@ -124,829 +145,490 @@ data AllocationStrategy
 
 derive instance eqAllocationStrategy :: Eq AllocationStrategy
 
--- | Get total protocol POL
-getTotalProtocolPOL :: Ref ProtocolVault -> Effect Number
-getTotalProtocolPOL protocolRef = do
-  vault <- read protocolRef
-  pure $ totalAssets vault.state.balanceSheet
+instance showAllocationStrategy :: Show AllocationStrategy where
+  show PerformanceBased = "Performance"
+  show VolumeBased = "Volume"
+  show RiskAdjusted = "Risk-Adjusted"
+  show Balanced = "Balanced"
 
--- | Get all pool allocations
-getPoolAllocations :: Ref ProtocolVault -> Effect (Array PoolAllocation)
-getPoolAllocations protocolRef = collectPoolAllocations protocolRef
-
--- | Get protocol performance metrics
-getProtocolPerformance :: Ref ProtocolVault -> Effect 
-  { totalPOL :: Number
-  , utilization :: Number
-  , growthRate24h :: Number
-  , avgPoolPerformance :: Number
-  }
-getProtocolPerformance protocolRef = do
-  metrics <- getProtocolMetrics protocolRef
-  pure
-    { totalPOL: metrics.totalPOL
-    , utilization: metrics.polUtilization
-    , growthRate24h: metrics.growthRate24h
-    , avgPoolPerformance: metrics.avgPoolPerformance
-    }
-
---------------------------------------------------------------------------------
--- SECTION 2: STATE
---------------------------------------------------------------------------------
-
--- | Performance history snapshot
-type PerformanceSnapshot =
-  { timestamp :: Number
-  , totalPOL :: Number
-  , utilization :: Number
-  , feesCollected :: Number
-  }
-
--- | Pool data for metrics collection
-type PoolData =
-  { pol :: Number
-  , deployed :: Number
-  , fees :: Number
-  , performance :: Number
-  }
-
--- | Pool allocation information
-type PoolAllocation =
-  { poolId :: String
-  , allocation :: Number
-  , performance :: Number
-  }
-
--- | Allocation target for rebalancing
-type AllocationTarget =
-  { poolId :: String
-  , target :: Number
-  }
-
--- | Protocol-level strategy
-type ProtocolStrategy =
-  { allocationStrategy :: AllocationStrategy
-  , poolVaults :: Map String (Ref PoolVault)  -- Pool ID -> Vault ref
-  -- Allocation parameters
-  , maxPoolAllocation :: Number        -- Max % per pool (e.g., 0.3)
-  , minPoolAllocation :: Number        -- Min % per pool (e.g., 0.05)
-  , rebalanceThreshold :: Number       -- Min delta to trigger rebalance
-  , rebalanceFrequency :: Int          -- Blocks between rebalances
-  , lastRebalanceBlock :: BlockNumber
-  -- Risk parameters
-  , maxSystemRisk :: Number            -- Max acceptable system risk
-  , riskBuffer :: Number               -- Safety margin for allocations
-  -- Fee parameters
-  , protocolFeeShare :: Number         -- % of fees kept by protocol
-  , feeDistributionRatio ::            -- How fees are distributed
-    { stakers :: Number                -- To FeelsSOL stakers
-    , pol :: Number                    -- To POL growth
-    , treasury :: Number               -- To treasury
-    }
-  -- Performance tracking
-  , performanceHistory :: Array PerformanceSnapshot  -- Historical snapshots
-  }
-
--- | Protocol vault type
-type ProtocolVault = Vault ProtocolStrategy
-
--- | Register a new pool vault
-registerPoolVault :: Ref ProtocolVault -> String -> Ref PoolVault -> Effect Unit
-registerPoolVault protocolRef poolId poolVaultRef = do
-  modify_ (\vault ->
-    let strategy = vault.state.strategyState
-        newPoolVaults = Map.insert poolId poolVaultRef strategy.poolVaults
-        updatedStrategy = strategy { poolVaults = newPoolVaults }
-        updatedState = vault.state { strategyState = updatedStrategy }
-    in vault { state = updatedState }
-  ) protocolRef
+-- | Ledger operations instance for protocol entries
+instance ledgerOpsProtocol :: LedgerOps ProtocolEntry where
+  -- Extract POL value from entry
+  entryValue (LedgerEntry e) = e.data.polAmount
   
-  log $ "Registered pool vault for " <> poolId
-
--- | Unregister a pool vault
-unregisterPoolVault :: Ref ProtocolVault -> String -> Effect Unit
-unregisterPoolVault protocolRef poolId = do
-  modify_ (\vault ->
-    let strategy = vault.state.strategyState
-        newPoolVaults = Map.delete poolId strategy.poolVaults
-        updatedStrategy = strategy { poolVaults = newPoolVaults }
-        updatedState = vault.state { strategyState = updatedStrategy }
-    in vault { state = updatedState }
-  ) protocolRef
+  -- Check if allocation is still active
+  isActive _ (LedgerEntry e) = e.data.isActive
   
-  log $ "Unregistered pool vault for " <> poolId
-
--- | Get a pool vault reference
-getPoolVault :: Ref ProtocolVault -> String -> Effect (Maybe (Ref PoolVault))
-getPoolVault protocolRef poolId = do
-  vault <- read protocolRef
-  pure $ Map.lookup poolId vault.state.strategyState.poolVaults
-
--- | Update pool-specific parameters
-updatePoolParameters :: 
-  Ref ProtocolVault -> 
-  String -> 
-  { maxDeploymentRatio :: Number
-  , minLiquidityBuffer :: Number
-  } -> 
-  Effect Unit
-updatePoolParameters protocolRef poolId params = do
-  vault <- read protocolRef
-  case Map.lookup poolId vault.state.strategyState.poolVaults of
-    Nothing -> log $ "Pool not found: " <> poolId
-    Just poolRef -> do
-      poolVault <- read poolRef
-      let poolStrategy = poolVault.state.strategyState
-          updatedStrategy = poolStrategy
-            { maxDeploymentRatio = params.maxDeploymentRatio
-            , minLiquidityBuffer = params.minLiquidityBuffer
-            }
-          updatedState = poolVault.state { strategyState = updatedStrategy }
-      modify_ (\v -> v { state = updatedState }) poolRef
-
--- | Update protocol-wide metrics
-updateProtocolMetrics :: Ref ProtocolVault -> Effect Unit
-updateProtocolMetrics protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
+  -- Sum all POL amounts
+  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> e.data.polAmount) entries
   
-  -- Collect metrics from all pools
-  poolMetricsList <- traverse getPoolMetricsData (Map.toUnfoldable strategy.poolVaults)
+  -- Apply rebalancing strategy
+  applyStrategy strategy entries = 
+    -- For now, no transformation
+    -- Future: could mark underperforming allocations for withdrawal
+    entries
   
-  -- Calculate aggregate metrics
-  let totalPOL = totalAssets vault.state.balanceSheet
-      poolPOL = sum $ map (\m -> m.totalPOL) poolMetricsList
-      totalDeployed = sum $ map (\m -> m.deployedAmount) poolMetricsList
-      utilization = if totalPOL > 0.0 then totalDeployed / totalPOL else 0.0
-      avgPerformance = if length poolMetricsList > 0
-                      then sum (map (\m -> m.performance) poolMetricsList) / toNumber (length poolMetricsList)
-                      else 0.0
-  
-  -- Update performance history
-  now <- currentTime
-  let newSnapshot = 
-        { timestamp: now
-        , totalPOL: totalPOL
-        , utilization: utilization
-        , feesCollected: sum $ map (\m -> m.totalFeesCollected) poolMetricsList
-        }
+  -- Select entries for withdrawal - prioritize underperforming allocations
+  selectForWithdrawal requestedAmount entries =
+    let
+      -- Sort entries by performance (lowest first) with indices
+      indexedEntries = Array.mapWithIndex (\idx entry -> { entry: entry, index: idx }) entries
+      sortedByPerformance = Array.sortBy (\a b -> 
+        case a.entry, b.entry of
+          LedgerEntry ae, LedgerEntry be -> compare ae.data.performance be.data.performance
+      ) indexedEntries
       
-      updatedHistory = take 100 (newSnapshot : strategy.performanceHistory)  -- Keep last 100
-      updatedStrategy = strategy { performanceHistory = updatedHistory }
-      updatedState = vault.state { strategyState = updatedStrategy }
-  
-  modify_ (\v -> v { state = updatedState }) protocolRef
-  
-  where
-    getPoolMetricsData :: Tuple String (Ref PoolVault) -> Effect _
-    getPoolMetricsData (Tuple _ poolRef) = getPoolMetrics poolRef
-
--- | Calculate protocol health score
-calculateProtocolHealth :: Ref ProtocolVault -> Effect Number
-calculateProtocolHealth protocolRef = do
-  vault <- read protocolRef
-  metrics <- getProtocolMetrics protocolRef
-  
-  let -- Health factors
-      utilizationHealth = if metrics.polUtilization < 0.2
-                         then 0.5  -- Too low
-                         else if metrics.polUtilization > 0.9
-                         then 0.7  -- Too high
-                         else 1.0  -- Optimal range
-      
-      concentrationHealth = 1.0 - metrics.concentrationRisk
-      
-      growthHealth = if metrics.growthRate24h < 0.0
-                    then 0.5
-                    else min 1.0 (metrics.growthRate24h / 10.0)  -- 10% daily growth is max score
-      
-      performanceHealth = metrics.avgPoolPerformance
-      
-      -- Weighted health score
-      healthScore = (utilizationHealth * 0.3 + 
-                    concentrationHealth * 0.3 + 
-                    growthHealth * 0.2 + 
-                    performanceHealth * 0.2)
-  
-  pure healthScore
-
--- | Get comprehensive protocol metrics
-getProtocolMetrics :: Ref ProtocolVault -> Effect ProtocolMetrics
-getProtocolMetrics protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
-      totalPOL = totalAssets vault.state.balanceSheet
-  
-  -- Collect pool data
-  poolDataList <- traverse getPoolData (Map.toUnfoldable strategy.poolVaults)
-  
-  let totalDeployed = sum $ map (\d -> d.deployed) poolDataList
-      totalFees = sum $ map (\d -> d.fees) poolDataList
-      avgPerformance = if length poolDataList > 0
-                      then sum (map (\d -> d.performance) poolDataList) / toNumber (length poolDataList)
-                      else 0.0
-      
-      -- Calculate concentration risk (Herfindahl index)
-      poolShares = map (\d -> if totalPOL > 0.0 then d.pol / totalPOL else 0.0) poolDataList
-      concentrationRisk = sum $ map (\s -> s * s) poolShares
-      
-      -- Calculate 24h growth from history
-      growthRate = calculateGrowthRate24h' strategy.performanceHistory
-  
-  pure
-    { totalValueLocked: totalPOL  -- Simplified - would include all protocol TVL
-    , totalPOL: totalPOL
-    , polUtilization: if totalPOL > 0.0 then totalDeployed / totalPOL else 0.0
-    , totalFeesCollected: totalFees
-    , avgPoolPerformance: avgPerformance
-    , poolCount: Map.size strategy.poolVaults
-    , growthRate24h: growthRate
-    , healthScore: 0.0  -- Will be calculated separately
-    , feelsSOLCollateralRatio: 1.0  -- Would come from FeelsSOL vault
-    , feelsSOLMinted: 0.0  -- Would come from FeelsSOL vault
-    , jitoSOLLocked: 0.0  -- Would come from FeelsSOL vault
-    , systemRisk: min 1.0 (concentrationRisk * 2.0)  -- Simplified risk calc
-    , concentrationRisk: concentrationRisk
-    }
-  
-  where
-    getPoolData :: Tuple String (Ref PoolVault) -> Effect PoolData
-    getPoolData (Tuple _ poolRef) = do
-      metrics <- getPoolMetrics poolRef
-      pure { pol: metrics.totalPOL, deployed: metrics.deployedAmount, fees: metrics.totalFeesCollected, performance: metrics.performance }
+      -- Select entries starting from worst performers
+      selectFromEntries :: Array { entry :: LedgerEntry ProtocolEntry, index :: Int } -> 
+                          ShareAmount -> 
+                          Array { entry :: LedgerEntry ProtocolEntry, index :: Int } -> 
+                          Maybe (Array { entry :: LedgerEntry ProtocolEntry, index :: Int })
+      selectFromEntries [] remaining selected =
+        if remaining > 0.0 then Nothing else Just selected
+      selectFromEntries (e : es) remaining selected =
+        let value = entryValue e.entry
+            newRemaining = remaining - value
+        in if newRemaining <= 0.0
+           then Just (e : selected)
+           else selectFromEntries es newRemaining (e : selected)
     
-    calculateGrowthRate24h' :: Array PerformanceSnapshot -> Number
-    calculateGrowthRate24h' [] = 0.0
-    calculateGrowthRate24h' (current : rest) =
-      let dayAgo = current.timestamp - 86400000.0
-          oldSnapshot = find (\s -> s.timestamp <= dayAgo) rest
-      in case oldSnapshot of
-        Nothing -> 0.0
-        Just old -> if old.totalPOL > 0.0
-                   then ((current.totalPOL - old.totalPOL) / old.totalPOL) * 100.0
-                   else 0.0
+    in selectFromEntries sortedByPerformance requestedAmount []
 
 --------------------------------------------------------------------------------
--- SECTION 3: FUNCTIONS
+-- FUNCTIONS
 --------------------------------------------------------------------------------
 
--- | Create the protocol vault
-createProtocolVault :: String -> Effect (Ref ProtocolVault)
-createProtocolVault name = do
-  now <- currentTime
+-- Vault Creation Functions
+
+-- | Initialize a new protocol vault
+initializeProtocolVault :: BlockNumber -> Effect (Either ProtocolError (Ref (LedgerVault ProtocolEntry ProtocolStrategy)))
+initializeProtocolVault currentBlock = do
+  currentTime' <- currentTime
   
-  -- Initialize strategy
   let initialStrategy =
         { allocationStrategy: PerformanceBased
-        , poolVaults: Map.empty
-        , maxPoolAllocation: 0.3           -- 30% max per pool
-        , minPoolAllocation: 0.05          -- 5% min per pool
-        , rebalanceThreshold: 0.02         -- 2% delta triggers rebalance
-        , rebalanceFrequency: 100          -- Every 100 blocks
-        , lastRebalanceBlock: 0
-        , maxSystemRisk: 0.7               -- 70% max risk
-        , riskBuffer: 0.1                  -- 10% safety margin
-        , protocolFeeShare: 0.15           -- 15% of fees to protocol
-        , feeDistributionRatio:
-          { stakers: 0.4                   -- 40% to stakers
-          , pol: 0.4                       -- 40% to POL
-          , treasury: 0.2                  -- 20% to treasury
+        , maxPoolAllocation: defaultProtocolConfig.protocol.maxPoolAllocation
+        , minPoolAllocation: defaultProtocolConfig.protocol.minPoolAllocation
+        , rebalanceThreshold: defaultProtocolConfig.protocol.rebalanceThreshold
+        , rebalanceFrequency: defaultProtocolConfig.protocol.rebalanceFrequency
+        , lastRebalanceBlock: currentBlock
+        , protocolFeeShare: defaultProtocolConfig.protocol.protocolFeeShare
+        , feeDistribution:
+          { stakers: defaultProtocolConfig.protocol.feeToStakers
+          , pol: defaultProtocolConfig.protocol.feeToPOL
+          , treasury: defaultProtocolConfig.protocol.feeToTreasury
           }
-        , performanceHistory: [{ timestamp: now, totalPOL: 10000.0, utilization: 0.0, feesCollected: 0.0 }]
-        }
-  
-  -- Initial balance sheet with protocol reserves
-  let initialBalanceSheet =
-        { assets: [{ tokenType: FeelsSOL, amount: 10000.0, venue: "Protocol-Reserve" }]
-        , liabilities: []
-        , totalShares: 0.0
+        , maxConcentrationRisk: defaultProtocolConfig.risk.maxConcentrationRisk
+        , minHealthScore: defaultProtocolConfig.risk.minHealthScore
+        , performanceHistory: [{ timestamp: currentTime', totalPOL: 0.0, utilization: 0.0, feesCollected: 0.0 }]
+        , totalProtocolFees: 0.0
         }
       
-      initialState =
-        { balanceSheet: initialBalanceSheet
-        , strategyState: initialStrategy
-        , lastUpdateBlock: 0
-        }
+      initialState = createEmptyLedgerState initialStrategy currentBlock
   
-  -- Create vault ref
-  vaultRef <- new (unsafeCoerce unit :: ProtocolVault)
-  
-  -- Create vault implementation
-  let vault =
-        { name: name
-        , state: initialState
-        
-        -- Protocol vault accepts FeelsSOL deposits
-        , deposit: \tokenType amount depositor -> do
-            case tokenType of
-              FeelsSOL -> do
-                currentVault <- read vaultRef
-                let result = deposit defaultSharePrice currentVault.state tokenType amount depositor
-                modify_ (\v -> v { state = result.state }) vaultRef
-                pure result.shares
-              _ -> pure 0.0
-        
-        -- Withdraw from protocol reserves
-        , withdraw: \shares withdrawer -> do
-            currentVault <- read vaultRef
-            case withdraw defaultSharePrice currentVault.state shares withdrawer of
-              Nothing -> pure 0.0
-              Just result -> do
-                modify_ (\v -> v { state = result.state }) vaultRef
-                pure result.amount
-        
-        -- Allocation strategy execution
-        , allocate: do
-            currentVault <- read vaultRef
-            let currentBlock = currentVault.state.lastUpdateBlock
-                strategy = currentVault.state.strategyState
-            
-            -- Check if rebalance is due
-            when (currentBlock - strategy.lastRebalanceBlock >= strategy.rebalanceFrequency) do
-              log "Protocol vault executing allocation strategy..."
-              executeAllocationStrategyInternal vaultRef
-        
-        -- Update strategy parameters
-        , updateStrategy: \newStrategy -> do
-            modify_ (\v -> v { state = updateStrategy v.state newStrategy }) vaultRef
-        
-        -- Standard share pricing
-        , sharePrice: defaultSharePrice
-        }
-  
-  -- Write vault to ref
-  _ <- write vault vaultRef
-  pure vaultRef
+  vault <- createProtocolVault "Protocol" initialState
+  pure $ Right vault
 
--- | Allocate POL to pools based on strategy
-allocateToPools :: Ref ProtocolVault -> Array AllocationDecision -> Effect Unit
-allocateToPools protocolRef decisions = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
+-- | Create protocol vault with ledger operations
+createProtocolVault :: String -> LedgerVaultState ProtocolEntry ProtocolStrategy -> Effect (Ref (LedgerVault ProtocolEntry ProtocolStrategy))
+createProtocolVault name initialState = do
+  stateRef <- new initialState
+  let vault = createLedgerVault name initialState stateRef
+  new vault
+
+-- POL Management Functions
+
+-- | Allocate POL to a pool
+allocatePOL ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  String ->           -- Pool ID
+  Number ->           -- POL amount
+  BlockNumber ->      -- Current block
+  Effect (Either ProtocolError ShareAmount)
+allocatePOL vaultRef poolId polAmount currentBlock = do
+  vault <- read vaultRef
+  state <- read vault.state
   
-  -- Process each allocation decision
-  traverse_ (processAllocation protocolRef) decisions
+  -- Check allocation limits
+  let currentAllocation = getPoolAllocation' state poolId
+      totalPOL = state.totalBalance
+      newAllocationRatio = if totalPOL > 0.0 
+                          then (currentAllocation + polAmount) / totalPOL
+                          else 0.0
   
-  -- Update last rebalance block
-  let updatedStrategy = strategy { lastRebalanceBlock = vault.state.lastUpdateBlock }
-      updatedState = vault.state { strategyState = updatedStrategy }
-  modify_ (\v -> v { state = updatedState }) protocolRef
-  
-  where
-    processAllocation :: Ref ProtocolVault -> AllocationDecision -> Effect Unit
-    processAllocation pRef decision = do
-      vault <- read pRef
-      let strategy = vault.state.strategyState
+  if newAllocationRatio > state.strategyState.maxPoolAllocation
+    then pure $ Left $ InvalidCommandError $ 
+         "Allocation would exceed max pool allocation of " <> 
+         show (state.strategyState.maxPoolAllocation * 100.0) <> "%"
+    else do
+      -- Create allocation entry
+      let entry: ProtocolEntry =
+            { poolId: poolId
+            , polAmount: polAmount
+            , allocationBlock: currentBlock
+            , performance: 0.5  -- Initial neutral performance
+            , feesCollected: 0.0
+            , isActive: true
+            }
       
-      case Map.lookup decision.poolId strategy.poolVaults of
-        Nothing -> log $ "Pool vault not found: " <> decision.poolId
-        Just poolVaultRef -> do
-          -- Transfer POL to/from pool vault
-          if decision.allocationDelta > 0.0
-            then do
-              -- Allocate more to pool
-              success <- transferToPool pRef poolVaultRef decision.allocationDelta
-              when success do
-                log $ "Allocated " <> show decision.allocationDelta <> " to " <> decision.poolId
-            else if decision.allocationDelta < 0.0
-            then do
-              -- Withdraw from pool
-              let withdrawAmount = abs decision.allocationDelta
-              success <- transferFromPool pRef poolVaultRef withdrawAmount
-              when success do
-                log $ "Withdrew " <> show withdrawAmount <> " from " <> decision.poolId
-            else pure unit  -- No change needed
+      -- Record allocation
+      result <- vault.deposit poolId entry currentBlock
+      
+      -- Update performance history
+      updatePerformanceHistory vaultRef currentBlock
+      
+      pure $ Right result.shares
+
+-- | Withdraw POL from a pool
+withdrawPOL ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  String ->           -- Pool ID
+  ShareAmount ->      -- Amount to withdraw
+  BlockNumber ->      -- Current block
+  Effect (Either ProtocolError Number)
+withdrawPOL vaultRef poolId amount currentBlock = do
+  vault <- read vaultRef
+  
+  -- Check pool has sufficient allocation
+  state <- read vault.state
+  let poolAllocation = getPoolAllocation' state poolId
+  
+  if poolAllocation < amount
+    then pure $ Left $ InvalidCommandError "Insufficient POL in pool"
+    else do
+      -- Process withdrawal
+      result <- vault.withdraw poolId amount currentBlock
+      case result of
+        Nothing -> pure $ Left $ InvalidCommandError "Withdrawal failed"
+        Just withdrawResult -> do
+          -- Mark affected entries as inactive
+          updatePoolEntries vaultRef poolId currentBlock
+          
+          -- Update performance history
+          updatePerformanceHistory vaultRef currentBlock
+          
+          pure $ Right withdrawResult.amount
 
 -- | Rebalance POL across pools
-rebalancePOL :: Ref ProtocolVault -> Effect Unit
-rebalancePOL protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
+rebalancePools :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> BlockNumber -> Effect Unit
+rebalancePools vaultRef currentBlock = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
   
-  -- Collect current allocations
-  allocations <- collectPoolAllocations protocolRef
-  
-  -- Calculate target allocations based on strategy
-  let decisions = calculateAllocationDecisions strategy allocations
-  
-  -- Filter significant rebalances
-  let significantDecisions = filter (\d -> abs d.allocationDelta > strategy.rebalanceThreshold * d.currentAllocation) decisions
-  
-  -- Execute rebalancing
-  when (length significantDecisions > 0) do
-    log $ "Rebalancing POL across " <> show (length significantDecisions) <> " pools"
-    allocateToPools protocolRef significantDecisions
+  -- Check if rebalance is due
+  if currentBlock - strategy.lastRebalanceBlock < strategy.rebalanceFrequency
+    then pure unit
+    else do
+      -- Calculate current allocations
+      let allocations = calculateCurrentAllocations state
+          totalPOL = state.totalBalance
+      
+      -- Calculate target allocations based on strategy
+      let decisions = calculateAllocationDecisions strategy allocations totalPOL
+      
+      -- Filter significant rebalances
+      let significantDecisions = filter (\d -> 
+            abs d.allocationDelta > strategy.rebalanceThreshold * d.currentAllocation
+          ) decisions
+      
+      -- Execute rebalancing
+      traverse_ (executeRebalance vaultRef currentBlock) significantDecisions
+      
+      -- Update last rebalance block
+      let newStrategy = strategy { lastRebalanceBlock = currentBlock }
+      vault.updateStrategy newStrategy
+      
+      log $ "Rebalanced " <> show (Array.length significantDecisions) <> " pools"
 
--- | Collect fees from all pool vaults
-collectProtocolFees :: Ref ProtocolVault -> Effect Number
-collectProtocolFees protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
-      poolVaults = Map.toUnfoldable strategy.poolVaults :: Array (Tuple String (Ref PoolVault))
+-- Fee Management Functions
+
+-- | Collect protocol fees from pools
+collectProtocolFees ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  Array { poolId :: String, fees :: Number } ->
+  BlockNumber ->
+  Effect Number
+collectProtocolFees vaultRef poolFees currentBlock = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
   
-  -- Collect fees from each pool
-  totalFees <- foldM collectFromPool 0.0 poolVaults
+  -- Update fee data for each pool
+  totalFees <- foldM (\acc feeData -> do
+    -- Update pool entries with fee information
+    updatePoolFees vaultRef feeData.poolId feeData.fees
+    pure $ acc + feeData.fees * strategy.protocolFeeShare
+  ) 0.0 poolFees
   
-  when (totalFees > 0.0) do
-    -- Distribute fees according to strategy
-    let stakersShare = totalFees * strategy.feeDistributionRatio.stakers
-        polShare = totalFees * strategy.feeDistributionRatio.pol
-        treasuryShare = totalFees * strategy.feeDistributionRatio.treasury
-    
-    -- Add POL share to protocol reserves
-    let protocolAssets = vault.state.balanceSheet.assets
-        updatedAssets = map (\a ->
-          if a.venue == "Protocol-Reserve"
-          then a { amount = a.amount + polShare }
-          else a
-        ) protocolAssets
-        
-        updatedBS = vault.state.balanceSheet { assets = updatedAssets }
-        updatedState = vault.state { balanceSheet = updatedBS }
-    
-    modify_ (\v -> v { state = updatedState }) protocolRef
-    
-    log $ "Collected " <> show totalFees <> " in fees. POL: " <> show polShare <>
-          ", Stakers: " <> show stakersShare <> ", Treasury: " <> show treasuryShare
+  -- Update total protocol fees
+  let newStrategy = strategy { totalProtocolFees = strategy.totalProtocolFees + totalFees }
+  vault.updateStrategy newStrategy
   
   pure totalFees
-  
-  where
-    collectFromPool :: Number -> Tuple String (Ref PoolVault) -> Effect Number
-    collectFromPool acc (Tuple poolId poolRef) = do
-      metrics <- getPoolMetrics poolRef
-      pure $ acc + metrics.totalFeesCollected * strategy.protocolFeeShare
 
--- | Execute allocation strategy
-executeAllocationStrategy :: Ref ProtocolVault -> Effect Unit
-executeAllocationStrategy = executeAllocationStrategyInternal
-
--- | Internal allocation strategy execution
-executeAllocationStrategyInternal :: Ref ProtocolVault -> Effect Unit
-executeAllocationStrategyInternal protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
-  
-  -- Collect current state
-  allocations <- collectPoolAllocations protocolRef
-  
-  -- Calculate decisions based on strategy type
-  let decisions = calculateAllocationDecisions strategy allocations
-  
-  -- Execute allocations
-  allocateToPools protocolRef decisions
-  
-  -- Update metrics after allocation
-  updateProtocolMetrics protocolRef
-
--- | Update strategy parameters
-updateStrategyParameters :: Ref ProtocolVault -> ProtocolStrategy -> Effect Unit
-updateStrategyParameters protocolRef newStrategy = do
-  modify_ (\vault ->
-    let updatedState = vault.state { strategyState = newStrategy }
-    in vault { state = updatedState }
-  ) protocolRef
-
---------------------------------------------------------------------------------
--- METRIC FUNCTIONS
---------------------------------------------------------------------------------
-
--- | Get POL metrics (delegates to getProtocolMetrics)
-getPOLMetrics :: Ref ProtocolVault -> Effect ProtocolMetrics
-getPOLMetrics = getProtocolMetrics
-
--- | Calculate POL growth rate over the last 24 hours
-calculateGrowthRate24h :: Ref ProtocolVault -> Effect Number
-calculateGrowthRate24h protocolRef = do
-  vault <- read protocolRef
-  let strategy = vault.state.strategyState
-  now <- currentTime
-  let dayAgo = now - 86400000.0  -- 24 hours in milliseconds
-      history = strategy.performanceHistory
-      
-      -- Find entries from 24h ago and now
-      currentPOL = case history of
-        [] -> 0.0
-        (h : _) -> h.totalPOL
-        
-      pol24hAgo = findPOL24hAgo dayAgo history
-      
-  -- Return growth as percentage of total POL
-  pure $ if pol24hAgo > 0.0 
-         then ((currentPOL - pol24hAgo) / pol24hAgo) * 100.0
-         else 0.0
-  where
-    findPOL24hAgo :: Number -> Array PerformanceSnapshot -> Number
-    findPOL24hAgo _ [] = 0.0
-    findPOL24hAgo targetTime (h : rest) =
-      if h.timestamp <= targetTime
-      then h.totalPOL
-      else findPOL24hAgo targetTime rest
-
--- | Get FeelsSOL system health metrics
-getFeelsSOLHealthMetrics :: FeelsSOLState -> Effect FeelsSOLHealthMetrics
-getFeelsSOLHealthMetrics vaultRef = do
+-- | Distribute collected fees
+distributeFees ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  Effect { stakers :: Number, pol :: Number, treasury :: Number }
+distributeFees vaultRef = do
   vault <- read vaultRef
-  let locked = Vault.totalAssets vault.state.balanceSheet
-      minted = vault.state.balanceSheet.totalShares
-      strategy = vault.state.strategyState
-      
-      -- Calculate buffer status
-      currentBuffer = strategy.jitoSOLBuffer
-      target = locked * strategy.bufferTargetRatio
-      bufferRatio = if locked > 0.0 then currentBuffer / locked else 0.0
-      minRatio = 0.005  -- 0.5% minimum buffer
-      bufferHealthy = bufferRatio >= minRatio
-      
-      -- Calculate collateral ratio
-      ratio = if minted > 0.0 then locked / minted else 1.0
-      isHealthy = ratio >= 1.0 && bufferHealthy
-      
-  pure { collateralRatio: ratio, totalLocked: locked, totalMinted: minted, bufferRatio: bufferRatio, isHealthy }
-
--- | Calculate total fees collected across all pools
-getProtocolTotalFeesCollected :: Array PoolState -> Effect Number
-getProtocolTotalFeesCollected pools = do
-  foldl collectPoolFees (pure 0.0) pools
-  where
-    collectPoolFees :: Effect Number -> PoolState -> Effect Number
-    collectPoolFees totalEffect pool = do
-      total <- totalEffect
-      let totalFeeGrowth = pool.feeGrowthGlobal0X128 + pool.feeGrowthGlobal1X128
-          -- Convert fee growth to actual fees (simplified calculation)
-          collectedFees = if pool.liquidity > 0.0 && totalFeeGrowth > 0.0
-                         then min (totalFeeGrowth * pool.liquidity / 1000000.0) (pool.liquidity * 0.01)
-                         else 0.0
-      pure $ total + collectedFees
-
---------------------------------------------------------------------------------
--- LVR COMPENSATION METRICS
---------------------------------------------------------------------------------
-
--- | Calculate estimated LVR payment for a monthly liquidity position
-calculateEstimatedLVRPayment :: Position -> Number -> Effect Number
-calculateEstimatedLVRPayment position poolVolatility = do
-  -- Monthly positions qualify for LVR compensation
-  let isEligible = true  -- Position identification is done by caller
+  state <- read vault.state
+  let strategy = state.strategyState
+      totalFees = strategy.totalProtocolFees
+      distribution = strategy.feeDistribution
   
-  if not isEligible
-    then pure 0.0
-    else do
-      -- Calculate time since position creation (in days)
-      -- Assuming 2 blocks per minute (30 second blocks), 2880 blocks per day
-      let timeDays = toNumber position.createdAt / 2880.0
-          
-      -- Use position amount as proxy for liquidity provided
-      let liquidity = position.amount
-          
-      -- Use pool volatility for accurate LVR calculation
-      let dailyVolatility = poolVolatility
-          
-      -- LVR compensation factor (calibrated to provide fair compensation)
-      let lvrFactor = 0.0025  -- 0.25% of liquidity per sqrt(day) at 15% vol
-          
-      -- Calculate LVR payment
-      let lvrPayment = liquidity * sqrt timeDays * pow dailyVolatility 2.0 * lvrFactor
-          
-      pure lvrPayment
-
-
--- | Calculate additional volatility yield for monthly liquidity positions
-calculateVolatilityYield :: Position -> PoolState -> Effect Number
-calculateVolatilityYield position pool = do
-  -- Monthly positions qualify for volatility yield
-  let isEligible = true  -- Position identification is done by caller
+  let stakersAmount = totalFees * distribution.stakers
+      polAmount = totalFees * distribution.pol
+      treasuryAmount = totalFees * distribution.treasury
   
-  if not isEligible
-    then pure 0.0
-    else do
-      -- Extract fee growth since position creation
-      let feeGrowthDelta0 = pool.feeGrowthGlobal0X128 - position.feeGrowthInside0
-          feeGrowthDelta1 = pool.feeGrowthGlobal1X128 - position.feeGrowthInside1
-          totalFeeGrowth = feeGrowthDelta0 + feeGrowthDelta1
-          
-      -- Calculate position's share of fee growth
-      let positionShare = if pool.liquidity > 0.0
-                         then position.shares / pool.liquidity
-                         else 0.0
-                         
-      -- Volatility yield multiplier for monthly positions
-      let monthlyPositionMultiplier = 2.0
-          
-      -- Calculate total volatility yield
-      let volatilityYield = totalFeeGrowth * positionShare * monthlyPositionMultiplier
-          
-      pure volatilityYield
+  -- Reset distributed fees
+  let newStrategy = strategy { totalProtocolFees = 0.0 }
+  vault.updateStrategy newStrategy
+  
+  pure { stakers: stakersAmount, pol: polAmount, treasury: treasuryAmount }
 
--- | Process monthly positions and distribute LVR and volatility compensation
-processMonthlyPositionCompensation :: 
-  Ref (Map.Map Int Position) -> 
-  (String -> Effect (Maybe PoolState)) -> 
+-- Query Functions
+
+-- | Get comprehensive protocol metrics
+getProtocolMetrics :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> Effect ProtocolMetrics
+getProtocolMetrics vaultRef = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
+      activeEntries = getActiveEntries state state.lastUpdateBlock
+  
+  -- Calculate metrics
+  let totalPOL = state.totalBalance
+      deployedPOL = aggregateEntries activeEntries
+      utilization = if totalPOL > 0.0 then deployedPOL / totalPOL else 0.0
+      
+      -- Pool metrics
+      poolAllocations = calculateCurrentAllocations state
+      poolCount = Array.length poolAllocations
+      
+      -- Performance metrics
+      performances = map _.performance poolAllocations
+      avgPerformance = if poolCount > 0
+                      then sum performances / toNumber poolCount
+                      else 0.0
+      
+      -- Risk metrics
+      concentrationRisk = calculateConcentrationRisk poolAllocations totalPOL
+      healthScore = calculateHealthScore' utilization avgPerformance concentrationRisk
+  
+  pure
+    { totalPOL: totalPOL
+    , deployedPOL: deployedPOL
+    , utilization: utilization
+    , totalFeesCollected: sum $ map (\(LedgerEntry e) -> e.data.feesCollected) activeEntries
+    , avgPoolPerformance: avgPerformance
+    , poolCount: poolCount
+    , healthScore: healthScore
+    , concentrationRisk: concentrationRisk
+    }
+
+-- | Get allocation for a specific pool
+getPoolAllocation :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> String -> Effect Number
+getPoolAllocation vaultRef poolId = do
+  vault <- read vaultRef
+  state <- read vault.state
+  pure $ getPoolAllocation' state poolId
+
+-- | Calculate protocol health score
+calculateHealthScore :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> Effect Number
+calculateHealthScore vaultRef = do
+  metrics <- getProtocolMetrics vaultRef
+  pure metrics.healthScore
+
+-- Strategy Management Functions
+
+-- | Update allocation strategy
+updateAllocationStrategy ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  AllocationStrategy ->
   Effect Unit
-processMonthlyPositionCompensation positionsRef getPool = do
-  -- Get all positions from position manager
-  positionsMap <- read positionsRef
-  let positions = Map.toUnfoldable positionsMap :: Array (Tuple Int Position)
-  
-  -- Process each position
-  traverse_ (\(Tuple posId position) -> do
-    -- Check if this position qualifies for LVR compensation (monthly duration)
-    when (isVolHarvesterPosition position) do
-      -- Get the pool for this position to calculate volatility yield
-      poolResult <- getPool "FEELSSOL-USDC"
-      
-      case poolResult of
-        Just pool -> do
-          -- Get pool volatility for LVR calculation
-          let poolVolatility = pool.volatility
-          
-          -- Calculate LVR compensation (guaranteed payment) with pool volatility
-          lvrPayment <- calculateEstimatedLVRPayment position poolVolatility
-          
-          -- Calculate volatility yield (upside from protocol success)
-          volYield <- calculateVolatilityYield position pool
-          
-          let totalCompensation = lvrPayment + volYield
-          
-          -- Update position with accumulated yield
-          let updatedPosition = position 
-                { accumulatedYield = position.accumulatedYield + totalCompensation
-                , value = position.value + totalCompensation
-                }
-          
-          -- Update position in state
-          modify_ (Map.insert posId updatedPosition) positionsRef
-          
-          when (totalCompensation > 0.0) do
-            log $ "Monthly position " <> show posId <> 
-                  " LVR compensated: LVR=" <> show lvrPayment <> 
-                  ", VolYield=" <> show volYield <>
-                  ", Total=" <> show totalCompensation
-        
-        Nothing -> pure unit  -- Pool not found, skip
-  ) positions
+updateAllocationStrategy vaultRef newStrategy = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState { allocationStrategy = newStrategy }
+  vault.updateStrategy strategy
 
---------------------------------------------------------------------------------
--- HELPER FUNCTIONS
---------------------------------------------------------------------------------
+-- | Set rebalance parameters
+setRebalanceParameters ::
+  Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
+  { threshold :: Number, frequency :: Int } ->
+  Effect Unit
+setRebalanceParameters vaultRef params = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
+        { rebalanceThreshold = params.threshold
+        , rebalanceFrequency = params.frequency
+        }
+  vault.updateStrategy strategy
 
--- | Transfer POL to a pool vault
-transferToPool :: Ref ProtocolVault -> Ref PoolVault -> Number -> Effect Boolean
-transferToPool protocolRef poolRef amount = do
-  protocolVault <- read protocolRef
-  let protocolAssets = protocolVault.state.balanceSheet.assets
-      reserveAsset = find (\a -> a.venue == "Protocol-Reserve") protocolAssets
-  
-  case reserveAsset of
-    Nothing -> pure false
-    Just reserve -> 
-      if reserve.amount < amount
-        then pure false
-        else do
-          -- Update protocol vault assets
-          let updatedProtocolAssets = map (\a ->
-                if a.venue == "Protocol-Reserve"
-                then a { amount = a.amount - amount }
-                else a
-              ) protocolAssets
-              
-              updatedProtocolBS = protocolVault.state.balanceSheet { assets = updatedProtocolAssets }
-              updatedProtocolState = protocolVault.state { balanceSheet = updatedProtocolBS }
-          
-          modify_ (\v -> v { state = updatedProtocolState }) protocolRef
-          
-          -- Add to pool vault
-          poolVault <- read poolRef
-          let newPoolAsset = { tokenType: FeelsSOL, amount: amount, venue: "Pool-Unallocated" }
-              updatedPoolAssets = newPoolAsset : poolVault.state.balanceSheet.assets
-              updatedPoolBS = poolVault.state.balanceSheet { assets = updatedPoolAssets }
-              updatedPoolState = poolVault.state { balanceSheet = updatedPoolBS }
-          
-          modify_ (\v -> v { state = updatedPoolState }) poolRef
-          pure true
+-- Helper Functions
 
--- | Transfer POL from a pool vault back to protocol
-transferFromPool :: Ref ProtocolVault -> Ref PoolVault -> Number -> Effect Boolean
-transferFromPool protocolRef poolRef amount = do
-  poolVault <- read poolRef
-  let poolAssets = poolVault.state.balanceSheet.assets
-      unallocatedAsset = find (\a -> a.venue == "Pool-Unallocated") poolAssets
-  
-  case unallocatedAsset of
-    Nothing -> pure false
-    Just unallocated ->
-      if unallocated.amount < amount
-        then pure false
-        else do
-          -- Update pool vault assets
-          let updatedPoolAssets = map (\a ->
-                if a.venue == "Pool-Unallocated"
-                then a { amount = a.amount - amount }
-                else a
-              ) poolAssets
-              
-              updatedPoolBS = poolVault.state.balanceSheet { assets = filter (\a -> a.amount > 0.0) updatedPoolAssets }
-              updatedPoolState = poolVault.state { balanceSheet = updatedPoolBS }
-          
-          modify_ (\v -> v { state = updatedPoolState }) poolRef
-          
-          -- Add back to protocol vault
-          protocolVault <- read protocolRef
-          let protocolAssets = protocolVault.state.balanceSheet.assets
-              updatedProtocolAssets = map (\a ->
-                if a.venue == "Protocol-Reserve"
-                then a { amount = a.amount + amount }
-                else a
-              ) protocolAssets
-              
-              updatedProtocolBS = protocolVault.state.balanceSheet { assets = updatedProtocolAssets }
-              updatedProtocolState = protocolVault.state { balanceSheet = updatedProtocolBS }
-          
-          modify_ (\v -> v { state = updatedProtocolState }) protocolRef
-          pure true
+-- | Get pool allocation from state
+getPoolAllocation' :: LedgerVaultState ProtocolEntry ProtocolStrategy -> String -> Number
+getPoolAllocation' state poolId =
+  let entries = getAccountEntries state poolId
+      activeEntries = filter (isActive state.lastUpdateBlock) entries
+  in aggregateEntries activeEntries
 
--- | Collect current pool allocations
-collectPoolAllocations :: Ref ProtocolVault -> Effect (Array PoolAllocation)
-collectPoolAllocations protocolRef = do
-  vault <- read protocolRef
-  let poolVaults = Map.toUnfoldable vault.state.strategyState.poolVaults :: Array (Tuple String (Ref PoolVault))
-  
-  traverse (\(Tuple poolId poolRef) -> do
-    metrics <- getPoolMetrics poolRef
-    pure { poolId: poolId, allocation: metrics.totalPOL, performance: metrics.performance }
-  ) poolVaults
+-- | Calculate current allocations for all pools
+calculateCurrentAllocations :: LedgerVaultState ProtocolEntry ProtocolStrategy -> Array { poolId :: String, allocation :: Number, performance :: Number }
+calculateCurrentAllocations state =
+  let poolIds = getAllAccounts state
+  in map (\poolId ->
+    let entries = getAccountEntries state poolId
+        activeEntries = filter (isActive state.lastUpdateBlock) entries
+        allocation = aggregateEntries activeEntries
+        -- Average performance of active entries
+        performances = map (\(LedgerEntry e) -> e.data.performance) activeEntries
+        avgPerformance = if Array.length performances > 0
+                        then sum performances / toNumber (Array.length performances)
+                        else 0.5
+    in { poolId: poolId, allocation: allocation, performance: avgPerformance }
+  ) poolIds
 
--- | Calculate allocation decisions based on strategy
-calculateAllocationDecisions :: 
-  ProtocolStrategy -> 
-  Array PoolAllocation -> 
+-- | Calculate allocation decisions
+calculateAllocationDecisions ::
+  ProtocolStrategy ->
+  Array { poolId :: String, allocation :: Number, performance :: Number } ->
+  Number ->
   Array AllocationDecision
-calculateAllocationDecisions strategy currentAllocations =
-  let totalPOL = sum $ map (\a -> a.allocation) currentAllocations
-      
-      -- Calculate target allocations based on strategy type
-      targetAllocations = case strategy.allocationStrategy of
-        PerformanceBased -> calculatePerformanceBasedTargets
-        VolumeBased -> calculateVolumeBasedTargets  -- Simplified
-        RiskAdjusted -> calculateRiskAdjustedTargets  -- Simplified
-        Balanced -> calculateBalancedTargets
-      
-      -- Create decisions
-      decisions = map (\current ->
-        let target = findTarget current.poolId targetAllocations
-            targetAmount = target * totalPOL
-            delta = targetAmount - current.allocation
-            priority = abs delta / (current.allocation + 1.0)  -- Avoid div by 0
-        in { poolId: current.poolId
-           , currentAllocation: current.allocation
-           , targetAllocation: targetAmount
-           , allocationDelta: delta
-           , priority: priority
-           }
-      ) currentAllocations
-      
-  in sortBy (\a b -> compare b.priority a.priority) decisions  -- Sort by priority desc
+calculateAllocationDecisions strategy currentAllocations totalPOL =
+  let targets = case strategy.allocationStrategy of
+        PerformanceBased -> calculatePerformanceTargets currentAllocations totalPOL strategy
+        VolumeBased -> calculatePerformanceTargets currentAllocations totalPOL strategy  -- Simplified
+        RiskAdjusted -> calculatePerformanceTargets currentAllocations totalPOL strategy  -- Simplified
+        Balanced -> calculateBalancedTargets currentAllocations totalPOL strategy
   
-  where
-    calculatePerformanceBasedTargets :: Array AllocationTarget
-    calculatePerformanceBasedTargets =
-      let totalPerformance = sum $ map (\a -> a.performance) currentAllocations
-          rawTargets = map (\a ->
-            { poolId: a.poolId
-            , target: if totalPerformance > 0.0 
-                     then a.performance / totalPerformance
-                     else 1.0 / toNumber (length currentAllocations)
-            }
-          ) currentAllocations
-          
-          -- Apply min/max constraints
-          constrainedTargets = map (\t ->
-            t { target = min strategy.maxPoolAllocation (max strategy.minPoolAllocation t.target) }
-          ) rawTargets
-          
-      in constrainedTargets
-    
-    calculateVolumeBasedTargets = calculatePerformanceBasedTargets  -- Placeholder
-    calculateRiskAdjustedTargets = calculatePerformanceBasedTargets  -- Placeholder
-    
-    calculateBalancedTargets :: Array AllocationTarget
-    calculateBalancedTargets =
-      let poolCount = length currentAllocations
-          baseAllocation = 1.0 / toNumber poolCount
-          
-          -- Add performance tilt
-          targets = map (\a ->
-            let performanceTilt = (a.performance - 0.5) * 0.2  -- +/- 10% based on performance
-                target = baseAllocation * (1.0 + performanceTilt)
-            in { poolId: a.poolId
-               , target: min strategy.maxPoolAllocation (max strategy.minPoolAllocation target)
-               }
-          ) currentAllocations
-          
-      in targets
-    
-    findTarget :: String -> Array AllocationTarget -> Number
-    findTarget poolId targets =
-      case find (\t -> t.poolId == poolId) targets of
-        Nothing -> strategy.minPoolAllocation
-        Just t -> t.target
+  in map (\alloc ->
+    let target = fromMaybe alloc.allocation $ find (\t -> t.poolId == alloc.poolId) targets
+        delta = target - alloc.allocation
+        priority = abs delta / (alloc.allocation + 1.0)
+    in { poolId: alloc.poolId
+       , currentAllocation: alloc.allocation
+       , targetAllocation: target
+       , allocationDelta: delta
+       , priority: priority
+       }
+  ) currentAllocations
+
+-- | Calculate performance-based targets
+calculatePerformanceTargets ::
+  Array { poolId :: String, allocation :: Number, performance :: Number } ->
+  Number ->
+  ProtocolStrategy ->
+  Array { poolId :: String, allocation :: Number }
+calculatePerformanceTargets allocations totalPOL strategy =
+  let totalPerformance = sum $ map _.performance allocations
+  in map (\alloc ->
+    let rawTarget = if totalPerformance > 0.0
+                   then alloc.performance / totalPerformance
+                   else 1.0 / toNumber (Array.length allocations)
+        constrainedTarget = min strategy.maxPoolAllocation (max strategy.minPoolAllocation rawTarget)
+        targetAmount = constrainedTarget * totalPOL
+    in { poolId: alloc.poolId, allocation: targetAmount }
+  ) allocations
+
+-- | Calculate balanced targets
+calculateBalancedTargets ::
+  Array { poolId :: String, allocation :: Number, performance :: Number } ->
+  Number ->
+  ProtocolStrategy ->
+  Array { poolId :: String, allocation :: Number }
+calculateBalancedTargets allocations totalPOL strategy =
+  let poolCount = Array.length allocations
+      baseAllocation = 1.0 / toNumber poolCount
+  in map (\alloc ->
+    let performanceTilt = (alloc.performance - 0.5) * 0.2  -- +/- 10% based on performance
+        rawTarget = baseAllocation * (1.0 + performanceTilt)
+        constrainedTarget = min strategy.maxPoolAllocation (max strategy.minPoolAllocation rawTarget)
+        targetAmount = constrainedTarget * totalPOL
+    in { poolId: alloc.poolId, allocation: targetAmount }
+  ) allocations
+
+-- | Execute a single rebalance decision
+executeRebalance :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> BlockNumber -> AllocationDecision -> Effect Unit
+executeRebalance vaultRef currentBlock decision = do
+  if decision.allocationDelta > 0.0
+    then do
+      -- Allocate more to pool
+      _ <- allocatePOL vaultRef decision.poolId decision.allocationDelta currentBlock
+      pure unit
+    else if decision.allocationDelta < 0.0
+    then do
+      -- Withdraw from pool
+      _ <- withdrawPOL vaultRef decision.poolId (abs decision.allocationDelta) currentBlock
+      pure unit
+    else pure unit
+
+-- | Update pool entries after changes
+updatePoolEntries :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> String -> BlockNumber -> Effect Unit
+updatePoolEntries vaultRef poolId currentBlock = do
+  -- This would mark entries as inactive or update their status
+  -- For now, this is a placeholder
+  pure unit
+
+-- | Update pool fee information
+updatePoolFees :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> String -> Number -> Effect Unit
+updatePoolFees vaultRef poolId fees = do
+  -- This would update fee tracking in entries
+  -- For now, this is a placeholder
+  pure unit
+
+-- | Update performance history
+updatePerformanceHistory :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> BlockNumber -> Effect Unit
+updatePerformanceHistory vaultRef currentBlock = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
+  
+  currentTime' <- currentTime
+  metrics <- getProtocolMetrics vaultRef
+  
+  let newSnapshot =
+        { timestamp: currentTime'
+        , totalPOL: metrics.totalPOL
+        , utilization: metrics.utilization
+        , feesCollected: metrics.totalFeesCollected
+        }
+      
+      updatedHistory = take 100 (newSnapshot : strategy.performanceHistory)
+      newStrategy = strategy { performanceHistory: updatedHistory }
+  
+  vault.updateStrategy newStrategy
+
+-- | Calculate concentration risk (Herfindahl index)
+calculateConcentrationRisk ::
+  Array { poolId :: String, allocation :: Number, performance :: Number } ->
+  Number ->
+  Number
+calculateConcentrationRisk allocations totalPOL =
+  if totalPOL <= 0.0
+    then 0.0
+    else
+      let shares = map (\a -> a.allocation / totalPOL) allocations
+      in sum $ map (\s -> s * s) shares
+
+-- | Calculate health score from components
+calculateHealthScore' :: Number -> Number -> Number -> Number
+calculateHealthScore' utilization performance concentration =
+  let utilizationHealth = if utilization < 0.2
+                         then 0.5  -- Too low
+                         else if utilization > 0.9
+                         then 0.7  -- Too high
+                         else 1.0  -- Optimal
+      
+      concentrationHealth = 1.0 - concentration
+      
+      -- Weighted health score
+      healthScore = (utilizationHealth * 0.4 + 
+                    performance * 0.4 + 
+                    concentrationHealth * 0.2)
+  
+  in healthScore

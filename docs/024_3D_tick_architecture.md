@@ -4,7 +4,7 @@
 
 The Feels Protocol extends the traditional AMM tick concept from one dimension (price) to three dimensions:
 - **Price**: Traditional price levels (in basis points)
-- **Duration**: Time commitment (Flash, Monthly, Spot)
+- **Duration**: Time commitment (Flash, Monthly, Swap)
 - **Leverage**: Risk preference (Senior 1x, Junior 3x)
 
 ## Key Concepts
@@ -24,7 +24,7 @@ Each tick has a coordinate in 3D space:
 ```purescript
 type TickCoordinate =
   { priceTick :: Int      -- e.g., 100 = 1.01 price
-  , durationTick :: Int   -- 0=Flash, 1=Monthly, 2=Spot  
+  , durationTick :: Int   -- 0=Flash, 1=Monthly, 2=Swap  
   , leverageTick :: Int   -- 0=Senior, 1=Junior
   }
 ```

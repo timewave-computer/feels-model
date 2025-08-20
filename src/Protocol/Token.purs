@@ -29,7 +29,7 @@ module Protocol.Token
   , transferNFT
   -- Token types
   , TokenType(..)
-  , FungibleToken
+  , FungibleToken(..)
   , NonFungibleToken
   , TokenId
   , TokenMetadata
@@ -144,11 +144,11 @@ newtype FungibleToken = FungibleToken
   }
 
 instance tokenFungibleToken :: Token FungibleToken where
-  tokenId token = token.metadata.id
-  tokenMetadata token = token.metadata
+  tokenId (FungibleToken token) = token.metadata.id
+  tokenMetadata (FungibleToken token) = token.metadata
 
 instance fungibleFungibleToken :: Fungible FungibleToken where
-  transfer token from to amount = do
+  transfer (FungibleToken token) from to amount = do
     balanceMap <- read token.balances
     let fromBalance = fromMaybe 0.0 $ Map.lookup from balanceMap
         toBalance = fromMaybe 0.0 $ Map.lookup to balanceMap
@@ -164,11 +164,11 @@ instance fungibleFungibleToken :: Fungible FungibleToken where
         write newBalances token.balances
         pure $ Right unit
   
-  balance token holder = do
+  balance (FungibleToken token) holder = do
     balanceMap <- read token.balances
     pure $ fromMaybe 0.0 $ Map.lookup holder balanceMap
   
-  mint token to amount = do
+  mint (FungibleToken token) to amount = do
     if token.paused
       then pure $ Left "Token is paused"
       else do
@@ -178,7 +178,7 @@ instance fungibleFungibleToken :: Fungible FungibleToken where
         write (Map.insert to newBalance balanceMap) token.balances
         pure $ Right unit
   
-  burn token from amount = do
+  burn (FungibleToken token) from amount = do
     balanceMap <- read token.balances
     let currentBalance = fromMaybe 0.0 $ Map.lookup from balanceMap
     
@@ -205,7 +205,7 @@ newtype PositionToken = PositionToken
   , shareBalances :: Ref TokenBalance   -- Who owns how many shares
   , lockedUntil :: Map String Number    -- Lock expiry by holder
   , leverageTier :: String              -- "Senior" or "Junior"
-  , duration :: String                  -- "Flash", "Monthly", or "Spot"
+  , duration :: String                  -- "Flash", "Monthly", or "Swap"
   }
 
 instance tokenPositionToken :: Token PositionToken where
@@ -492,4 +492,4 @@ isValidPair _ _ = false                   -- All other pairs invalid
 
 -- | Check if a token is available for trading
 isTradeable :: FungibleToken -> Boolean
-isTradeable token = not token.paused
+isTradeable (FungibleToken token) = not token.paused

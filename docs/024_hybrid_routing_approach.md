@@ -25,6 +25,15 @@ The Feels Protocol operates in 3D space (rate × duration × leverage), making r
 - Multi-dimensional swaps: Multiple paths possible
 - Composite swaps: Complex optimization required
 
+### Two-Layer Architecture Context
+
+The routing system operates at the **pool layer**, handling swaps through the 3D AMM where:
+- **PoolPositions**: Represent liquidity provision in specific 3D cubes
+- **LiquidityCubes**: Define concentrated liquidity ranges in rate×duration×leverage space
+- **Swaps**: Move through this 3D space to exchange between different risk/time/rate profiles
+
+The **vault layer** (with VaultPositions representing depositor shares) sits above this and uses the routing system when rebalancing its liquidity across the 3D space.
+
 ## Hybrid Architecture
 
 ### Tier 1: On-Chain Direct Routing

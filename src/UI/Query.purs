@@ -28,8 +28,7 @@ import UI.Util.Codecs (decodeTokenArray, decodePositionArray)
 -- Import protocol modules for data access
 import UI.TokenRegistry (getAllTokens)
 import UI.PoolRegistry (getUserPositions, getAllPositions, getPool)
-import Protocol.POLVault (getTotalPOL)
-import Protocol.Metric (getPOLMetrics, calculateGrowthRate24h)
+import Protocol.ProtocolVault (getTotalProtocolPOL, getProtocolMetrics, calculateGrowthRate24h)
 import Protocol.Pool (syncPositionValue)
 import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
 import Protocol.Error (ProtocolError(..))
@@ -159,8 +158,8 @@ handleGetSystemStats state = do
 -- | Handle POL metrics query
 handleGetPOLMetrics :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetPOLMetrics state = do
-  balance <- getTotalPOL state.polState
-  _metrics <- getPOLMetrics state.polState
+  balance <- getTotalProtocolPOL state.polState
+  _metrics <- getProtocolMetrics state.polState
   growthRate <- calculateGrowthRate24h state.polState
   pure $ Right $ POLMetricsResult
     { balance

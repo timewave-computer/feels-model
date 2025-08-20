@@ -71,7 +71,7 @@ renderLaunchCreator _ =
     , renderSection (defaultSectionConfig { title = Just "Launch Information" })
         [ HH.ul_
             [ HH.li_ [ HH.text "Monthly Phase: 28-day commitment, lowest price" ]
-            , HH.li_ [ HH.text "Spot Phase: Immediate liquidity, higher price" ]
+            , HH.li_ [ HH.text "Swap Phase: Immediate liquidity, higher price" ]
             ]
         ]
     ]
@@ -265,7 +265,7 @@ renderBatchRow batch =
 phaseClass :: LaunchPhase -> String
 phaseClass = case _ of
   MonthlyPhase -> "phase-monthly"
-  SpotPhase -> "phase-spot"
+  SwapPhase -> "phase-swap"
   Completed -> "phase-completed"
 
 formatPercent :: Number -> String

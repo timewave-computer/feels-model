@@ -34,7 +34,7 @@ type UIState =
   -- Exchange Form
   , inputAmount :: Number
   , selectedFromAsset :: String  -- "jitosol", "feelssol", "position", etc.
-  , selectedToAsset :: String    -- "position-spot", "position-term", "jitosol", etc.
+  , selectedToAsset :: String    -- "position-swap", "position-term", "jitosol", etc.
   , selectedTermType :: String   -- "spot", "monthly"
   , selectedLeverage :: String   -- "senior", "junior"
   , selectedTargetToken :: Maybe String  -- Target token ticker for position
@@ -125,8 +125,8 @@ initialUIState =
   -- Exchange Form
   , inputAmount: 100.0
   , selectedFromAsset: "jitosol"
-  , selectedToAsset: "position-spot"
-  , selectedTermType: "spot"
+  , selectedToAsset: "position-swap"
+  , selectedTermType: "swap"
   , selectedLeverage: "senior"
   , selectedTargetToken: Nothing
   -- Simulation Form

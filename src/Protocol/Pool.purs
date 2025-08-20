@@ -13,8 +13,9 @@
 module Protocol.Pool
   ( -- Core types
     Pool
+    , PoolEvent(..)
     , TickCoordinate
-    , LiquidityCube3D
+    , Liquidity3D
     , PoolPosition
     , GlobalState3D
     , VirtualBalances
@@ -40,7 +41,7 @@ module Protocol.Pool
   , calculateEffectiveWeights
   , calculateTimeAdjustedWeight
   , calculateInvariant3DWithAdjustments
-  , calculateSpotPrice3DWithRisk
+  , calculateSwapPrice3DWithRisk
   , calculateLossDistribution
   -- Composite views
   , calculateCompositeBalance
@@ -54,23 +55,29 @@ module Protocol.Pool
   , getAmount1For3DLiquidity
   , getLiquidityFor3DAmounts
   -- AMM math
-  , calculateSpotPrice3D
+  , calculateSwapPrice3D
   , calculateInvariant3D
   , getVirtualBalances
-  -- Tick management (simplified)
+  -- Tick management
   , insertTick
   , removeTick
   , lookupTick
   , updateTick
   , findTicksInRange
   , getActiveTicks
+  , durationToTick
+  , leverageToTick
+  -- Position types
+  , Duration(..)
+  , Leverage(..)
+  , leverageMultiplier
   -- Helpers
   , toQ96
   , fromQ96
   ) where
 
 import Prelude
-import Data.Array (filter, sortBy, take, foldl, length, (:), any, mapMaybe, map, concat, concatMap)
+import Data.Array (filter, sortBy, take, foldl, length, (:), any, mapMaybe, concat, concatMap, fromFoldable) as Array
 import Data.Foldable (sum)
 import Data.Map (Map, values)
 import Data.Map as Map
@@ -80,13 +87,117 @@ import Data.Int (round, toNumber)
 import Data.Tuple (Tuple(..), uncurry)
 import Data.Ord (min, max, abs)
 import Effect (Effect)
-import FFI (pow, log)
+import Data.Number (pow, log)
 import Protocol.Token (TokenType)
-import Protocol.PositionTypes (Duration(..), Leverage(..))
 import Protocol.Common (BlockNumber, PositionId)
--- Time constants (12 second blocks)
+import Protocol.Config (defaultProtocolConfig)
+
+--------------------------------------------------------------------------------
+-- CONSTANTS
+--------------------------------------------------------------------------------
+
+-- Time constants
 blocksPerMonth :: Int  
-blocksPerMonth = 201600  -- 28 days * 24 hours * 60 minutes * 60 seconds / 12 seconds per block
+blocksPerMonth = defaultProtocolConfig.time.blocksPerMonth
+
+-- AMM constants
+initialVirtualBalance :: Number
+initialVirtualBalance = 1000.0
+
+-- Initial yield rate constants
+baseRateYield :: Number
+baseRateYield = 0.0001
+
+baseDurationYield :: Number
+baseDurationYield = 0.00005
+
+baseLeverageYield :: Number
+baseLeverageYield = 0.00008
+
+-- Swap constants
+defaultSwapBuffer :: Number
+defaultSwapBuffer = 1.1  -- 10% buffer for swap calculations
+
+-- Tick math constants
+tickBase :: Number
+tickBase = 1.0001
+
+ticksPerPercent :: Number
+ticksPerPercent = 100.0
+
+-- Duration multiplier constants
+flashDurationMultiplier :: Number
+flashDurationMultiplier = 0.8  -- 20% discount
+
+monthlyDurationMultiplier :: Number
+monthlyDurationMultiplier = 1.0  -- Base rate
+
+swapDurationMultiplier :: Number
+swapDurationMultiplier = 1.2  -- 20% premium
+
+-- Leverage multiplier constants
+seniorLeverageRiskMultiplier :: Number
+seniorLeverageRiskMultiplier = 1.0
+
+juniorLeverageRiskMultiplier :: Number
+juniorLeverageRiskMultiplier = 3.0
+
+-- Junior yield premium
+juniorYieldPremium :: Number
+juniorYieldPremium = 1.5  -- 50% higher yield for junior
+
+-- Swap solver constants
+swapSolverBufferRatio :: Number
+swapSolverBufferRatio = 0.8
+
+swapSolverPremiumRatio :: Number
+swapSolverPremiumRatio = 0.9
+
+--------------------------------------------------------------------------------
+-- POOL POSITION TYPES
+--------------------------------------------------------------------------------
+
+-- | Duration options - discrete time commitments
+data Duration
+  = Flash     -- Single block loan, capital returned immediately
+  | Monthly   -- 28-day term loan, capital returned at expiry
+  | Swap      -- Cross the spread without return (conceptually equivalent to an indefinite loan)
+
+derive instance eqDuration :: Eq Duration
+derive instance ordDuration :: Ord Duration
+
+instance showDuration :: Show Duration where
+  show Flash = "Flash"
+  show Monthly = "Monthly"
+  show Swap = "Swap"
+
+-- | Leverage tiers - discrete exposure levels
+data Leverage  
+  = Senior    -- 1x exposure, protected
+  | Junior    -- 3x exposure, higher risk/reward
+
+derive instance eqLeverage :: Eq Leverage
+derive instance ordLeverage :: Ord Leverage
+
+instance showLeverage :: Show Leverage where
+  show Senior = "Senior (1x)"
+  show Junior = "Junior (3x)"
+
+-- | Get numeric multiplier for leverage tier
+leverageMultiplier :: Leverage -> Number
+leverageMultiplier Senior = defaultProtocolConfig.pools.seniorLeverageMultiplier
+leverageMultiplier Junior = defaultProtocolConfig.pools.juniorLeverageMultiplier
+
+-- | Convert duration to tick
+durationToTick :: Duration -> Int
+durationToTick Flash = 0
+durationToTick Monthly = 1
+durationToTick Swap = 2
+
+-- | Convert leverage to tick
+leverageToTick :: Leverage -> Int
+leverageToTick Senior = 0
+leverageToTick Junior = 1
 
 --------------------------------------------------------------------------------
 -- CORE TYPES
@@ -96,7 +207,7 @@ blocksPerMonth = 201600  -- 28 days * 24 hours * 60 minutes * 60 seconds / 12 se
 type Pool =
   { id :: String
   , token :: TokenType                           -- Token being lent/borrowed
-  , liquidityCubes :: Map String LiquidityCube3D -- Concentrated liquidity positions
+  , liquidity3Ds :: Map String Liquidity3D -- Concentrated liquidity positions (3D cubes)
   , activeTicks :: Array TickCoordinate          -- Ticks with liquidity
   , tickData :: Map String TickData              -- Tick data storage (simplified)
   , positions :: Map PositionId PoolPosition     -- Pool liquidity positions
@@ -111,13 +222,13 @@ type Pool =
 
 -- | Coordinate in 3D tick space
 type TickCoordinate =
-  { rateTick :: Int       -- Interest rate tick using sqrt pricing
-  , durationTick :: Int   -- 0 = Flash, 1 = Monthly, 2 = Spot
-  , leverageTick :: Int   -- 0 = Senior (1x), 1 = Junior (3x)
+  { rateTick :: Int       -- Rate/price tick: For Swap duration = exchange rate (0 = 1:1), For Monthly = lending APR (500 = 5%), For Flash = fee percentage
+  , durationTick :: Int   -- 0 = Flash (single block), 1 = Monthly (28 days), 2 = Swap (immediate swap)
+  , leverageTick :: Int   -- 0 = Senior (1x exposure), 1 = Junior (3x exposure)
   }
 
--- | Concentrated liquidity in a 3D cube (pure redenomination model)
-type LiquidityCube3D =
+-- | Concentrated liquidity in 3D space (cube of rate × duration × leverage)
+type Liquidity3D =
   { id :: String
   , owner :: String
   , tickLower :: TickCoordinate        -- Lower bound of cube
@@ -132,8 +243,8 @@ type LiquidityCube3D =
 type PoolPosition =
   { id :: PositionId
   , owner :: String
-  , liquidityCubeId :: String
-  , liquidity :: Number                -- Current liquidity (redenominated)
+  , liquidity3DId :: String
+  , liquidity :: Number               -- Current liquidity (redenominated)
   , principal :: Number               -- Original investment
   , currentValue :: Number            -- Current value after redenomination
   , lastRedenomination :: BlockNumber -- Last redenomination block
@@ -142,10 +253,10 @@ type PoolPosition =
 -- | Global pool state for 3D AMM
 type GlobalState3D =
   { currentTick :: TickCoordinate      -- Current position in 3D space
-  , sqrtRateX96 :: Number             -- Current sqrt rate in Q64.96
+  , sqrtRateX96 :: Number              -- Current sqrt rate in Q64.96
   , virtualBalances :: VirtualBalances -- Current virtual balances
-  , yieldRates :: YieldRates          -- Current yield rates per dimension
-  , totalLiquidity :: Number          -- Total active liquidity
+  , yieldRates :: YieldRates           -- Current yield rates per dimension
+  , totalLiquidity :: Number           -- Total active liquidity
   , lastRedenomination :: BlockNumber  -- Last global redenomination
   }
 
@@ -190,7 +301,7 @@ type CompositeBalance =
   { rateComponent :: Number
   , timeValueComponent :: Number  -- Duration-adjusted component
   , leverageComponent :: Number   -- Risk-adjusted component
-  , total :: Number              -- Combined composite value
+  , total :: Number               -- Combined composite value
   }
 
 -- | Loss distribution for risk waterfall
@@ -221,15 +332,77 @@ fromQ96 x = x / pow 2.0 96.0
 
 -- | Minimum liquidity constant
 minLiquidity :: Number
-minLiquidity = 1000.0
+minLiquidity = defaultProtocolConfig.pools.minLiquidity
 
 -- | Blocks per year (assuming ~12 second blocks)
 blocksPerYear :: Number
-blocksPerYear = 2628000.0
+blocksPerYear = defaultProtocolConfig.time.blocksPerYear
 
 -- | Monthly yield convergence rate
 monthlyConvergenceRate :: Number
-monthlyConvergenceRate = 0.001  -- 0.1% per month
+monthlyConvergenceRate = defaultProtocolConfig.pools.monthlyConvergenceRate
+
+-- | Calculate liquidity growth factor
+calculateGrowthFactor :: Number -> Number -> Number -> Number
+calculateGrowthFactor currentLiquidity baseLiquidity minRequired =
+  if baseLiquidity > 0.0 && currentLiquidity >= minRequired
+  then currentLiquidity / baseLiquidity
+  else 1.0
+
+-- | Check if tick is in range (inclusive)
+isTickInRange :: TickCoordinate -> TickCoordinate -> TickCoordinate -> Boolean
+isTickInRange tick lower upper =
+  tick.rateTick >= lower.rateTick && tick.rateTick <= upper.rateTick &&
+  tick.durationTick >= lower.durationTick && tick.durationTick <= upper.durationTick &&
+  tick.leverageTick >= lower.leverageTick && tick.leverageTick <= upper.leverageTick
+
+-- | Create empty tick data
+createEmptyTick :: TickCoordinate -> TickData
+createEmptyTick coord =
+  { coordinate: coord
+  , liquidity: 0.0
+  , liquidityNet: 0.0
+  , liquidityGross: 0.0
+  , initialized: false
+  }
+
+-- | Common error messages
+positionNotFoundError :: String
+positionNotFoundError = "Pool position not found"
+
+cubeNotFoundError :: String
+cubeNotFoundError = "Liquidity cube not found"
+
+insufficientLiquidityError :: String
+insufficientLiquidityError = "Insufficient liquidity"
+
+withdrawalFailedError :: String
+withdrawalFailedError = "Withdrawal failed"
+
+-- | Check and return Either with error
+requireFound :: forall a. Maybe a -> String -> Either String a
+requireFound Nothing errorMsg = Left errorMsg
+requireFound (Just value) _ = Right value
+
+-- | Check condition and return Either with error
+requireCondition :: Boolean -> String -> Either String Unit
+requireCondition true _ = Right unit
+requireCondition false errorMsg = Left errorMsg
+
+-- | Simple fee calculation
+calculateFee :: Number -> Number -> Number
+calculateFee amount feeRate = amount * feeRate / 10000.0
+
+-- | Get duration multiplier
+getDurationMultiplier :: Duration -> Number
+getDurationMultiplier Flash = flashDurationMultiplier
+getDurationMultiplier Monthly = monthlyDurationMultiplier
+getDurationMultiplier Swap = swapDurationMultiplier
+
+-- | Get leverage risk multiplier
+getLeverageRiskMultiplier :: Leverage -> Number
+getLeverageRiskMultiplier Senior = seniorLeverageRiskMultiplier
+getLeverageRiskMultiplier Junior = juniorLeverageRiskMultiplier
 
 --------------------------------------------------------------------------------
 -- POOL INITIALIZATION
@@ -240,7 +413,7 @@ initPool :: String -> TokenType -> Number -> DimensionWeights -> BlockNumber -> 
 initPool poolId token feeRate weights currentBlock =
   { id: poolId
   , token: token
-  , liquidityCubes: Map.empty
+  , liquidity3Ds: Map.empty
   , activeTicks: []
   , tickData: Map.empty
   , positions: Map.empty
@@ -256,17 +429,17 @@ initPool poolId token feeRate weights currentBlock =
 -- | Default risk parameters
 defaultRiskParameters :: RiskParameters
 defaultRiskParameters =
-  { alphaSenior: 1.0   -- 1x risk for Senior
-  , alphaJunior: 3.0   -- 3x risk for Junior
+  { alphaSenior: seniorLeverageRiskMultiplier
+  , alphaJunior: juniorLeverageRiskMultiplier
   }
 
 -- | Initialize global state
 initGlobalState :: BlockNumber -> GlobalState3D
 initGlobalState currentBlock =
-  { currentTick: { rateTick: 0, durationTick: 1, leverageTick: 0 }  -- Start at 0% rate, Monthly, Senior
-  , sqrtRateX96: toQ96 1.0  -- sqrt(1.0) in Q64.96 format
-  , virtualBalances: { r: 1000.0, d: 1000.0, l: 1000.0 }  -- Initial balanced liquidity
-  , yieldRates: { rateYield: 0.0001, durationYield: 0.00005, leverageYield: 0.00008 }  -- Initial yield rates per block
+  { currentTick: { rateTick: 0, durationTick: 1, leverageTick: 0 }  -- Start at 0% rate (1:1 price for Swap, 0% APR for Monthly), Monthly duration, Senior leverage
+  , sqrtRateX96: toQ96 1.0  -- sqrt(1.0) = price 1.0 in Q64.96 format
+  , virtualBalances: { r: initialVirtualBalance, d: initialVirtualBalance, l: initialVirtualBalance }  -- Initial balanced liquidity
+  , yieldRates: { rateYield: baseRateYield, durationYield: baseDurationYield, leverageYield: baseLeverageYield }  -- Initial yield rates per block
   , totalLiquidity: 0.0
   , lastRedenomination: currentBlock
   }
@@ -279,14 +452,14 @@ initGlobalState currentBlock =
 addLiquidity3D :: Pool -> String -> TickCoordinate -> TickCoordinate -> Number -> Number -> BlockNumber -> Pool
 addLiquidity3D pool owner tickLower tickUpper amount0 amount1 currentBlock =
   let
-    -- Create liquidity cube ID
-    cubeId = owner <> "-" <> coordinateKey tickLower <> "-" <> coordinateKey tickUpper
+    -- Create 3D liquidity position ID
+    position3DId = owner <> "-" <> coordinateKey tickLower <> "-" <> coordinateKey tickUpper
     
     -- Calculate liquidity from amounts
     liquidity = getLiquidityFor3DAmounts amount0 amount1 tickLower tickUpper pool.globalState.sqrtRateX96
     
-    -- Create liquidity cube
-    cube = { id: cubeId
+    -- Create 3D liquidity position (cube in rate × duration × leverage space)
+    position3D = { id: position3DId
            , owner: owner
            , tickLower: tickLower
            , tickUpper: tickUpper
@@ -296,10 +469,11 @@ addLiquidity3D pool owner tickLower tickUpper amount0 amount1 currentBlock =
            , initialized: true
            }
     
-    -- Create pool position
-    position = { id: cubeId
+    -- Create pool position with Int ID (using simple hash for model)
+    positionId = hashString position3DId
+    position = { id: positionId
                , owner: owner
-               , liquidityCubeId: cubeId
+               , liquidity3DId: position3DId
                , liquidity: liquidity
                , principal: amount0 + amount1
                , currentValue: amount0 + amount1
@@ -307,84 +481,128 @@ addLiquidity3D pool owner tickLower tickUpper amount0 amount1 currentBlock =
                }
     
     -- Update pool state
-    updatedCubes = Map.insert cubeId cube pool.liquidityCubes
-    updatedPositions = Map.insert cubeId position pool.positions
+    updated3Ds = Map.insert position3DId position3D pool.liquidity3Ds
+    updatedPositions = Map.insert positionId position pool.positions
     updatedActiveTicks = addToActiveTicks pool.activeTicks tickLower tickUpper
     updatedGlobalState = pool.globalState { totalLiquidity = pool.globalState.totalLiquidity + liquidity }
     
-  in pool { liquidityCubes = updatedCubes
-          , positions = updatedPositions
-          , activeTicks = updatedActiveTicks
-          , globalState = updatedGlobalState
-          , totalDeposited = pool.totalDeposited + amount0 + amount1  -- Track deposits
-          , lastUpdateBlock = currentBlock
-          }
+  in updatePoolState
+       (pool { liquidity3Ds = updated3Ds
+             , positions = updatedPositions
+             , activeTicks = updatedActiveTicks
+             , totalDeposited = pool.totalDeposited + amount0 + amount1  -- Track deposits
+             })
+       updatedGlobalState
+       currentBlock
 
 -- | Remove liquidity from a pool position
 removeLiquidity3D :: Pool -> PositionId -> Number -> BlockNumber -> Either String Pool
 removeLiquidity3D pool positionId liquidityAmount currentBlock = do
-  poolPosition <- case Map.lookup positionId pool.positions of
-    Nothing -> Left "Pool position not found"
-    Just p -> Right p
+  poolPosition <- requireFound (Map.lookup positionId pool.positions) positionNotFoundError
     
   -- First redenominate the pool position
   let redenominatedPosition = redenominatePoolPosition pool poolPosition currentBlock
   
-  if redenominatedPosition.liquidity < liquidityAmount
-    then Left "Insufficient liquidity"
-    else do
-      cube <- case Map.lookup position.liquidityCubeId pool.liquidityCubes of
-        Nothing -> Left "Liquidity cube not found"
-        Just c -> Right c
-      
-      -- Redenominate the cube first
-      let redenominatedCube = redenominateCube pool currentBlock cube
-      
-      let
-        -- Calculate amounts to return based on redenominated liquidity
-        shareOfCube = liquidityAmount / redenominatedCube.liquidity
-        amount0 = getAmount0For3DLiquidity liquidityAmount redenominatedCube.tickLower redenominatedCube.tickUpper pool.globalState.sqrtRateX96
-        amount1 = getAmount1For3DLiquidity liquidityAmount redenominatedCube.tickLower redenominatedCube.tickUpper pool.globalState.sqrtRateX96
-        
-        -- Update pool position
-        remainingLiquidity = redenominatedPosition.liquidity - liquidityAmount
-        poolPosition' = redenominatedPosition
-          { liquidity = remainingLiquidity
-          , currentValue = redenominatedPosition.currentValue * remainingLiquidity / redenominatedPosition.liquidity
-          }
-        
-        -- Update cube
-        cube' = redenominatedCube 
-          { liquidity = redenominatedCube.liquidity - liquidityAmount }
-        
-        -- Update pool state
-        positions' = if remainingLiquidity > minLiquidity
-                    then Map.insert positionId poolPosition' pool.positions
-                    else Map.delete positionId pool.positions
-        
-        cubes' = if cube'.liquidity > minLiquidity
-                then Map.insert cube.id cube' pool.liquidityCubes
-                else Map.delete cube.id pool.liquidityCubes
-        
-        globalState' = pool.globalState
-          { totalLiquidity = pool.globalState.totalLiquidity - liquidityAmount }
-        
-        -- Update total deposited (subtract withdrawn amounts)
-        totalDeposited' = pool.totalDeposited - (amount0 + amount1)
-        
-      pure $ pool
-        { positions = positions'
-        , liquidityCubes = cubes'
-        , globalState = globalState'
-        , totalDeposited = totalDeposited'
-        , lastUpdateBlock = currentBlock
-        }
+  _ <- requireCondition (redenominatedPosition.liquidity >= liquidityAmount) insufficientLiquidityError
+  
+  position3D <- requireFound (Map.lookup poolPosition.liquidity3DId pool.liquidity3Ds) "3D liquidity position not found"
+  
+  -- Redenominate the 3D position first
+  let redenominated3D = redenominate3D pool currentBlock position3D
+  
+  let
+    -- Calculate amounts to return based on redenominated liquidity
+    shareof3D = liquidityAmount / redenominated3D.liquidity
+    amount0 = getAmount0For3DLiquidity liquidityAmount redenominated3D.tickLower redenominated3D.tickUpper pool.globalState.sqrtRateX96
+    amount1 = getAmount1For3DLiquidity liquidityAmount redenominated3D.tickLower redenominated3D.tickUpper pool.globalState.sqrtRateX96
+    
+    -- Update pool position
+    remainingLiquidity = redenominatedPosition.liquidity - liquidityAmount
+    poolPosition' = redenominatedPosition
+      { liquidity = remainingLiquidity
+      , currentValue = redenominatedPosition.currentValue * remainingLiquidity / redenominatedPosition.liquidity
+      }
+    
+    -- Update 3D position
+    position3D' = redenominated3D 
+      { liquidity = redenominated3D.liquidity - liquidityAmount }
+    
+    -- Update pool state
+    positions' = if remainingLiquidity > minLiquidity
+                then Map.insert positionId poolPosition' pool.positions
+                else Map.delete positionId pool.positions
+    
+    liquidity3Ds' = if position3D'.liquidity > minLiquidity
+            then Map.insert position3D.id position3D' pool.liquidity3Ds
+            else Map.delete position3D.id pool.liquidity3Ds
+    
+    globalState' = pool.globalState
+      { totalLiquidity = pool.globalState.totalLiquidity - liquidityAmount }
+    
+    -- Update total deposited (subtract withdrawn amounts)
+    totalDeposited' = pool.totalDeposited - (amount0 + amount1)
+    
+  pure $ pool
+    { positions = positions'
+    , liquidity3Ds = liquidity3Ds'
+    , globalState = globalState'
+    , totalDeposited = totalDeposited'
+    , lastUpdateBlock = currentBlock
+    }
 
 --------------------------------------------------------------------------------
 -- SWAP OPERATIONS
 --------------------------------------------------------------------------------
 
+-- | Distribute fees to affected 3D liquidity positions (cubes in rate × duration × leverage space)
+distributeFees3D :: Array Liquidity3D -> Number -> BlockNumber -> Array Liquidity3D
+distributeFees3D affected3DPositions feeAmount currentBlock =
+  let
+    feePer3D = if Array.length affected3DPositions > 0 
+               then feeAmount / toNumber (Array.length affected3DPositions)
+               else 0.0
+    
+    distributeFees3DPosition position3D =
+      let
+        feeYield = if position3D.liquidity > 0.0
+                   then feePer3D / position3D.liquidity
+                   else 0.0
+        growthFactor = 1.0 + feeYield
+      in position3D { liquidity = position3D.liquidity * growthFactor
+                    , lastRedenomination = currentBlock
+                    }
+  in map distributeFees3DPosition affected3DPositions
+
+-- | Update pool state after swap
+updatePoolStateAfterSwap :: Pool -> TickCoordinate -> VirtualBalances -> Number -> Array Liquidity3D -> BlockNumber -> Pool
+updatePoolStateAfterSwap pool targetTick newBalances newSqrtRate updated3Ds currentBlock =
+  let
+    liquidity3Ds' = Array.foldl (\m p -> Map.insert p.id p m) pool.liquidity3Ds updated3Ds
+    globalState' = pool.globalState 
+      { currentTick = targetTick
+      , sqrtRateX96 = newSqrtRate
+      , virtualBalances = newBalances
+      }
+  in pool { liquidity3Ds = liquidity3Ds'
+          , globalState = globalState'
+          , lastUpdateBlock = currentBlock
+          }
+
+-- | Create swap result
+createSwapResult :: Number -> Number -> TickCoordinate -> Number -> Number -> SwapResult3D
+createSwapResult amountIn amountOut executionTick feeAmount sqrtRateAfter =
+  { amountIn: amountIn
+  , amountOut: amountOut
+  , executionTick: executionTick
+  , feeAmount: feeAmount
+  , sqrtRateAfter: sqrtRateAfter
+  }
+
 -- | Execute a swap through the 3D AMM with fee distribution via redenomination
+-- The rate tick interpretation depends on the duration:
+-- - Swap (duration=2): Direct token exchange at specified price tick
+-- - Monthly (duration=1): Lending position at specified APR tick  
+-- - Flash (duration=0): Single-block loan at specified fee tick
 swap3D :: Pool -> TickCoordinate -> Number -> Boolean -> BlockNumber -> Tuple Pool SwapResult3D
 swap3D pool targetTick amountIn isExactInput currentBlock =
   let
@@ -392,7 +610,7 @@ swap3D pool targetTick amountIn isExactInput currentBlock =
     currentBalances = pool.globalState.virtualBalances
     
     -- Calculate price impact using Balancer formula with risk adjustment
-    spotPrice = calculateSpotPrice3DWithRisk pool currentBalances pool.globalState.currentTick targetTick currentBlock
+    swapPrice = calculateSwapPrice3DWithRisk pool currentBalances pool.globalState.currentTick targetTick currentBlock
     
     -- Calculate output amount using invariant preservation with adjustments
     k_before = calculateInvariant3DWithAdjustments pool currentBalances pool.globalState.currentTick currentBlock
@@ -407,44 +625,15 @@ swap3D pool targetTick amountIn isExactInput currentBlock =
     -- Calculate new sqrt rate
     newSqrtRate = calculateNewSqrtRate pool.globalState.currentTick targetTick pool.globalState.sqrtRateX96
     
-    -- Distribute fees to affected cubes via redenomination
-    affectedCubes = getAffectedCubes pool pool.globalState.currentTick targetTick
-    feePerCube = if length affectedCubes > 0 
-                 then feeAmount / toNumber (length affectedCubes)
-                 else 0.0
-    
-    -- Redenominate affected cubes with fee distribution
-    distributeFeesCube cube =
-      let
-        feeYield = if cube.liquidity > 0.0
-                   then feePerCube / cube.liquidity
-                   else 0.0
-        growthFactor = 1.0 + feeYield
-      in cube { liquidity = cube.liquidity * growthFactor
-              , lastRedenomination = currentBlock
-              }
-    
-    updatedCubes = map distributeFeesCube affectedCubes
-    liquidityCubes' = foldl (\m c -> Map.insert c.id c m) pool.liquidityCubes updatedCubes
+    -- Distribute fees to affected 3D positions (cubes in the 3D space)
+    affected3DPositions = getAffected3DPositions pool pool.globalState.currentTick targetTick
+    updated3DPositions = distributeFees3D affected3DPositions feeAmount currentBlock
     
     -- Update pool state
-    globalState' = pool.globalState 
-      { currentTick = targetTick
-      , sqrtRateX96 = newSqrtRate
-      , virtualBalances = newBalances
-      }
+    pool' = updatePoolStateAfterSwap pool targetTick newBalances newSqrtRate updated3DPositions currentBlock
     
-    pool' = pool { liquidityCubes = liquidityCubes'
-                 , globalState = globalState'
-                 , lastUpdateBlock = currentBlock
-                 }
-    
-    swapResult = { amountIn: amountIn
-                 , amountOut: finalAmountOut
-                 , executionTick: targetTick
-                 , feeAmount: feeAmount
-                 , sqrtRateAfter: newSqrtRate
-                 }
+    -- Create swap result
+    swapResult = createSwapResult amountIn finalAmountOut targetTick feeAmount newSqrtRate
     
   in Tuple pool' swapResult
 
@@ -474,68 +663,55 @@ executeSwapInvariant pool balances targetTick amountIn isExactInput =
     -- Determine primary swap dimension and calculate new balances
     result = if rateChange && not durationChange && not leverageChange then
       -- Rate dimension swap
-      solveRateDimensionSwap balances amountIn currentWeights targetWeights k_current isExactInput
+      solveDimensionSwap balances amountIn currentWeights targetWeights k_current isExactInput RateDimension currentWd targetWd
     else if durationChange && not rateChange && not leverageChange then
       -- Duration dimension swap  
-      solveDurationDimensionSwap balances amountIn currentWeights targetWeights currentWd targetWd k_current isExactInput
+      solveDimensionSwap balances amountIn currentWeights targetWeights k_current isExactInput DurationDimension currentWd targetWd
     else if leverageChange && not rateChange && not durationChange then
       -- Leverage dimension swap
-      solveLeverageDimensionSwap balances amountIn currentWeights targetWeights k_current isExactInput  
+      solveDimensionSwap balances amountIn currentWeights targetWeights k_current isExactInput LeverageDimension currentWd targetWd
     else
       -- Multi-dimensional swap - use composite approach
       solveMultiDimensionalSwap pool balances amountIn currentTick targetTick k_current isExactInput
     
   in result
 
--- | Solve swap in rate dimension preserving invariant
-solveRateDimensionSwap :: VirtualBalances -> Number -> DimensionWeights -> DimensionWeights -> Number -> Boolean -> Tuple VirtualBalances Number
-solveRateDimensionSwap balances amountIn currentWeights targetWeights k_target isExactInput =
-  if isExactInput then
-    let
-      newR = balances.r + amountIn
-      -- Solve for amountOut maintaining invariant
-      -- K = newR^wr * D^wd * L^wl = k_target
-      -- Since D and L unchanged, we need to adjust virtual balances
-      amountOut = calculateOutputFromInvariant balances amountIn k_target currentWeights true
-    in Tuple (balances { r = newR }) amountOut
-  else
-    -- Exact output case
-    let
-      amountNeeded = calculateInputFromInvariant balances amountIn k_target currentWeights true
-      newR = balances.r + amountNeeded
-    in Tuple (balances { r = newR }) amountIn
+-- | Dimension type for unified swap solver
+data SwapDimension = RateDimension | DurationDimension | LeverageDimension
 
--- | Solve swap in duration dimension
-solveDurationDimensionSwap :: VirtualBalances -> Number -> DimensionWeights -> DimensionWeights -> Number -> Number -> Number -> Boolean -> Tuple VirtualBalances Number  
-solveDurationDimensionSwap balances amountIn currentWeights targetWeights currentWd targetWd k_target isExactInput =
+-- | Unified dimension swap solver
+solveDimensionSwap :: VirtualBalances -> Number -> DimensionWeights -> DimensionWeights -> Number -> Boolean -> SwapDimension -> Number -> Number -> Tuple VirtualBalances Number
+solveDimensionSwap balances amountIn currentWeights targetWeights k_target isExactInput dimension currentWd targetWd =
   let
-    -- Duration swaps affect time value
-    weightRatio = targetWd / currentWd
+    -- Calculate weight ratio for duration swaps
+    weightRatio = if currentWd > 0.0 then targetWd / currentWd else 1.0
+    
+    -- Determine which dimension to update and whether it's primary
+    updateBalance = case dimension of
+      RateDimension -> \b amt -> b { r = b.r + amt }
+      DurationDimension -> \b amt -> b { d = b.d + amt * weightRatio }
+      LeverageDimension -> \b amt -> b { l = b.l + amt }
+    
+    isPrimaryDimension = case dimension of
+      RateDimension -> true
+      _ -> false
   in
     if isExactInput then
       let
-        newD = balances.d + amountIn * weightRatio
-        amountOut = calculateOutputFromInvariant balances amountIn k_target currentWeights false
-      in Tuple (balances { d = newD }) amountOut
+        amountToAdd = case dimension of
+          DurationDimension -> amountIn * weightRatio
+          _ -> amountIn
+        newBalances = updateBalance balances amountToAdd
+        amountOut = calculateOutputFromInvariant balances amountIn k_target currentWeights isPrimaryDimension
+      in Tuple newBalances amountOut
     else
       let
-        amountNeeded = calculateInputFromInvariant balances amountIn k_target currentWeights false
-        newD = balances.d + amountNeeded * weightRatio
-      in Tuple (balances { d = newD }) amountIn
-
--- | Solve swap in leverage dimension
-solveLeverageDimensionSwap :: VirtualBalances -> Number -> DimensionWeights -> DimensionWeights -> Number -> Boolean -> Tuple VirtualBalances Number
-solveLeverageDimensionSwap balances amountIn currentWeights targetWeights k_target isExactInput =
-  if isExactInput then
-    let
-      newL = balances.l + amountIn
-      amountOut = calculateOutputFromInvariant balances amountIn k_target currentWeights false
-    in Tuple (balances { l = newL }) amountOut
-  else
-    let
-      amountNeeded = calculateInputFromInvariant balances amountIn k_target currentWeights false  
-      newL = balances.l + amountNeeded
-    in Tuple (balances { l = newL }) amountIn
+        amountNeeded = calculateInputFromInvariant balances amountIn k_target currentWeights isPrimaryDimension
+        amountToAdd = case dimension of
+          DurationDimension -> amountNeeded * weightRatio
+          _ -> amountNeeded
+        newBalances = updateBalance balances amountToAdd
+      in Tuple newBalances amountIn
 
 -- | Solve multi-dimensional swap using path finding
 solveMultiDimensionalSwap :: Pool -> VirtualBalances -> Number -> TickCoordinate -> TickCoordinate -> Number -> Boolean -> Tuple VirtualBalances Number
@@ -603,34 +779,34 @@ calculateOutputFromInvariant balances amountIn k_target weights isRateDimension 
 calculateInputFromInvariant :: VirtualBalances -> Number -> Number -> DimensionWeights -> Boolean -> Number
 calculateInputFromInvariant balances desiredOutput k_target weights isRateDimension =
   -- Reverse calculation of calculateOutputFromInvariant
-  desiredOutput * 1.1  -- Add 10% buffer for now, would use precise calculation
+  desiredOutput * defaultSwapBuffer  -- Add buffer for slippage protection
 
--- | Get liquidity cubes affected by a swap
-getAffectedCubes :: Pool -> TickCoordinate -> TickCoordinate -> Array LiquidityCube3D
-getAffectedCubes pool fromTick toTick =
+-- | Get 3D liquidity positions affected by a swap
+getAffected3DPositions :: Pool -> TickCoordinate -> TickCoordinate -> Array Liquidity3D
+getAffected3DPositions pool fromTick toTick =
   let
-    -- Check if cube overlaps with swap path in all dimensions
-    isAffected cube =
+    -- Check if 3D position (cube) overlaps with swap path in all dimensions
+    isAffected position3D =
       -- Rate dimension overlap
-      let rateOverlap = cube.tickLower.rateTick <= max fromTick.rateTick toTick.rateTick &&
-                        cube.tickUpper.rateTick >= min fromTick.rateTick toTick.rateTick
+      let rateOverlap = position3D.tickLower.rateTick <= max fromTick.rateTick toTick.rateTick &&
+                        position3D.tickUpper.rateTick >= min fromTick.rateTick toTick.rateTick
           
           -- Duration dimension overlap  
-          durationOverlap = cube.tickLower.durationTick <= max fromTick.durationTick toTick.durationTick &&
-                           cube.tickUpper.durationTick >= min fromTick.durationTick toTick.durationTick
+          durationOverlap = position3D.tickLower.durationTick <= max fromTick.durationTick toTick.durationTick &&
+                           position3D.tickUpper.durationTick >= min fromTick.durationTick toTick.durationTick
           
           -- Leverage dimension overlap
-          leverageOverlap = cube.tickLower.leverageTick <= max fromTick.leverageTick toTick.leverageTick &&
-                           cube.tickUpper.leverageTick >= min fromTick.leverageTick toTick.leverageTick
+          leverageOverlap = position3D.tickLower.leverageTick <= max fromTick.leverageTick toTick.leverageTick &&
+                           position3D.tickUpper.leverageTick >= min fromTick.leverageTick toTick.leverageTick
       
-      -- Cube is affected if it overlaps in all dimensions that are changing
+      -- 3D position is affected if it overlaps in all dimensions that are changing
       in if fromTick.rateTick /= toTick.rateTick then rateOverlap
          else if fromTick.durationTick /= toTick.durationTick then durationOverlap  
          else if fromTick.leverageTick /= toTick.leverageTick then leverageOverlap
          else -- Multi-dimensional swap
            rateOverlap && durationOverlap && leverageOverlap
     
-  in filter isAffected (values pool.liquidityCubes)
+  in Array.filter isAffected (Array.fromFoldable (values pool.liquidity3Ds))
 
 --------------------------------------------------------------------------------
 -- REDENOMINATION SYSTEM
@@ -638,57 +814,59 @@ getAffectedCubes pool fromTick toTick =
 
 -- | Redenominate pool positions based on pool performance and yield
 redenominatePoolPositions :: Pool -> BlockNumber -> Pool
-redenominatePositions pool currentBlock =
+redenominatePoolPositions pool currentBlock =
   let
-    -- Redenominate all liquidity cubes with risk waterfall
-    redenominatedCubes = Map.map (redenominateCubeWithWaterfall pool currentBlock) pool.liquidityCubes
+    -- Redenominate all 3D liquidity positions (cubes) with risk waterfall
+    redenominated3Ds = map (redenominate3DWithWaterfall pool currentBlock) pool.liquidity3Ds
     
-    -- Then redenominate pool positions based on their cubes
+    -- Then redenominate pool positions based on their 3D positions
     redenominatePos pos = 
-      case Map.lookup pos.liquidityCubeId redenominatedCubes of
+      case Map.lookup pos.liquidity3DId redenominated3Ds of
         Nothing -> pos
-        Just cube -> redenominatePoolPositionWithCube pos cube currentBlock
+        Just position3D -> redenominatePoolPositionWith3D pos position3D currentBlock
     
-    positions' = Map.map redenominatePos pool.positions
+    positions' = map redenominatePos pool.positions
     
     -- Update global state
     globalState' = pool.globalState { lastRedenomination = currentBlock }
     
   in pool { positions = positions'
-          , liquidityCubes = redenominatedCubes
+          , liquidity3Ds = redenominated3Ds
           , globalState = globalState'
           }
 
--- | Redenominate a single liquidity cube
-redenominateCube :: Pool -> BlockNumber -> LiquidityCube3D -> LiquidityCube3D
-redenominateCube pool currentBlock cube =
+-- | Calculate yield growth factor for redenomination
+calculateYieldGrowthFactor :: Pool -> Liquidity3D -> Int -> Number
+calculateYieldGrowthFactor pool position3D blocksSince =
   let
-    blocksSince = currentBlock - cube.lastRedenomination
-    
     -- Calculate yield from different sources
     rateYield = pool.globalState.yieldRates.rateYield * toNumber blocksSince
-    durationYield = calculateDurationYield cube blocksSince
-    leverageYield = calculateLeverageYield cube blocksSince pool.globalState.yieldRates.leverageYield
+    durationYield = calculateDurationYield position3D blocksSince
+    leverageYield = calculateLeverageYield position3D blocksSince pool.globalState.yieldRates.leverageYield
     
     -- Total yield (compounded)
     totalYield = rateYield + durationYield + leverageYield
-    growthFactor = pow (1.0 + totalYield) (toNumber blocksSince / blocksPerYear)
-    
-    -- Apply redenomination
-    newLiquidity = cube.liquidity * growthFactor
-    
-  in cube { liquidity = newLiquidity
-          , lastRedenomination = currentBlock
-          }
+  in pow (1.0 + totalYield) (toNumber blocksSince / blocksPerYear)
 
--- | Redenominate a pool position based on its cube
-redenominatePoolPositionWithCube :: PoolPosition -> LiquidityCube3D -> BlockNumber -> PoolPosition
-redenominatePoolPositionWithCube pos cube currentBlock =
+-- | Redenominate a single 3D liquidity position (cube in 3D space)
+redenominate3D :: Pool -> BlockNumber -> Liquidity3D -> Liquidity3D
+redenominate3D pool currentBlock position3D =
   let
-    -- Pool position value grows proportionally with cube growth
-    cubeGrowth = cube.liquidity / cube.liquidityBase
-    newValue = pos.principal * cubeGrowth
-    newLiquidity = pos.liquidity * cubeGrowth
+    blocksSince = currentBlock - position3D.lastRedenomination
+    growthFactor = calculateYieldGrowthFactor pool position3D blocksSince
+    newLiquidity = position3D.liquidity * growthFactor
+    
+  in position3D { liquidity = newLiquidity
+                , lastRedenomination = currentBlock
+                }
+
+-- | Redenominate a pool position based on its 3D position
+redenominatePoolPositionWith3D :: PoolPosition -> Liquidity3D -> BlockNumber -> PoolPosition
+redenominatePoolPositionWith3D pos position3D currentBlock =
+  let
+    position3DGrowth = calculateGrowthFactor position3D.liquidity position3D.liquidityBase minLiquidity
+    newValue = pos.principal * position3DGrowth
+    newLiquidity = pos.liquidity * position3DGrowth
     
   in pos { liquidity = newLiquidity
          , currentValue = newValue
@@ -698,16 +876,16 @@ redenominatePoolPositionWithCube pos cube currentBlock =
 -- | Redenominate a single pool position (for use in removeLiquidity)
 redenominatePoolPosition :: Pool -> PoolPosition -> BlockNumber -> PoolPosition
 redenominatePoolPosition pool pos currentBlock =
-  case Map.lookup pos.liquidityCubeId pool.liquidityCubes of
+  case Map.lookup pos.liquidity3DId pool.liquidity3Ds of
     Nothing -> pos
-    Just cube -> 
-      let redenominatedCube = redenominateCube pool currentBlock cube
-      in redenominatePoolPositionWithCube pos redenominatedCube currentBlock
+    Just position3D -> 
+      let redenominated3D = redenominate3D pool currentBlock position3D
+      in redenominatePoolPositionWith3D pos redenominated3D currentBlock
 
 -- | Calculate duration-based yield using time convergence
-calculateDurationYield :: LiquidityCube3D -> Int -> Number
-calculateDurationYield cube blocksSince =
-  case cube.tickLower.durationTick of
+calculateDurationYield :: Liquidity3D -> Int -> Number
+calculateDurationYield position3D blocksSince =
+  case position3D.tickLower.durationTick of
     1 -> -- Monthly: yield from time decay
       let
         -- Calculate progress towards maturity
@@ -719,14 +897,14 @@ calculateDurationYield cube blocksSince =
         convergenceYield = progressToMaturity * monthlyConvergenceRate
         
       in convergenceYield * toNumber blocksSince / toNumber blocksPerMonth
-    _ -> 0.0  -- No time value for Flash/Spot
+    _ -> 0.0  -- No time value for Flash/Swap
 
 -- | Calculate leverage-based yield
-calculateLeverageYield :: LiquidityCube3D -> Int -> Number -> Number
-calculateLeverageYield cube blocksSince baseYield =
-  case cube.tickLower.leverageTick of
+calculateLeverageYield :: Liquidity3D -> Int -> Number -> Number
+calculateLeverageYield position3D blocksSince baseYield =
+  case position3D.tickLower.leverageTick of
     0 -> baseYield * toNumber blocksSince  -- Senior: base yield
-    1 -> baseYield * 1.5 * toNumber blocksSince  -- Junior: 50% higher yield
+    1 -> baseYield * juniorYieldPremium * toNumber blocksSince  -- Junior: higher yield
     _ -> 0.0
 
 -- | Calculate total pool value from virtual balances
@@ -741,11 +919,14 @@ calculateTotalPoolValue pool =
 --------------------------------------------------------------------------------
 
 -- | Get sqrt rate at a specific tick (Q64.96 format)
+-- For Swap: tick 0 = price 1.0, tick 100 = price ~1.01 (1% premium)
+-- For Monthly: tick 500 = 5% APR lending rate
+-- For Flash: tick 30 = 0.3% fee for single-block loan
 getSqrtRateAtTick :: Int -> Number
 getSqrtRateAtTick tick =
   let
     tickNumber = toNumber tick
-    rate = pow 1.0001 (tickNumber / 100.0)  -- 1% = 100 ticks
+    rate = pow tickBase (tickNumber / ticksPerPercent)  -- 1% = 100 ticks (applies to all durations)
     sqrtRate = pow rate 0.5
   in toQ96 sqrtRate
 
@@ -755,50 +936,61 @@ getTickAtSqrtRate sqrtRateX96 =
   let
     sqrtRate = fromQ96 sqrtRateX96
     rate = sqrtRate * sqrtRate
-    tick = log rate / log 1.0001 * 100.0
+    tick = log rate / log tickBase * ticksPerPercent
   in round tick
+
+-- | Token amount type for clarity
+data TokenAmount = Amount0 | Amount1
+
+-- | Get duration multiplier from tick
+getDurationMultiplierFromTick :: Int -> Number
+getDurationMultiplierFromTick 0 = flashDurationMultiplier
+getDurationMultiplierFromTick 1 = monthlyDurationMultiplier
+getDurationMultiplierFromTick 2 = swapDurationMultiplier
+getDurationMultiplierFromTick _ = 1.0
+
+-- | Get leverage multiplier from tick
+getLeverageMultiplierFromTick :: Int -> Number
+getLeverageMultiplierFromTick 0 = seniorLeverageRiskMultiplier
+getLeverageMultiplierFromTick 1 = juniorLeverageRiskMultiplier  
+getLeverageMultiplierFromTick _ = 1.0
+
+-- | Calculate token amount for 3D liquidity (unified)
+getAmountFor3DLiquidity :: TokenAmount -> Number -> TickCoordinate -> TickCoordinate -> Number -> Number
+getAmountFor3DLiquidity tokenAmount liquidity tickLower tickUpper sqrtRateX96Current =
+  let
+    sqrtRateLower = getSqrtRateAtTick tickLower.rateTick
+    sqrtRateUpper = getSqrtRateAtTick tickUpper.rateTick
+    q96 = pow 2.0 96.0
+    
+    -- Calculate base amount using concentrated liquidity formula
+    baseAmount = case tokenAmount of
+      Amount0 ->
+        if sqrtRateX96Current <= sqrtRateLower
+        then liquidity * (1.0 / sqrtRateLower - 1.0 / sqrtRateUpper) * q96
+        else if sqrtRateX96Current < sqrtRateUpper
+        then liquidity * (1.0 / sqrtRateX96Current - 1.0 / sqrtRateUpper) * q96
+        else 0.0
+      Amount1 ->
+        if sqrtRateX96Current <= sqrtRateLower
+        then 0.0
+        else if sqrtRateX96Current < sqrtRateUpper
+        then liquidity * (sqrtRateX96Current - sqrtRateLower) / q96
+        else liquidity * (sqrtRateUpper - sqrtRateLower) / q96
+    
+    -- Apply 3D multipliers (use average of lower and upper ticks)
+    durationMult = (getDurationMultiplierFromTick tickLower.durationTick + getDurationMultiplierFromTick tickUpper.durationTick) / 2.0
+    leverageMult = (getLeverageMultiplierFromTick tickLower.leverageTick + getLeverageMultiplierFromTick tickUpper.leverageTick) / 2.0
+    
+  in baseAmount * durationMult * leverageMult
 
 -- | Calculate amount0 for 3D liquidity
 getAmount0For3DLiquidity :: Number -> TickCoordinate -> TickCoordinate -> Number -> Number
-getAmount0For3DLiquidity liquidity tickLower tickUpper sqrtRateX96Current =
-  let
-    sqrtRateLower = getSqrtRateAtTick tickLower.rateTick
-    sqrtRateUpper = getSqrtRateAtTick tickUpper.rateTick
-    q96 = pow 2.0 96.0
-    
-    -- Standard concentrated liquidity formula
-    amount = if sqrtRateX96Current <= sqrtRateLower
-             then liquidity * (1.0 / sqrtRateLower - 1.0 / sqrtRateUpper) * q96
-             else if sqrtRateX96Current < sqrtRateUpper
-             then liquidity * (1.0 / sqrtRateX96Current - 1.0 / sqrtRateUpper) * q96
-             else 0.0
-    
-    -- Apply 3D multipliers
-    durationMult = getDurationMultiplier tickLower.durationTick tickUpper.durationTick
-    leverageMult = getLeverageMultiplier tickLower.leverageTick tickUpper.leverageTick
-    
-  in amount * durationMult * leverageMult
+getAmount0For3DLiquidity = getAmountFor3DLiquidity Amount0
 
 -- | Calculate amount1 for 3D liquidity
 getAmount1For3DLiquidity :: Number -> TickCoordinate -> TickCoordinate -> Number -> Number
-getAmount1For3DLiquidity liquidity tickLower tickUpper sqrtRateX96Current =
-  let
-    sqrtRateLower = getSqrtRateAtTick tickLower.rateTick
-    sqrtRateUpper = getSqrtRateAtTick tickUpper.rateTick
-    q96 = pow 2.0 96.0
-    
-    -- Standard concentrated liquidity formula
-    amount = if sqrtRateX96Current <= sqrtRateLower
-             then 0.0
-             else if sqrtRateX96Current < sqrtRateUpper
-             then liquidity * (sqrtRateX96Current - sqrtRateLower) / q96
-             else liquidity * (sqrtRateUpper - sqrtRateLower) / q96
-    
-    -- Apply 3D multipliers
-    durationMult = getDurationMultiplier tickLower.durationTick tickUpper.durationTick
-    leverageMult = getLeverageMultiplier tickLower.leverageTick tickUpper.leverageTick
-    
-  in amount * durationMult * leverageMult
+getAmount1For3DLiquidity = getAmountFor3DLiquidity Amount1
 
 -- | Calculate liquidity from amounts in 3D
 getLiquidityFor3DAmounts :: Number -> Number -> TickCoordinate -> TickCoordinate -> Number -> Number
@@ -817,9 +1009,9 @@ getLiquidityFor3DAmounts amount0 amount1 tickLower tickUpper sqrtRateX96Current 
                   (amount1 * q96 / (sqrtRateX96Current - sqrtRateLower))
                 else amount1 * q96 / (sqrtRateUpper - sqrtRateLower)
     
-    -- Apply dimension divisors
-    durationDiv = getDurationMultiplier tickLower.durationTick tickUpper.durationTick
-    leverageDiv = getLeverageMultiplier tickLower.leverageTick tickUpper.leverageTick
+    -- Apply dimension divisors (use average of lower and upper ticks)
+    durationDiv = (getDurationMultiplierFromTick tickLower.durationTick + getDurationMultiplierFromTick tickUpper.durationTick) / 2.0
+    leverageDiv = (getLeverageMultiplierFromTick tickLower.leverageTick + getLeverageMultiplierFromTick tickUpper.leverageTick) / 2.0
     
   in liquidity / (durationDiv * leverageDiv)
 
@@ -827,9 +1019,9 @@ getLiquidityFor3DAmounts amount0 amount1 tickLower tickUpper sqrtRateX96Current 
 -- BALANCER MATH
 --------------------------------------------------------------------------------
 
--- | Calculate spot price between two dimensions using weighted formula
-calculateSpotPrice3D :: VirtualBalances -> DimensionWeights -> TickCoordinate -> TickCoordinate -> Number
-calculateSpotPrice3D balances weights fromTick toTick =
+-- | Calculate swap price between two dimensions using weighted formula
+calculateSwapPrice3D :: VirtualBalances -> DimensionWeights -> TickCoordinate -> TickCoordinate -> Number
+calculateSwapPrice3D balances weights fromTick toTick =
   let
     -- Determine which dimensions are involved in the swap
     rateChange = fromTick.rateTick /= toTick.rateTick
@@ -837,9 +1029,12 @@ calculateSpotPrice3D balances weights fromTick toTick =
     leverageChange = fromTick.leverageTick /= toTick.leverageTick
     
   in
-    -- Calculate spot price based on dimension changes
+    -- Calculate swap price based on dimension changes
     if rateChange && not durationChange && not leverageChange then
-      -- Rate dimension swap: price of rate in terms of base
+      -- Rate dimension swap: meaning depends on duration
+      -- Swap: exchange rate between tokens (tick 100 = 1.01 price)
+      -- Monthly: lending rate differential (tick 500 = 5% APR)
+      -- Flash: fee percentage change (tick 30 = 0.3% fee)
       let tickDiff = toNumber (toTick.rateTick - fromTick.rateTick) / 10000.0
           basePrice = pow 1.0001 tickDiff  -- Standard tick to price conversion
       in basePrice
@@ -848,17 +1043,17 @@ calculateSpotPrice3D balances weights fromTick toTick =
       -- Duration dimension swap: price reflects time value
       let fromDuration = tickToDuration fromTick.durationTick
           toDuration = tickToDuration toTick.durationTick
-          -- Flash = 0.8x, Monthly = 1.0x, Spot = 1.2x multiplier
-          fromMult = getDurationMultiplier fromTick.durationTick fromTick.durationTick
-          toMult = getDurationMultiplier toTick.durationTick toTick.durationTick
+          -- Flash = 0.8x, Monthly = 1.0x, Swap = 1.2x multiplier
+          fromMult = getDurationMultiplierFromTick fromTick.durationTick
+          toMult = getDurationMultiplierFromTick toTick.durationTick
           balanceRatio = balances.d / balances.d  -- Would use actual reserves
           weightRatio = weights.wd / weights.wd
       in toMult / fromMult * balanceRatio * weightRatio
       
     else if leverageChange && not rateChange && not durationChange then
       -- Leverage dimension swap: price reflects risk premium
-      let fromLeverage = if fromTick.leverageTick == 0 then 1.0 else 3.0
-          toLeverage = if toTick.leverageTick == 0 then 1.0 else 3.0
+      let fromLeverage = getLeverageMultiplierFromTick fromTick.leverageTick
+          toLeverage = getLeverageMultiplierFromTick toTick.leverageTick
           balanceRatio = balances.l / balances.l  -- Would use actual reserves
           weightRatio = weights.wl / weights.wl
       in toLeverage / fromLeverage * balanceRatio * weightRatio
@@ -867,9 +1062,9 @@ calculateSpotPrice3D balances weights fromTick toTick =
       -- Multi-dimensional: use composite pricing
       1.0  -- Would calculate path-dependent price
 
--- | Calculate spot price with risk adjustment
-calculateSpotPrice3DWithRisk :: Pool -> VirtualBalances -> TickCoordinate -> TickCoordinate -> BlockNumber -> Number
-calculateSpotPrice3DWithRisk pool balances fromTick toTick currentBlock =
+-- | Calculate swap price with risk adjustment
+calculateSwapPrice3DWithRisk :: Pool -> VirtualBalances -> TickCoordinate -> TickCoordinate -> BlockNumber -> Number
+calculateSwapPrice3DWithRisk pool balances fromTick toTick currentBlock =
   let
     -- Get risk-adjusted weights for both ticks
     fromWeights = calculateEffectiveWeights pool.weights pool.riskParams fromTick
@@ -911,7 +1106,7 @@ calculateSpotPrice3DWithRisk pool balances fromTick toTick currentBlock =
       
     else
       -- Multi-dimensional swap: use base calculation
-      calculateSpotPrice3D balances pool.weights fromTick toTick
+      calculateSwapPrice3D balances pool.weights fromTick toTick
 
 -- | Calculate AMM invariant K = R^wr * D^wd * L^wl
 calculateInvariant3D :: VirtualBalances -> DimensionWeights -> Number
@@ -923,10 +1118,9 @@ calculateEffectiveWeights :: DimensionWeights -> RiskParameters -> TickCoordinat
 calculateEffectiveWeights baseWeights riskParams tick =
   let
     -- Apply risk multiplier based on leverage
-    leverageMultiplier = case tick.leverageTick of
-      0 -> riskParams.alphaSenior   -- Senior: 1x
-      1 -> riskParams.alphaJunior   -- Junior: 3x
-      _ -> 1.0
+    leverageMultiplier = if tick.leverageTick == 0 
+                        then riskParams.alphaSenior
+                        else riskParams.alphaJunior
     
     -- Adjust leverage weight by risk multiplier
     adjustedWl = baseWeights.wl * leverageMultiplier
@@ -946,7 +1140,7 @@ calculateTimeAdjustedWeight durationTick startBlock currentBlock baseWeight =
         blocksElapsed = currentBlock - startBlock
         timeToMaturity = max 0.0 (1.0 - toNumber blocksElapsed / toNumber blocksPerMonth)
       in baseWeight * timeToMaturity
-    _ -> baseWeight  -- No time adjustment for Flash/Spot
+    _ -> baseWeight  -- No time adjustment for Flash/Swap
 
 -- | Calculate invariant with risk and time adjustments
 calculateInvariant3DWithAdjustments :: Pool -> VirtualBalances -> TickCoordinate -> BlockNumber -> Number
@@ -969,15 +1163,27 @@ calculateInvariant3DWithAdjustments pool balances tick currentBlock =
      pow balances.d finalWeights.wd * 
      pow balances.l finalWeights.wl
 
+-- | Calculate dimension-specific liquidity
+calculateDimensionLiquidity :: (Liquidity3D -> Boolean) -> Array Liquidity3D -> Number
+calculateDimensionLiquidity predicate positions3D = sum $ map (\pos3D -> if predicate pos3D then pos3D.liquidity else 0.0) positions3D
+
+-- | Convert liquidity to virtual balance for a dimension
+liquidityToVirtualBalance :: Number -> Int -> Int -> Number
+liquidityToVirtualBalance liquidity tickValue tickType =
+  case tickType of
+    0 -> liquidity * fromQ96 (getSqrtRateAtTick tickValue)  -- Rate dimension
+    1 -> liquidity * getDurationMultiplierFromTick tickValue  -- Duration dimension
+    _ -> liquidity * getLeverageMultiplierFromTick tickValue  -- Leverage dimension
+
 -- | Get virtual balances for a tick coordinate
 getVirtualBalances :: Pool -> TickCoordinate -> VirtualBalances
 getVirtualBalances pool tick =
   let
-    -- Aggregate liquidity from all cubes that contain this tick
-    relevantCubes = filter (cubeContainsTick tick) (values pool.liquidityCubes)
+    -- Aggregate liquidity from all 3D positions (cubes) that contain this tick
+    relevant3DPositions = Array.filter (position3DContainsTick tick) (Array.fromFoldable (values pool.liquidity3Ds))
     
     -- Calculate total liquidity at this tick
-    totalLiquidityAtTick = sum (map _.liquidity relevantCubes)
+    totalLiquidityAtTick = sum (map _.liquidity relevant3DPositions)
     
   in
     -- If no liquidity at tick, use global balances
@@ -985,41 +1191,29 @@ getVirtualBalances pool tick =
       pool.globalState.virtualBalances
     else
       let
-        -- Calculate dimension-specific liquidity
-        rateLiquidity = sum $ map (\cube -> 
-          if cube.tickLower.rateTick <= tick.rateTick && 
-             cube.tickUpper.rateTick >= tick.rateTick
-          then cube.liquidity else 0.0) relevantCubes
+        -- Calculate dimension-specific liquidity using helper
+        rateLiquidity = calculateDimensionLiquidity 
+          (\pos3D -> pos3D.tickLower.rateTick <= tick.rateTick && pos3D.tickUpper.rateTick >= tick.rateTick) 
+          relevant3DPositions
           
-        durationLiquidity = sum $ map (\cube ->
-          if cube.tickLower.durationTick <= tick.durationTick && 
-             cube.tickUpper.durationTick >= tick.durationTick
-          then cube.liquidity else 0.0) relevantCubes
+        durationLiquidity = calculateDimensionLiquidity
+          (\pos3D -> pos3D.tickLower.durationTick <= tick.durationTick && pos3D.tickUpper.durationTick >= tick.durationTick)
+          relevant3DPositions
           
-        leverageLiquidity = sum $ map (\cube ->
-          if cube.tickLower.leverageTick <= tick.leverageTick && 
-             cube.tickUpper.leverageTick >= tick.leverageTick
-          then cube.liquidity else 0.0) relevantCubes
+        leverageLiquidity = calculateDimensionLiquidity
+          (\pos3D -> pos3D.tickLower.leverageTick <= tick.leverageTick && pos3D.tickUpper.leverageTick >= tick.leverageTick)
+          relevant3DPositions
         
-        -- Convert to virtual balances using sqrt pricing
-        sqrtRate = getSqrtRateAtTick tick.rateTick
-        
-        -- Virtual balances proportional to liquidity and price
-        virtualR = rateLiquidity * fromQ96 sqrtRate
-        virtualD = durationLiquidity * getDurationMultiplier tick.durationTick tick.durationTick
-        virtualL = leverageLiquidity * getLeverageMultiplier tick.leverageTick tick.leverageTick
+        -- Convert to virtual balances
+        virtualR = liquidityToVirtualBalance rateLiquidity tick.rateTick 0
+        virtualD = liquidityToVirtualBalance durationLiquidity tick.durationTick 1
+        virtualL = liquidityToVirtualBalance leverageLiquidity tick.leverageTick 2
         
       in { r: virtualR, d: virtualD, l: virtualL }
 
--- | Check if a cube contains a specific tick coordinate
-cubeContainsTick :: TickCoordinate -> LiquidityCube3D -> Boolean
-cubeContainsTick tick cube =
-  cube.tickLower.rateTick <= tick.rateTick && 
-  cube.tickUpper.rateTick >= tick.rateTick &&
-  cube.tickLower.durationTick <= tick.durationTick && 
-  cube.tickUpper.durationTick >= tick.durationTick &&
-  cube.tickLower.leverageTick <= tick.leverageTick && 
-  cube.tickUpper.leverageTick >= tick.leverageTick
+-- | Check if a 3D position (cube) contains a specific tick coordinate
+position3DContainsTick :: TickCoordinate -> Liquidity3D -> Boolean
+position3DContainsTick tick position3D = isTickInRange tick position3D.tickLower position3D.tickUpper
 
 -- | Calculate new sqrt rate after tick movement
 calculateNewSqrtRate :: TickCoordinate -> TickCoordinate -> Number -> Number
@@ -1066,13 +1260,13 @@ calculateLiquidityFromAmount pool amount tickLower tickUpper =
       -- Current tick above range  
       amount / (fromQ96 sqrtRateUpper - fromQ96 sqrtRateLower)
     
-    -- Apply dimension multipliers
-    durationMult = getDurationMultiplier tickLower.durationTick tickUpper.durationTick
-    leverageMult = getLeverageMultiplier tickLower.leverageTick tickUpper.leverageTick
+    -- Apply dimension multipliers (use average of lower and upper ticks)
+    durationMult = (getDurationMultiplierFromTick tickLower.durationTick + getDurationMultiplierFromTick tickUpper.durationTick) / 2.0
+    leverageMult = (getLeverageMultiplierFromTick tickLower.leverageTick + getLeverageMultiplierFromTick tickUpper.leverageTick) / 2.0
     
     -- Adjust for dimensions not in range
-    dimensionAdjustment = (if durationInRange then 1.0 else 0.8) *
-                         (if leverageInRange then 1.0 else 0.9)
+    dimensionAdjustment = (if durationInRange then 1.0 else swapSolverBufferRatio) *
+                         (if leverageInRange then 1.0 else swapSolverPremiumRatio)
     
   in baseLiquidity * dimensionAdjustment / (durationMult * leverageMult)
 
@@ -1084,8 +1278,8 @@ calculateLiquidityFromAmount pool amount tickLower tickUpper =
 getTotalLiquidityByLeverage :: Pool -> Int -> Number
 getTotalLiquidityByLeverage pool leverageTick =
   let
-    matchingCubes = filter (\cube -> cube.tickLower.leverageTick == leverageTick) (values pool.liquidityCubes)
-  in sum (map _.liquidity matchingCubes)
+    matching3DPositions = Array.filter (\pos3D -> pos3D.tickLower.leverageTick == leverageTick) (Array.fromFoldable (values pool.liquidity3Ds))
+  in sum (map _.liquidity matching3DPositions)
 
 -- | Calculate pool performance ratio
 calculatePoolPerformance :: Pool -> Number
@@ -1114,12 +1308,12 @@ calculateLossDistribution pool totalLoss =
      , seniorLoss: seniorLoss
      }
 
--- | Redenominate cube with risk waterfall
-redenominateCubeWithWaterfall :: Pool -> BlockNumber -> LiquidityCube3D -> LiquidityCube3D
-redenominateCubeWithWaterfall pool currentBlock cube =
+-- | Redenominate 3D liquidity position with risk waterfall
+redenominate3DWithWaterfall :: Pool -> BlockNumber -> Liquidity3D -> Liquidity3D
+redenominate3DWithWaterfall pool currentBlock position3D =
   let
     -- First apply normal yield-based redenomination
-    baseRedenomination = redenominateCube pool currentBlock cube
+    baseRedenomination = redenominate3D pool currentBlock position3D
     
     -- Check pool performance to determine if losses need to be applied
     poolPerformance = calculatePoolPerformance pool
@@ -1133,7 +1327,7 @@ redenominateCubeWithWaterfall pool currentBlock cube =
         lossDistribution = calculateLossDistribution pool totalLoss
         
         -- Calculate loss factor based on leverage tier
-        lossFactor = case cube.tickLower.leverageTick of
+        lossFactor = case position3D.tickLower.leverageTick of
           1 -> -- Junior tranche
             let juniorTVL = getTotalLiquidityByLeverage pool 1
             in if juniorTVL > 0.0
@@ -1213,7 +1407,7 @@ getMaturityInfo durationTick startBlock currentBlock =
   case durationTick of
     1 -> -- Monthly
       let 
-        maturityBlock = startBlock + toNumber blocksPerMonth
+        maturityBlock = startBlock + blocksPerMonth
         elapsed = currentBlock - startBlock
         timeToMaturity = max 0.0 (1.0 - toNumber elapsed / toNumber blocksPerMonth)
       in { maturityBlock: maturityBlock
@@ -1232,8 +1426,62 @@ calculateTimeToMaturity durationTick startBlock currentBlock =
   in info.timeToMaturity
 
 --------------------------------------------------------------------------------
+-- POOL EVENTS
+--------------------------------------------------------------------------------
+
+-- | Events emitted by pool operations
+data PoolEvent
+  = SwapExecuted
+    { pool :: String
+    , amountIn :: Number
+    , amountOut :: Number
+    , sqrtPrice :: Number
+    , tick :: Int
+    }
+  | LiquidityChanged
+    { pool :: String
+    , liquidityDelta :: Number
+    }
+  | POLDeployed
+    { pool :: String
+    , triggerPrice :: Number
+    , liquidityDeployed :: Number
+    , amount :: Number  -- Total amount deployed
+    }
+
+derive instance eqPoolEvent :: Eq PoolEvent
+
+--------------------------------------------------------------------------------
 -- HELPER FUNCTIONS
 --------------------------------------------------------------------------------
+
+-- | Simple string hash for generating position IDs (model implementation)
+hashString :: String -> Int
+hashString str = 
+  -- Simple hash based on string length and first few characters
+  let len = Array.length (Array.fromFoldable str)
+      charSum = Array.foldl (\acc c -> acc + fromEnum c) 0 (Array.take 5 $ Array.fromFoldable str)
+  in (len * 31 + charSum) `mod` 2147483647
+
+-- | Create tick coordinate
+createTickCoordinate :: Int -> Int -> Int -> TickCoordinate
+createTickCoordinate rateTick durationTick leverageTick =
+  { rateTick, durationTick, leverageTick }
+
+-- | Update pool state helper
+updatePoolState :: forall r. 
+  { globalState :: GlobalState3D
+  , lastUpdateBlock :: BlockNumber 
+  | r } -> 
+  GlobalState3D -> 
+  BlockNumber -> 
+  { globalState :: GlobalState3D
+  , lastUpdateBlock :: BlockNumber 
+  | r }
+updatePoolState pool newGlobalState newBlock =
+  pool { globalState = newGlobalState
+       , lastUpdateBlock = newBlock
+       }
 
 -- | Generate unique key for tick coordinate
 coordinateKey :: TickCoordinate -> String
@@ -1246,13 +1494,13 @@ coordinateKey coord =
 addToActiveTicks :: Array TickCoordinate -> TickCoordinate -> TickCoordinate -> Array TickCoordinate
 addToActiveTicks activeTicks tickLower tickUpper =
   let
-    hasLower = any (\t -> t == tickLower) activeTicks
-    hasUpper = any (\t -> t == tickUpper) activeTicks
+    hasLower = Array.any (\t -> t == tickLower) activeTicks
+    hasUpper = Array.any (\t -> t == tickUpper) activeTicks
     
-    withLower = if hasLower then activeTicks else tickLower : activeTicks
-    withBoth = if hasUpper then withLower else tickUpper : withLower
+    withLower = if hasLower then activeTicks else tickLower Array.: activeTicks
+    withBoth = if hasUpper then withLower else tickUpper Array.: withLower
     
-  in sortBy compareCoordinates withBoth
+  in Array.sortBy compareCoordinates withBoth
 
 -- | Compare tick coordinates for sorting
 compareCoordinates :: TickCoordinate -> TickCoordinate -> Ordering
@@ -1263,57 +1511,28 @@ compareCoordinates a b =
       other -> other
     other -> other
 
--- | Get duration multiplier
-getDurationMultiplier :: Int -> Int -> Number
-getDurationMultiplier lower upper =
-  let
-    lowerMult = case lower of
-      0 -> 0.8  -- Flash: 20% discount
-      1 -> 1.0  -- Monthly: base rate  
-      _ -> 1.2  -- Spot: 20% premium
-    upperMult = case upper of
-      0 -> 0.8
-      1 -> 1.0
-      _ -> 1.2
-  in (lowerMult + upperMult) / 2.0
-
--- | Get leverage multiplier
-getLeverageMultiplier :: Int -> Int -> Number
-getLeverageMultiplier lower upper =
-  let
-    lowerMult = if lower == 0 then 1.0 else 3.0  -- Senior: 1x, Junior: 3x
-    upperMult = if upper == 0 then 1.0 else 3.0
-  in (lowerMult + upperMult) / 2.0
-
--- | Duration to tick mapping
-durationToTick :: Duration -> Int
-durationToTick Flash = 0
-durationToTick Monthly = 1
-durationToTick Spot = 2
-
 -- | Tick to duration mapping
 tickToDuration :: Int -> Duration
 tickToDuration 0 = Flash
 tickToDuration 1 = Monthly
-tickToDuration _ = Spot
-
--- | Leverage to tick mapping
-leverageToTick :: Leverage -> Int
-leverageToTick Senior = 0
-leverageToTick Junior = 1
+tickToDuration _ = Swap
 
 -- | Tick to leverage mapping
 tickToLeverage :: Int -> Leverage
 tickToLeverage 0 = Senior
 tickToLeverage _ = Junior
 
--- | Convert interest rate to tick (0% to 1000% APR)
+-- | Convert rate/price to tick
+-- For Swap: price 1.05 → tick 500 (5% premium)
+-- For Monthly: 5% APR → tick 500
+-- For Flash: 0.3% fee → tick 30
 rateToTick :: Number -> Int
-rateToTick rate = round (rate * 100.0)  -- 1% = 100 ticks
+rateToTick rate = round (rate * ticksPerPercent)
 
--- | Convert tick to interest rate
+-- | Convert tick to rate/price
+-- Interpretation depends on duration context
 tickToRate :: Int -> Number
-tickToRate tick = toNumber tick / 100.0
+tickToRate tick = toNumber tick / ticksPerPercent
 
 --------------------------------------------------------------------------------
 -- TICK DATA MANAGEMENT (SIMPLIFIED)
@@ -1333,8 +1552,8 @@ insertTick :: TickData -> Pool -> Pool
 insertTick tickData pool =
   let tickKey = coordinateKey tickData.coordinate
       updatedTickData = Map.insert tickKey tickData pool.tickData
-      updatedActiveTicks = if tickData.liquidity > 0.0 && not (any (\t -> t == tickData.coordinate) pool.activeTicks)
-                          then sortBy compareCoordinates (tickData.coordinate : pool.activeTicks)
+      updatedActiveTicks = if tickData.liquidity > 0.0 && not (Array.any (\t -> t == tickData.coordinate) pool.activeTicks)
+                          then Array.sortBy compareCoordinates (tickData.coordinate Array.: pool.activeTicks)
                           else pool.activeTicks
   in pool { tickData = updatedTickData, activeTicks = updatedActiveTicks }
 
@@ -1343,7 +1562,7 @@ removeTick :: TickCoordinate -> Pool -> Pool
 removeTick coord pool =
   let tickKey = coordinateKey coord
       updatedTickData = Map.delete tickKey pool.tickData
-      updatedActiveTicks = filter (\t -> t /= coord) pool.activeTicks
+      updatedActiveTicks = Array.filter (\t -> t /= coord) pool.activeTicks
   in pool { tickData = updatedTickData, activeTicks = updatedActiveTicks }
 
 -- | Lookup tick data
@@ -1357,29 +1576,15 @@ updateTick updateFn coord pool =
     Nothing -> pool
     Just tickData ->
       let newTickData = updateFn tickData
-          tickKey = coordinateKey coord
-          updatedTickData = Map.insert tickKey newTickData pool.tickData
-          -- Update active ticks if liquidity changed
-          wasActive = any (\t -> t == coord) pool.activeTicks
-          isActive = newTickData.liquidity > 0.0
-          updatedActiveTicks = if wasActive && not isActive
-                              then filter (\t -> t /= coord) pool.activeTicks
-                              else if not wasActive && isActive
-                              then sortBy compareCoordinates (coord : pool.activeTicks)
-                              else pool.activeTicks
-      in pool { tickData = updatedTickData, activeTicks = updatedActiveTicks }
+      in insertTick newTickData pool
 
 -- | Find ticks in a range (simplified)
 findTicksInRange :: TickCoordinate -> TickCoordinate -> Pool -> Array TickData
 findTicksInRange minCoord maxCoord pool =
-  let isInRange tickData =
-        let coord = tickData.coordinate
-        in coord.rateTick >= minCoord.rateTick && coord.rateTick <= maxCoord.rateTick &&
-           coord.durationTick >= minCoord.durationTick && coord.durationTick <= maxCoord.durationTick &&
-           coord.leverageTick >= minCoord.leverageTick && coord.leverageTick <= maxCoord.leverageTick
-  in filter isInRange (values pool.tickData)
+  let isInRange tickData = isTickInRange tickData.coordinate minCoord maxCoord
+  in Array.filter isInRange (Array.fromFoldable (values pool.tickData))
 
 -- | Get all active ticks with liquidity
 getActiveTicks :: Pool -> Array TickData
 getActiveTicks pool =
-  mapMaybe (\coord -> lookupTick coord pool) pool.activeTicks
+  Array.mapMaybe (\coord -> lookupTick coord pool) pool.activeTicks

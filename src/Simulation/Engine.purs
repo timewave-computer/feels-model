@@ -53,7 +53,7 @@ import UI.PoolRegistry (PoolRegistry, initPoolRegistry, getPool, updatePool)
 import Protocol.FeelsSOLVault (FeelsSOLState, createFeelsSOLVault, FeelsSOLStrategy)
 import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance, getChainAccountBalance)
 import Utils (formatAmount)
-import Protocol.POLVault (initPOL)
+import Protocol.ProtocolVault (createProtocolVault)
 import Protocol.Oracle (Oracle, initOracle, takeMarketSnapshot, updatePrice)
 
 -- Import simulation subsystem modules
@@ -71,7 +71,7 @@ import Data.Ord (abs)
 
 -- Import protocol types and functions for protocol engine
 import Protocol.Common (CommandResult(..))
-import Protocol.PositionVault (Leverage(..))
+import Protocol.Pool (Leverage(..))
 import UI.ProtocolState (ProtocolState)
 import UI.ProtocolState (ProtocolCommand(..)) as PS
 import UI.Command (executeCommand)
@@ -109,7 +109,7 @@ initSimulation :: SimulationConfig -> Effect SimulationState
 initSimulation config = do
   -- Initialize core protocol components
   poolRegistry <- initPoolRegistry
-  _ <- initPOL  -- Initialize Protocol-Owned Liquidity system
+  _ <- createProtocolVault "POL-System"  -- Initialize Protocol-Owned Liquidity system
   oracle <- initOracle config.initialJitoSOLPrice
   
   -- Use the comprehensive initialization with fresh components
@@ -123,7 +123,7 @@ initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
   accounts <- generateAccounts { numAccounts: config.numAccounts, accountProfiles: config.accountProfiles }
   
   -- Initialize Protocol-Owned Liquidity system
-  _ <- initPOL
+  _ <- createProtocolVault "POL-System"
   
   -- Initialize account registry for user management
   _ <- initAccountRegistry

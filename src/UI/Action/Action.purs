@@ -35,10 +35,11 @@ import Protocol.Common (QueryResult(..), CommandResult(..), TokenMetadata)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
 import Protocol.Token (TokenType(..))
-import Protocol.PositionVault (spotDuration, monthlyDuration, Leverage(..))
+import Protocol.Pool (Leverage(..))
+import Protocol.PositionVault (swapDuration, monthlyDuration)
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
 import Simulation.Engine (initSimulationWithPoolRegistry, calculateResults, runProtocolSimulation)
-import Protocol.Metric (getPOLMetrics, getProtocolTotalFeesCollected)
+import Protocol.ProtocolVault (getProtocolMetrics, getProtocolTotalFeesCollected)
 import UI.PoolRegistry (getAllPools)
 
 --------------------------------------------------------------------------------
@@ -75,7 +76,7 @@ createLiquidityPosition protocol positionType lendAsset lendAmount collateralAss
   liftEffect $ log $ "Creating " <> positionType <> " liquidity position..."
   state <- liftEffect $ read protocol.state
   result <- liftEffect $ executeCommand 
-    (CreatePosition "liquidity-bot" lendAsset lendAmount collateralAsset collateralAmount spotDuration Senior false Nothing) 
+    (CreatePosition "liquidity-bot" lendAsset lendAmount collateralAsset collateralAmount swapDuration Senior false Nothing) 
     state
   case result of
     Right (Tuple newState _) -> do
@@ -97,7 +98,7 @@ runSimulationWithMetrics protocol simState config = do
   -- Calculate all metrics in parallel
   sequential $ ado
     results <- parallel $ liftEffect $ calculateResults config finalState
-    polMetrics <- parallel $ liftEffect $ getPOLMetrics finalProtocolState.polState
+    polMetrics <- parallel $ liftEffect $ getProtocolMetrics finalProtocolState.polState
     pools <- parallel $ liftEffect $ getAllPools finalProtocolState.poolRegistry
     priceHistory <- parallel $ liftEffect $ processSimulationResults protocol finalState results
     in do
@@ -312,7 +313,7 @@ handleCreateToken = do
 
 -- | Exchange route variant type (extensible and type-safe)
 type ExchangeRouteV = Variant
-  ( jitoSOLToSpotPosition :: Unit
+  ( jitoSOLToSwapPosition :: Unit
   , jitoSOLToTermPosition :: Unit  
   , feelsSOLToPosition :: Unit
   , directSwap :: Unit
@@ -320,7 +321,7 @@ type ExchangeRouteV = Variant
   )
 
 -- | Route proxy symbols for type safety
-_jitoSOLToSpotPosition = SProxy :: SProxy "jitoSOLToSpotPosition"
+_jitoSOLToSwapPosition = SProxy :: SProxy "jitoSOLToSwapPosition"
 _jitoSOLToTermPosition = SProxy :: SProxy "jitoSOLToTermPosition"
 _feelsSOLToPosition = SProxy :: SProxy "feelsSOLToPosition"
 _directSwap = SProxy :: SProxy "directSwap"
@@ -329,9 +330,9 @@ _unsupportedRoute = SProxy :: SProxy "unsupportedRoute"
 -- | Parse route from UI selection state (type-safe variant construction)
 parseExchangeRoute :: String -> String -> ExchangeRouteV
 parseExchangeRoute from to = case { from, to } of
-  { from: "jitosol", to: "position-spot" } -> inj _jitoSOLToSpotPosition unit
+  { from: "jitosol", to: "position-swap" } -> inj _jitoSOLToSwapPosition unit
   { from: "jitosol", to: "position-term" } -> inj _jitoSOLToTermPosition unit
-  { from: "feelssol", to: "position-spot" } -> inj _feelsSOLToPosition unit
+  { from: "feelssol", to: "position-swap" } -> inj _feelsSOLToPosition unit
   { from: "feelssol", to: "position-term" } -> inj _feelsSOLToPosition unit
   _ -> inj _unsupportedRoute $ "Route " <> from <> " -> " <> to <> " is not yet implemented"
 
@@ -339,7 +340,7 @@ parseExchangeRoute from to = case { from, to } of
 executeExchangeRoute :: forall o m. MonadAff m => ExchangeRouteV -> UIState -> _ -> H.HalogenM UIState Action () o m Unit
 executeExchangeRoute route state protocol = 
   route # match
-    { jitoSOLToSpotPosition: \_ -> executeJitoSOLToPosition spotDuration state protocol
+    { jitoSOLToSwapPosition: \_ -> executeJitoSOLToPosition swapDuration state protocol
     , jitoSOLToTermPosition: \_ -> executeJitoSOLToPosition monthlyDuration state protocol
     , feelsSOLToPosition: \_ -> executeDirectPosition state protocol
     , directSwap: \_ -> executeDirectSwap state protocol

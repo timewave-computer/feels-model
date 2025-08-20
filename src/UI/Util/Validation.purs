@@ -32,20 +32,23 @@ module UI.Util.Validation
   ) where
 
 import Prelude
-import Data.Array (length, null, filter, (:), elem)
-import Data.Either (Either(..))
+import Data.Array (length, null, filter, (:), elem, find)
+import Data.Either (Either(..), isRight)
 import Data.String (trim, length) as String
 import Data.String.Common (toLower)
 import Data.String.Regex (Regex, test)
 import Data.String.Regex.Flags (noFlags)
 import Data.String.Regex.Unsafe (unsafeRegex)
 import Data.Validation.Semigroup (V(..), invalid, toEither)
+import Control.Apply (lift2)
 import Data.List.NonEmpty (NonEmptyList)
+import Data.List.NonEmpty as NEL
 import Data.Tuple (Tuple(..))
+import Data.Maybe (Maybe(..))
 import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Properties as HP
-import UI.Util.Codecs (TokenMetadataCodec)
+import UI.Util.Codecs (TokenMetadataCodec(..))
 
 --------------------------------------------------------------------------------
 -- Validation Types (Composable API)
@@ -59,7 +62,9 @@ type ValidationResult = Either (Array ValidationError) Unit
 
 -- | Run a validation and get the result
 runValidation :: forall a. Validation a -> Either (Array ValidationError) a
-runValidation = map (\nel -> nel) <<< toEither
+runValidation v = case toEither v of
+  Left nel -> Left (NEL.toUnfoldable nel)
+  Right a -> Right a
 
 -- | Create a validation with a custom validator function
 validateWith :: forall a. (a -> Either ValidationError a) -> a -> Validation a
@@ -107,7 +112,7 @@ type ValidationConfig =
 -- | Validate required field (using purescript-validation)
 validateRequired :: String -> String -> Validation String
 validateRequired field value = 
-  if trim value == ""
+  if String.trim value == ""
     then invalid (pure (EmptyField field))
     else pure value
 
@@ -126,7 +131,7 @@ validateMaxLength field maxLen value =
     else pure value
 
 -- | Validate pattern matching (using purescript-validation)
-validatePattern :: String -> String -> Regex -> Validation String
+validatePattern :: String -> String -> String -> Regex -> Validation String
 validatePattern field desc value pattern =
   if test pattern value
     then pure value
@@ -135,38 +140,48 @@ validatePattern field desc value pattern =
 -- | Validate uniqueness against existing values (now type-safe)
 validateUniqueness :: String -> String -> Array TokenMetadataCodec -> Validation String
 validateUniqueness field value existingTokens =
-  let existingTickers = map (toLower <<< _.ticker) existingTokens
+  let existingTickers = map (\(TokenMetadataCodec token) -> toLower token.ticker) existingTokens
   in if elem (toLower value) existingTickers
      then invalid (pure (AlreadyExists field value))
      else pure value
 
 -- | Validate token ticker (composable version - replaces 45 lines)
 validateTicker :: String -> Array TokenMetadataCodec -> Validation String
-validateTicker ticker existingTokens = ado
-  required <- validateRequired "Token Ticker" ticker
-  minLen <- validateMinLength "Token Ticker" 3 required
-  maxLen <- validateMaxLength "Token Ticker" 10 minLen
-  pattern <- validatePattern "Token Ticker" "alphanumeric (letters and numbers only)" maxLen alphanumericPattern
-  unique <- validateUniqueness "Token Ticker" pattern existingTokens
-  in unique
+validateTicker ticker existingTokens = 
+  let req = validateRequired "Token Ticker" ticker
+  in req `andThen` \r ->
+     validateMinLength "Token Ticker" 3 r `andThen` \ml ->
+     validateMaxLength "Token Ticker" 10 ml `andThen` \mx ->
+     validatePattern "Token Ticker" "alphanumeric (letters and numbers only)" mx alphanumericPattern `andThen` \p ->
+     validateUniqueness "Token Ticker" p existingTokens
+  where
+    andThen v f = case toEither v of
+      Left _ -> v
+      Right a -> f a
 
 -- | Validate token name (composable version - replaces 25 lines)
 validateTokenName :: String -> Validation String
-validateTokenName name = ado
-  required <- validateRequired "Token Name" name
-  minLen <- validateMinLength "Token Name" 3 required
-  maxLen <- validateMaxLength "Token Name" 50 minLen
-  in maxLen
+validateTokenName name = 
+  let req = validateRequired "Token Name" name
+  in req `andThen` \r ->
+     validateMinLength "Token Name" 3 r `andThen` \ml ->
+     validateMaxLength "Token Name" 50 ml
+  where
+    andThen v f = case toEither v of
+      Left _ -> v
+      Right a -> f a
 
 -- | Validate token inputs (composable version - replaces 27 lines from Action.purs)
 validateTokenInput :: String -> String -> Array TokenMetadataCodec -> Array String
 validateTokenInput ticker name existingTokens =
   let tickerValidation = validateTicker ticker existingTokens
       nameValidation = validateTokenName name
-      combinedResult = ado
-        validTicker <- tickerValidation
-        validName <- nameValidation
-        in { ticker: validTicker, name: validName }
+      combinedResult = 
+        case toEither tickerValidation, toEither nameValidation of
+          Right t, Right n -> pure { ticker: t, name: n }
+          Left e1, Left e2 -> invalid (e1 <> e2)
+          Left e, _ -> invalid e
+          _, Left e -> invalid e
   in case runValidation combinedResult of
        Left errors -> map show errors
        Right _ -> []
@@ -189,20 +204,26 @@ validateUserInput config = validateField config
 -- | Validate a field according to its configuration (simplified with composable API - reduced from 45 lines to 12)
 validateField :: ValidationConfig -> ValidationResult
 validateField config =
-  let validation = ado
-        required <- if config.required 
-          then validateRequired config.field config.value 
-          else pure config.value
-        minLen <- case config.minLength of
-          Just len -> validateMinLength config.field len required
-          Nothing -> pure required
-        maxLen <- case config.maxLength of  
-          Just len -> validateMaxLength config.field len minLen
-          Nothing -> pure minLen
-        pattern <- case config.pattern, config.patternDescription of
-          Just pat, Just desc -> validatePattern config.field desc maxLen pat
-          _, _ -> pure maxLen
-        in pattern
+  let validation = 
+        let reqVal = if config.required 
+              then validateRequired config.field config.value 
+              else pure config.value
+        in reqVal `andThen` \req ->
+           let minVal = case config.minLength of
+                 Just len -> validateMinLength config.field len req
+                 Nothing -> pure req
+           in minVal `andThen` \minLen ->
+              let maxVal = case config.maxLength of  
+                    Just len -> validateMaxLength config.field len minLen
+                    Nothing -> pure minLen
+              in maxVal `andThen` \maxLen ->
+                 case config.pattern, config.patternDescription of
+                   Just pat, Just desc -> validatePattern config.field desc maxLen pat
+                   _, _ -> pure maxLen
+        where
+          andThen v f = case toEither v of
+            Left _ -> v
+            Right a -> f a
   in case runValidation validation of
        Left errors -> Left errors
        Right _ -> Right unit

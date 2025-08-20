@@ -29,8 +29,8 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Array ((:), filter, concat, mapMaybe, fromFoldable)
 import Data.Array as Array
 import Data.Tuple (Tuple(..))
-import Protocol.Pool (PoolState)
-import Protocol.PositionVault (Position)
+import Protocol.Pool (Pool)
+import Protocol.PositionVault (VaultPosition)
 import Protocol.Common (PoolId, PositionId)
 
 --------------------------------------------------------------------------------
@@ -40,7 +40,7 @@ import Protocol.Common (PoolId, PositionId)
 -- | Global registry of all pools and positions
 type PoolRegistry = Ref
   { pools :: Map PoolId PoolState           -- All pools by ID
-  , positions :: Map PositionId Position    -- All positions by ID
+  , positions :: Map PositionId VaultPosition    -- All positions by ID
   , poolPositions :: Map PoolId (Array PositionId)  -- Track which positions belong to each pool
   , nextPositionId :: PositionId            -- Next available position ID
   }

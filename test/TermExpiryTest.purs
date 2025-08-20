@@ -13,22 +13,21 @@ import Effect.Console (log)
 import Data.Array (index)
 import Data.Maybe (Maybe(..))
 
+import Protocol.Pool (Duration(..), Leverage(..))
 import Protocol.PositionVault 
-  ( Position
-  , Duration(..)
-  , Leverage(..)
-  , createPosition
+  ( VaultPosition
+  , createVaultPosition
   , blocksPerMonth
   , isExpired
-  , handleExpiredPosition
-  , processExpiredPositions
+  , handleExpiredVaultPosition
+  , processExpiredVaultPositions
   )
 import Protocol.Token (TokenType(..))
 
 -- | Create a test position for expiry testing
-createTestPosition :: Int -> Boolean -> Duration -> Position
+createTestPosition :: Int -> Boolean -> Duration -> VaultPosition
 createTestPosition id rollover duration =
-  createPosition
+  createVaultPosition
     id                    -- Position ID
     "test-user"          -- Owner
     1000.0               -- Amount
@@ -70,7 +69,7 @@ testPositionRollover = do
   
   let position = createTestPosition 2 true Monthly
       currentBlock = blocksPerMonth + 100
-      expiredPosition = handleExpiredPosition position currentBlock
+      expiredPosition = handleExpiredVaultPosition position currentBlock
   
   -- Position should still be Monthly duration
   if expiredPosition.duration == Monthly
@@ -99,7 +98,7 @@ testFlashLoanConversion = do
   
   let position = createTestPosition 3 false Monthly
       currentBlock = blocksPerMonth + 100
-      expiredPosition = handleExpiredPosition position currentBlock
+      expiredPosition = handleExpiredVaultPosition position currentBlock
   
   -- Position should convert to Flash duration
   if expiredPosition.duration == Flash
@@ -130,12 +129,12 @@ testBatchExpiry = do
   let positions =
         [ createTestPosition 1 true Monthly    -- Will rollover
         , createTestPosition 2 false Monthly   -- Will convert to flash
-        , createTestPosition 3 true Spot       -- Spot, never expires
+        , createTestPosition 3 true Swap       -- Swap, never expires
         , createTestPosition 4 false Flash     -- Flash, never expires
         ]
       
       currentBlock = blocksPerMonth + 50
-      processed = processExpiredPositions currentBlock positions
+      processed = processExpiredVaultPositions currentBlock positions
   
   -- First position should rollover to new monthly term
   case processed !! 0 of
@@ -153,12 +152,12 @@ testBatchExpiry = do
         then log "  ✓ Position 1 converted to Flash"
         else log "  ✗ FAILED: Position 1 not converted to Flash"
   
-  -- Third position (Spot) should remain unchanged
+  -- Third position (Swap) should remain unchanged
   case processed !! 2 of
     Nothing -> log "  ✗ FAILED: Position 2 not found"
     Just p -> 
-      if p.duration == Spot && p.createdAt == 0
-        then log "  ✓ Position 2 (Spot) unchanged"
+      if p.duration == Swap && p.createdAt == 0
+        then log "  ✓ Position 2 (Swap) unchanged"
         else log "  ✗ FAILED: Position 2 was modified"
   
   -- Fourth position (Flash) should remain unchanged
@@ -169,19 +168,19 @@ testBatchExpiry = do
         then log "  ✓ Position 3 (Flash) unchanged"
         else log "  ✗ FAILED: Position 3 was modified"
 
--- | Test that spot positions never expire
-testSpotPositionNoExpiry :: Effect Unit
-testSpotPositionNoExpiry = do
-  log "Testing spot position expiry behavior..."
+-- | Test that swap positions never expire
+testSwapPositionNoExpiry :: Effect Unit
+testSwapPositionNoExpiry = do
+  log "Testing swap position expiry behavior..."
   
-  let position = createTestPosition 5 false Spot
+  let position = createTestPosition 5 false Swap
   
-  -- Spot positions should never expire, regardless of time
+  -- Swap positions should never expire, regardless of time
   if not (isExpired 0 position) && 
      not (isExpired blocksPerMonth position) && 
      not (isExpired (blocksPerMonth * 100) position)
-    then log "  ✓ Spot position never expires"
-    else log "  ✗ FAILED: Spot position expires"
+    then log "  ✓ Swap position never expires"
+    else log "  ✗ FAILED: Swap position expires"
 
 -- | Test that flash positions never expire
 testFlashPositionNoExpiry :: Effect Unit
@@ -206,7 +205,7 @@ main = do
   testPositionRollover
   testFlashLoanConversion
   testBatchExpiry
-  testSpotPositionNoExpiry
+  testSwapPositionNoExpiry
   testFlashPositionNoExpiry
   
   log "\n✅ Term expiry tests completed!"

@@ -50,8 +50,10 @@ import Data.Map as Map
 import Data.Tuple (Tuple(..), fst, snd)
 import Data.Traversable (traverse, traverse_)
 import Data.Foldable (foldl, foldMap, foldr)
+import Data.List (List)
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, write, modify_, modify)
+import Control.Monad (when)
 
 --------------------------------------------------------------------------------
 -- Core Registry Types
@@ -145,8 +147,9 @@ initializeRegistry :: forall a. RegistryConfig a -> Effect (GenericRegistry a)
 initializeRegistry config = do
   registry <- createRegistry
   let items = config.defaultItems
-  when (Array.length items > 0) $
-    registerItems registry items config.validator
+  when (Array.length items > 0) $ do
+    _ <- registerItems registry items config.validator
+    pure unit
   pure registry
 
 -- | Helper to create registry with default items
@@ -189,7 +192,7 @@ getItem registry key = do
 getAllItems :: forall a. GenericRegistry a -> Effect (Array a)
 getAllItems registry = do
   registryMap <- read registry
-  pure (Map.values registryMap)
+  pure (Array.fromFoldable (Map.values registryMap))
 
 -- | Get items matching a filter
 getItemsBy :: forall a. GenericRegistry a -> RegistryFilter a -> Effect (Array a)

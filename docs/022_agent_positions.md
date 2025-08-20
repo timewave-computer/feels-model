@@ -232,4 +232,4 @@ The system naturally balances when:
 - Each agent type finds their complementary partners in the ecosystem
 - Liquidity-sensitive agents lending FeelsSOL are matched with liquidity-tolerant agents borrowing FeelsSOL
 
-This 3D preference model ensures that every participant can find a position type that matches their specific needs while contributing to overall market health. Each dimension maps to a concrete choice in position construction: Duration (Flash/Monthly/Spot), Tranche (Senior/Junior), and Asset (FeelsSOL/Token).
+This 3D preference model ensures that every participant can find a position type that matches their specific needs while contributing to overall market health. Each dimension maps to a concrete choice in position construction: Duration (Flash/Monthly/Swap), Tranche (Senior/Junior), and Asset (FeelsSOL/Token).

@@ -149,7 +149,7 @@ The Feels Protocol fee model creates a comprehensive risk framework:
 
 ```
 1. Credit Risk → Duration + Utilization
-   - Position commitment (Flash/Monthly/Spot) determines base risk
+   - Position commitment (Flash/Monthly/Swap) determines base risk
    - Pool utilization amplifies risk when liquidity is scarce
 
 2. Directional Risk → Leverage + Volatility  

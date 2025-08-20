@@ -28,7 +28,7 @@ import Unsafe.Coerce (unsafeCoerce)
 import UI.ProtocolState as A
 import UI.ProtocolState (AppRuntime, initState)
 import Protocol.Common (QueryResult(..), CommandResult(..))
-import Protocol.POLVault (getAllAllocations, getTotalPOL, getUnallocatedPOL)
+import Protocol.ProtocolVault (getAllAllocations, getTotalPOL, getUnallocatedPOL)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
 import FFI (setTimeout, getElementById, getTextContent, triggerUIAction, registerRemoteAction, sin, exp)

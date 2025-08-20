@@ -30,13 +30,24 @@ module Protocol.Oracle
 
 import Prelude
 import Data.Array ((:), take, length, filter)
-import Data.Int as Int
 import Data.Int (toNumber)
 import Data.Number (sqrt)
 import Data.Foldable (sum)
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
 import FFI (currentTime)
+import Protocol.Config (defaultProtocolConfig)
+
+--------------------------------------------------------------------------------
+-- CONSTANTS
+--------------------------------------------------------------------------------
+
+-- History management constants
+maxPriceHistory :: Int
+maxPriceHistory = 100  -- Maximum number of price points to retain
+
+volatilityWindow :: Int
+volatilityWindow = 20  -- Number of price points for volatility calculation
 
 --------------------------------------------------------------------------------
 -- ORACLE TYPE DEFINITIONS
@@ -104,10 +115,10 @@ initOracle :: Number -> Effect Oracle
 initOracle initialPrice = do
   timestamp <- currentTime
   let defaultBufferConfig = 
-        { targetRatio: 0.01      -- 1% buffer target
-        , minRatio: 0.005        -- 0.5% minimum buffer
-        , maxRatio: 0.02         -- 2% maximum buffer
-        , rebalanceThreshold: 0.005 -- 0.5% rebalancing threshold
+        { targetRatio: defaultProtocolConfig.buffer.targetRatio
+        , minRatio: defaultProtocolConfig.buffer.minRatio
+        , maxRatio: defaultProtocolConfig.buffer.maxRatio
+        , rebalanceThreshold: defaultProtocolConfig.buffer.rebalanceThreshold
         , daoManaged: false      -- Start with algorithmic management
         }
   new
@@ -122,19 +133,6 @@ initOracle initialPrice = do
 --------------------------------------------------------------------------------
 -- Functions for maintaining current price data and history
 
--- | Update current price and add to historical record
--- | Maintains circular buffer of last 100 price points for efficiency
-updatePrice :: Number -> Oracle -> Effect Unit
-updatePrice newPrice oracleRef = do
-  timestamp <- currentTime
-  modify_ (\oracle ->
-    oracle
-      { currentPrice = newPrice
-      , priceHistory = take 100 ({ price: newPrice, timestamp } : oracle.priceHistory)
-      , lastUpdate = timestamp
-      }
-  ) oracleRef
-
 -- | Update price with specific timestamp (for simulations)
 -- | Allows controlled time progression in simulated environments
 updatePriceWithTimestamp :: Number -> Number -> Oracle -> Effect Unit
@@ -142,10 +140,17 @@ updatePriceWithTimestamp newPrice timestamp oracleRef = do
   modify_ (\oracle ->
     oracle
       { currentPrice = newPrice
-      , priceHistory = take 100 ({ price: newPrice, timestamp } : oracle.priceHistory)
+      , priceHistory = take maxPriceHistory ({ price: newPrice, timestamp } : oracle.priceHistory)
       , lastUpdate = timestamp
       }
   ) oracleRef
+
+-- | Update current price and add to historical record
+-- | Maintains circular buffer of configured size for efficiency
+updatePrice :: Number -> Oracle -> Effect Unit
+updatePrice newPrice oracleRef = do
+  timestamp <- currentTime
+  updatePriceWithTimestamp newPrice timestamp oracleRef
 
 -- | Get current spot price from oracle
 getCurrentPrice :: Oracle -> Effect Number
@@ -168,40 +173,55 @@ getTWAP window oracleRef = do
       cutoff = timestamp - windowMs
       relevantPrices = filter (\p -> p.timestamp >= cutoff) oracle.priceHistory
   
-  if length relevantPrices == 0
-  then pure oracle.currentPrice
-  else pure $ sum (map _.price relevantPrices) / toNumber (length relevantPrices)
+  case relevantPrices of
+    [] -> pure oracle.currentPrice
+    prices -> pure $ calculateAverage prices
+  where
+    calculateAverage prices = sum (map _.price prices) / toNumber (length prices)
 
 -- | Convert TWAP window enum to milliseconds
 -- | Provides precise time calculations for TWAP windows
 windowToMs :: TWAPWindow -> Number
-windowToMs FiveMinutes = 300000.0     -- 5 * 60 * 1000
-windowToMs FifteenMinutes = 900000.0  -- 15 * 60 * 1000
-windowToMs OneHour = 3600000.0        -- 60 * 60 * 1000
+windowToMs FiveMinutes = defaultProtocolConfig.oracle.fiveMinuteWindow
+windowToMs FifteenMinutes = defaultProtocolConfig.oracle.fifteenMinuteWindow
+windowToMs OneHour = defaultProtocolConfig.oracle.oneHourWindow
 
 --------------------------------------------------------------------------------
 -- VOLATILITY ANALYSIS
 --------------------------------------------------------------------------------
 -- Statistical analysis of price movements for risk assessment
 
+-- | Calculate variance for a set of prices
+calculateVariance :: Array Number -> Number -> Number
+calculateVariance prices mean = 
+  sum (map (\p -> (p - mean) * (p - mean)) prices) / toNumber (length prices)
+
+-- | Calculate coefficient of variation for volatility measurement
+calculateCoefficientOfVariation :: Array Number -> Number
+calculateCoefficientOfVariation prices =
+  let mean = sum prices / toNumber (length prices)
+      variance = calculateVariance prices mean
+  in sqrt variance / mean
+
 -- | Calculate price volatility using coefficient of variation
--- | Uses last 20 price points for volatility calculation
+-- | Uses configured window size for volatility calculation
 getVolatility :: Oracle -> Effect Number
 getVolatility oracleRef = do
   oracle <- read oracleRef
-  let prices = map _.price $ take 20 oracle.priceHistory
+  let prices = map _.price $ take volatilityWindow oracle.priceHistory
   
   if length prices < 2
   then pure 0.0
-  else do
-    let mean = sum prices / Int.toNumber (length prices)
-        variance = sum (map (\p -> (p - mean) * (p - mean)) prices) / Int.toNumber (length prices)
-    pure $ sqrt variance / mean  -- Coefficient of variation as volatility measure
+  else pure $ calculateCoefficientOfVariation prices
 
 --------------------------------------------------------------------------------
 -- MARKET SNAPSHOT UTILITIES
 --------------------------------------------------------------------------------
 -- Comprehensive market state capture for analysis and monitoring
+
+-- | Calculate buffer health as ratio of target to max
+calculateBufferHealth :: BufferConfig -> Number
+calculateBufferHealth config = config.targetRatio / config.maxRatio
 
 -- | Create comprehensive market snapshot
 -- | Combines spot price, TWAP, volatility, and buffer health for complete market view
@@ -210,18 +230,14 @@ takeMarketSnapshot oracleRef = do
   oracle <- read oracleRef
   vol <- getVolatility oracleRef
   twap5m <- getTWAP FiveMinutes oracleRef
-  bufferHealth <- calculateBufferHealth oracle.bufferConfig
   
   pure
     { spot: oracle.currentPrice
     , twap5m
     , volatility: vol
     , timestamp: oracle.lastUpdate
-    , bufferHealth
+    , bufferHealth: calculateBufferHealth oracle.bufferConfig
     }
-  where
-    -- Calculate buffer health as a simple ratio (can be enhanced with actual buffer data)
-    calculateBufferHealth config = pure $ config.targetRatio / config.maxRatio
 
 --------------------------------------------------------------------------------
 -- BUFFER MANAGEMENT FUNCTIONS

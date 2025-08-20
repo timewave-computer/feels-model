@@ -275,9 +275,11 @@ logTiming operation startTime endTime =
 -- | Time an action and log duration
 timeAction :: forall a. String -> Effect a -> Effect a
 timeAction actionName action = do
-  startTime <- JSDate.now
+  startTimeJS <- JSDate.now
+  let startTime = JSDate.getTime startTimeJS
   result <- action
-  endTime <- JSDate.now
+  endTimeJS <- JSDate.now
+  let endTime = JSDate.getTime endTimeJS
   logTiming actionName startTime endTime
   pure result
 

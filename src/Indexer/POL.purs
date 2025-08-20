@@ -50,13 +50,13 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Foldable (sum, maximum, minimum)
 import Data.Int (toNumber, floor)
 import Data.Ord (abs, max)
-import FFI (log)
+import Data.Number (log)
 import Effect (Effect)
 
 -- Import analytics from other indexer modules
 import Indexer.Tick (TickMetrics)
 import Protocol.Pool (PoolEvent(..))
-import Protocol.POLVault (POLTriggerType(..))
+import Protocol.ProtocolVault (POLTriggerType(..))
 
 --------------------------------------------------------------------------------
 -- KEEPER ACTION TYPES

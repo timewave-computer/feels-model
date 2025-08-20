@@ -25,13 +25,14 @@ import Protocol.Common (CommandResult(..))
 import Protocol.Token (TokenType)
 
 -- Import domain modules
-import Protocol.PositionVault (Duration, Leverage)
+import Protocol.Pool (Duration, Leverage)
 import Protocol.FeelsSOLVault (FeelsSOLVault, updateOraclePrice)
-import Protocol.POLVault (contribute, getTotalPOL)
+import Protocol.ProtocolVault (contributeToProtocol, getTotalProtocolPOL)
 import Protocol.Oracle (takeMarketSnapshot)
 import Protocol.Error (ProtocolError(..))
 import Protocol.LaunchVault as Launch
 import Protocol.LaunchVault (LaunchPhase(..))
+import Protocol.Config (defaultProtocolConfig)
 
 -- Import action modules
 import UI.Action.TokenActions as TokenActions
@@ -67,10 +68,10 @@ captureRebaseDifferential runtime = do
         
         -- Capture to POL
         when (differentialValue > 0.0) $ do
-          contribute state.polState differentialValue
+          _ <- contributeToProtocol state.polState differentialValue
           
           -- Get current POL value
-          polBalance <- getTotalPOL state.polState
+          polBalance <- getTotalProtocolPOL state.polState
           
           -- Update state with new price and record history
           currentTime <- currentTime
@@ -80,9 +81,9 @@ captureRebaseDifferential runtime = do
                             , polValue: polBalance
                             }
               newHistory = state.priceHistory <> [priceRecord]
-              -- Keep only last 100 records
-              trimmedHistory = if length newHistory > 100 
-                              then drop (length newHistory - 100) newHistory
+              -- Keep only last configured number of records
+              trimmedHistory = if length newHistory > defaultProtocolConfig.time.priceHistoryLimit 
+                              then drop (length newHistory - defaultProtocolConfig.time.priceHistoryLimit) newHistory
                               else newHistory
               newState = state { lastJitoSOLPrice = currentJitoPrice
                                , priceHistory = trimmedHistory
@@ -237,10 +238,10 @@ handleCreateLaunch ticker totalTokens phases state = do
       , priceRangeUpper: p.priceUpper
       , tickLower: priceToTick p.priceLower
       , tickUpper: priceToTick p.priceUpper
-      , lockDuration: if parsePhase p.phase == MonthlyPhase then 216000 else 0  -- 30 days for monthly, 0 for spot
+      , lockDuration: if parsePhase p.phase == MonthlyPhase then 216000 else 0  -- 30 days for monthly, 0 for swap
       }
     parsePhase "Monthly" = MonthlyPhase
-    parsePhase _ = SpotPhase
+    parsePhase _ = SwapPhase
     priceToTick price = floor (log price / log 1.0001)
 
 -- | Handle launch phase start

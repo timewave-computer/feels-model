@@ -286,7 +286,7 @@ resetExchangeForm ::
 resetExchangeForm = H.modify_ \s -> s 
   { inputAmount = 0.0
   , selectedFromAsset = "jitosol"
-  , selectedToAsset = "position-spot"
+  , selectedToAsset = "position-swap"
   }
 
 -- | Generic form reset function

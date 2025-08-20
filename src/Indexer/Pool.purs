@@ -42,7 +42,7 @@ import Prelude
 import Data.Array ((:), take, filter, length)
 import Data.Foldable (sum)
 import Data.Int (toNumber)
-import FFI (sqrt)
+import Data.Number (sqrt)
 import Effect (Effect)
 
 -- Import analytics from other indexer modules

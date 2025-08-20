@@ -37,7 +37,7 @@ enterFeelsSOL user jitoAmount state = do
       else do
         -- Execute the FeelsSOL conversion through vault
         vault <- read state.feelsSOL
-        feelsSOLMinted <- vault.deposit JitoSOL jitoAmount user
+        feelsSOLMinted <- vault.deposit JitoSOL jitoAmount user unit
         
         -- Move JitoSOL from chain account to protocol
         depositResult <- depositFromChain state.accounts user jitoAmount

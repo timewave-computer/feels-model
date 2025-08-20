@@ -3,6 +3,7 @@
 -- | In production, token metadata would be stored on-chain.
 module UI.TokenRegistry
   ( TokenRegistry
+  , TokenRegistryState
   , TokenInfo
   , initTokenRegistry
   , registerToken
@@ -22,7 +23,7 @@ import Data.Map (Map)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Ref (Ref, new, read, modify_)
-import Protocol.Token (TokenType(..), TokenMetadata, TokenCreationParams, FungibleToken, createToken, tokenMetadata)
+import Protocol.Token (TokenType(..), TokenMetadata, TokenCreationParams, FungibleToken(..), createToken, tokenMetadata)
 import FFI (currentTime)
 
 --------------------------------------------------------------------------------
@@ -146,7 +147,7 @@ createAndRegisterToken registry params = do
   result <- createToken params
   case result of
     Left err -> pure $ Left err
-    Right fungibleToken -> do
+    Right fungibleToken@(FungibleToken tokenRecord) -> do
       -- Get next ID from optimized state
       state <- read registry
       let nextId = state.nextId
@@ -155,8 +156,8 @@ createAndRegisterToken registry params = do
             { id: nextId
             , ticker: params.ticker
             , name: params.name
-            , tokenType: Token params.ticker
-            , totalSupply: fungibleToken.totalSupply
+            , tokenType: Custom params.ticker
+            , totalSupply: tokenRecord.totalSupply
             , creator: params.creator
             , createdAt: meta.createdAt
             , live: true

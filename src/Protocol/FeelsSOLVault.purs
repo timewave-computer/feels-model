@@ -1,55 +1,72 @@
--- | FeelsSOL Vault Implementation - JitoSOL → FeelsSOL synthetic token system
+-- | FeelsSOL Vault - JitoSOL → FeelsSOL synthetic token system using ledger-based vault abstraction
 -- |
--- | This module implements the FeelsSOL system as a vault where:
--- | - JitoSOL is deposited as the underlying asset
--- | - FeelsSOL is issued as the share token
--- | - Oracle pricing determines the exchange rate
--- | - Buffer management ensures withdrawal liquidity
+-- | This module implements the FeelsSOL system as a ledger-based vault where:
+-- | - Ledger entries track JitoSOL deposits with oracle pricing
+-- | - Each entry represents a JitoSOL deposit at a specific oracle price
+-- | - Strategy state manages oracle integration and buffer management
 -- |
 -- | Key Features:
--- | - JitoSOL backing with oracle-based pricing
--- | - Withdrawal buffer for instant liquidity
--- | - Entry/exit fees configurable by governance
--- | - Solvency monitoring and rebalancing
+-- | - Oracle-based pricing with TWAP integration
+-- | - Withdrawal buffer management for instant liquidity
+-- | - Complete audit trail of all deposits and withdrawals
+-- | - Entry/exit fee tracking in ledger entries
 module Protocol.FeelsSOLVault
-  ( -- Core types
-    FeelsSOLVault
-  , FeelsSOLStrategy
-  , FeelsSOLState
+  ( -- Balance Sheet types
+    FeelsSOLEntry
   , OraclePrice
-  , MintResult
-  , BurnResult
-  -- Vault creation
+  , BufferStatus
+  -- State types
+  , FeelsSOLStrategy
+  -- Vault creation functions
   , createFeelsSOLVault
-  -- Balance sheet operations
-  , feelsSOLSharePrice
-  -- State management
+  , initializeFeelsSOLVault
+  -- Oracle management functions
   , updateOraclePrice
-  -- Functions
-  , allocateToBuffer
-  , useBufferForWithdrawal
-  , feelsSOLAllocationStrategy
+  , getOraclePrice
+  -- Deposit/withdrawal functions
+  , depositJitoSOL
+  , withdrawFeelsSOL
+  -- Buffer management functions
+  , getBufferStatus
+  , rebalanceBuffer
+  -- Query functions
+  , getUserBalance
+  , getTotalJitoSOL
+  , getEffectiveExchangeRate
   ) where
 
 import Prelude
 import Effect (Effect)
-import Effect.Ref (Ref, new, read, write, modify_)
-import Effect.Console (log)
+import Effect.Ref (Ref, new, read)
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Data.Array ((:), filter, find)
-import Data.Foldable (foldr, sum)
+import Data.Array (filter, partition, mapWithIndex)
+import Data.Array as Array
+import Data.Foldable (sum)
 import Data.Number (abs)
-import Unsafe.Coerce (unsafeCoerce)
-import Protocol.Vault (Vault, VaultState, BalanceSheet, Asset, Liability, deposit, withdraw, allocate, totalAssets)
-import Protocol.Token (TokenType(..))
+import Protocol.Vault 
+  ( LedgerEntry(..), LedgerVaultState, LedgerVault, ShareAmount
+  , class LedgerOps, createEmptyLedgerState, createLedgerVault
+  , getAccountEntries, getAllAccounts
+  )
 import Protocol.Common (BlockNumber)
+import Protocol.Token (TokenType(..))
 import Protocol.Error (ProtocolError(..))
+import Protocol.Config (defaultProtocolConfig)
 import FFI (currentTime)
 
 --------------------------------------------------------------------------------
--- SECTION 1: BALANCE SHEET
+-- BALANCE SHEET
 --------------------------------------------------------------------------------
+
+-- | FeelsSOL-specific ledger entry
+type FeelsSOLEntry =
+  { jitoSOLAmount :: ShareAmount    -- JitoSOL deposited
+  , entryPrice :: Number           -- Oracle price at deposit
+  , entryFee :: Number             -- Fee paid on deposit
+  , exitFee :: Number              -- Fee to be paid on withdrawal
+  , isBuffer :: Boolean            -- Whether this entry is buffer allocation
+  }
 
 -- | Oracle price information
 type OraclePrice =
@@ -57,36 +74,16 @@ type OraclePrice =
   , timestamp :: Number  -- When price was fetched
   }
 
--- | Result of minting FeelsSOL
-type MintResult =
-  { feelsSOLMinted :: Number
-  , jitoSOLLocked :: Number
-  , exchangeRate :: Number
-  , fee :: Number
-  , timestamp :: Number
+-- | Buffer status information
+type BufferStatus =
+  { bufferAmount :: Number
+  , totalBacking :: Number
+  , bufferRatio :: Number
+  , isHealthy :: Boolean
   }
-
--- | Result of burning FeelsSOL
-type BurnResult =
-  { feelsSOLBurned :: Number
-  , jitoSOLReleased :: Number
-  , exchangeRate :: Number
-  , fee :: Number
-  , timestamp :: Number
-  }
-
--- | FeelsSOL share price based on oracle pricing
--- | 1 FeelsSOL = oracle price amount of JitoSOL
-feelsSOLSharePrice :: FeelsSOLStrategy -> BalanceSheet -> Number
-feelsSOLSharePrice strategy bs =
-  -- In the FeelsSOL system, the share price is determined by the oracle
-  -- This ensures 1 FeelsSOL always equals the oracle price in JitoSOL value
-  case strategy.cachedPrice of
-    Just oracle -> oracle.price
-    Nothing -> 1.05  -- Default price if no oracle data yet
 
 --------------------------------------------------------------------------------
--- SECTION 2: STATE
+-- STATE
 --------------------------------------------------------------------------------
 
 -- | FeelsSOL strategy state
@@ -98,155 +95,284 @@ type FeelsSOLStrategy =
   , exitFee :: Number                      -- Fee for FeelsSOL → JitoSOL conversion
   , polAllocationRate :: Number            -- Portion of fees allocated to POL system
   , bufferTargetRatio :: Number            -- Target withdrawal buffer ratio
-  , jitoSOLBuffer :: Number                -- JitoSOL buffer for withdrawals
+  , totalJitoSOL :: Number                 -- Total JitoSOL in vault
+  , bufferJitoSOL :: Number                -- JitoSOL reserved for buffer
+  , totalFeesCollected :: Number           -- Total fees collected
   }
 
--- | FeelsSOL vault type
-type FeelsSOLVault = Vault FeelsSOLStrategy
+-- | Ledger operations instance for FeelsSOL entries
+instance ledgerOpsFeelsSOL :: LedgerOps FeelsSOLEntry where
+  -- Extract JitoSOL value from entry
+  entryValue (LedgerEntry e) = e.data.jitoSOLAmount
+  
+  -- All entries are always active (no time locks)
+  isActive _ _ = true
+  
+  -- Sum all JitoSOL amounts
+  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> e.data.jitoSOLAmount) entries
+  
+  -- Apply buffer rebalancing strategy
+  applyStrategy strategy entries = 
+    -- For now, no transformation needed
+    -- Future: could mark entries as buffer allocations
+    entries
+  
+  -- Select entries for withdrawal - prioritize buffer entries first
+  selectForWithdrawal requestedAmount entries =
+    let
+      -- Separate buffer and non-buffer entries with indices
+      indexedEntries = Array.mapWithIndex (\idx entry -> { entry: entry, index: idx }) entries
+      (bufferEntries, regularEntries) = Array.partition (\e -> case e.entry of
+        LedgerEntry le -> le.data.isBuffer
+      ) indexedEntries
+      
+      -- Try to fulfill from buffer first
+      selectFromEntries :: Array { entry :: LedgerEntry FeelsSOLEntry, index :: Int } -> 
+                          ShareAmount -> 
+                          Array { entry :: LedgerEntry FeelsSOLEntry, index :: Int } -> 
+                          Maybe (Array { entry :: LedgerEntry FeelsSOLEntry, index :: Int })
+      selectFromEntries [] remaining selected =
+        if remaining > 0.0 then Nothing else Just selected
+      selectFromEntries (e : es) remaining selected =
+        let value = entryValue e.entry
+            newRemaining = remaining - value
+        in if newRemaining <= 0.0
+           then Just (e : selected)
+           else selectFromEntries es newRemaining (e : selected)
+      
+      -- First try buffer entries, then regular entries
+      bufferResult = selectFromEntries bufferEntries requestedAmount []
+    in case bufferResult of
+      Just result -> Just result
+      Nothing -> 
+        -- Need to use both buffer and regular entries
+        let bufferTotal = aggregateEntries (map _.entry bufferEntries)
+            remainingNeeded = requestedAmount - bufferTotal
+        in case selectFromEntries regularEntries remainingNeeded bufferEntries of
+          Nothing -> Nothing
+          Just combined -> Just combined
 
--- | Legacy FeelsSOL state type (for compatibility)
-type FeelsSOLState = Ref FeelsSOLVault
+--------------------------------------------------------------------------------
+-- FUNCTIONS
+--------------------------------------------------------------------------------
 
--- | Update oracle price with caching
-updateOraclePrice :: FeelsSOLStrategy -> Effect FeelsSOLStrategy
-updateOraclePrice strategy = do
+-- Vault Creation Functions
+
+-- | Initialize a new FeelsSOL vault
+initializeFeelsSOLVault :: Effect Number -> BlockNumber -> Effect (Either ProtocolError (Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy)))
+initializeFeelsSOLVault priceOracle currentBlock = do
+  currentTime' <- currentTime
+  initialPrice <- priceOracle
+  
+  let initialStrategy =
+        { priceOracle: priceOracle
+        , lastOracleUpdate: currentTime'
+        , cachedPrice: Just { price: initialPrice, timestamp: currentTime' }
+        , entryFee: defaultProtocolConfig.feelsSOL.entryFee
+        , exitFee: defaultProtocolConfig.feelsSOL.exitFee
+        , polAllocationRate: defaultProtocolConfig.feelsSOL.polAllocationRate
+        , bufferTargetRatio: defaultProtocolConfig.buffer.targetRatio
+        , totalJitoSOL: 0.0
+        , bufferJitoSOL: 0.0
+        , totalFeesCollected: 0.0
+        }
+      
+      initialState = createEmptyLedgerState initialStrategy currentBlock
+  
+  vault <- createFeelsSOLVault "FeelsSOL" initialState
+  pure $ Right vault
+
+-- | Create FeelsSOL vault with ledger operations
+createFeelsSOLVault :: String -> LedgerVaultState FeelsSOLEntry FeelsSOLStrategy -> Effect (Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy))
+createFeelsSOLVault name initialState = do
+  stateRef <- new initialState
+  let vault = createLedgerVault name initialState stateRef
+  new vault
+
+-- Oracle Management Functions
+
+-- | Get current oracle price with caching
+getOraclePrice :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> Effect OraclePrice
+getOraclePrice vaultRef = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
   currentTime' <- currentTime
   
-  -- Use cached price if less than 1 minute old
+  -- Use cached price if fresh enough
   case strategy.cachedPrice of
-    Just cached | (currentTime' - strategy.lastOracleUpdate) < 60000.0 -> 
-      pure strategy
+    Just cached | (currentTime' - strategy.lastOracleUpdate) < defaultProtocolConfig.oracle.fiveMinuteWindow -> 
+      pure cached
     _ -> do
-      -- Fetch fresh price from oracle
-      price <- strategy.priceOracle
-      let newPrice = { price: price, timestamp: currentTime' }
-      
-      pure strategy 
-        { cachedPrice = Just newPrice
+      -- Fetch fresh price
+      newPrice <- strategy.priceOracle
+      let oraclePrice = { price: newPrice, timestamp: currentTime' }
+          newStrategy = strategy 
+            { cachedPrice = Just oraclePrice
+            , lastOracleUpdate = currentTime'
+            }
+      vault.updateStrategy newStrategy
+      pure oraclePrice
+
+-- | Update oracle price manually
+updateOraclePrice :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> Number -> Effect Unit
+updateOraclePrice vaultRef newPrice = do
+  vault <- read vaultRef
+  currentTime' <- currentTime
+  let oraclePrice = { price: newPrice, timestamp: currentTime' }
+  
+  state <- read vault.state
+  let newStrategy = state.strategyState
+        { cachedPrice = Just oraclePrice
         , lastOracleUpdate = currentTime'
         }
+  vault.updateStrategy newStrategy
 
---------------------------------------------------------------------------------
--- SECTION 3: FUNCTIONS
---------------------------------------------------------------------------------
+-- Deposit/Withdrawal Functions
 
--- | Create a new FeelsSOL vault
-createFeelsSOLVault :: String -> FeelsSOLStrategy -> Effect (Ref FeelsSOLVault)
-createFeelsSOLVault name initialStrategy = do
-  -- Initial empty balance sheet
-  let initialBalanceSheet =
-        { assets: []
-        , liabilities: []
-        , totalShares: 0.0
-        }
+-- | Deposit JitoSOL and receive FeelsSOL
+depositJitoSOL ::
+  Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) ->
+  String ->           -- User address
+  Number ->           -- JitoSOL amount
+  BlockNumber ->      -- Current block
+  Effect (Either ProtocolError ShareAmount)
+depositJitoSOL vaultRef user jitoSOLAmount currentBlock = do
+  vault <- read vaultRef
+  
+  -- Get current oracle price
+  oraclePrice <- getOraclePrice vaultRef
+  
+  state <- read vault.state
+  let strategy = state.strategyState
       
-      -- Initial vault state
-      initialState =
-        { balanceSheet: initialBalanceSheet
-        , strategyState: initialStrategy
-        , lastUpdateBlock: 0
-        }
+      -- Calculate fees
+      entryFeeAmount = jitoSOLAmount * strategy.entryFee
+      netJitoSOL = jitoSOLAmount - entryFeeAmount
       
-      -- FeelsSOL-specific share price function
-      feelsSOLVaultSharePrice :: BalanceSheet -> Number
-      feelsSOLVaultSharePrice = feelsSOLSharePrice initialStrategy
-  
-  -- Create a ref to hold the vault
-  vaultRef <- new (unsafeCoerce unit :: FeelsSOLVault)
-  
-  -- Create vault implementation
-  let vault =
-        { name: name
-        , state: initialState
-        
-        -- Deposit implementation (only accepts JitoSOL)
-        , deposit: \tokenType amount depositor -> do
-            case tokenType of
-              JitoSOL -> do
-                currentVault <- read vaultRef
-                
-                -- Update oracle price before deposit
-                updatedStrategy <- updateOraclePrice currentVault.state.strategyState
-                let updatedState = currentVault.state { strategyState = updatedStrategy }
-                    
-                    -- Calculate fee
-                    feeAmount = amount * updatedStrategy.entryFee
-                    netAmount = amount - feeAmount
-                    
-                    -- Use custom share price function that uses oracle
-                    customSharePrice = feelsSOLSharePrice updatedStrategy
-                    result = deposit customSharePrice updatedState tokenType netAmount depositor
-                    
-                    -- Allocate to buffer if needed
-                    finalState = allocateToBuffer result.state netAmount updatedStrategy.bufferTargetRatio
-                
-                modify_ (\v -> v { state = finalState }) vaultRef
-                pure result.shares  -- This is the amount of FeelsSOL minted
-              _ -> pure 0.0  -- Only accept JitoSOL
-        
-        -- Withdraw implementation (burn FeelsSOL, return JitoSOL)
-        , withdraw: \shares withdrawer -> do
-            currentVault <- read vaultRef
-            
-            -- Update oracle price before withdrawal
-            updatedStrategy <- updateOraclePrice currentVault.state.strategyState
-            let updatedState = currentVault.state { strategyState = updatedStrategy }
-                customSharePrice = feelsSOLSharePrice updatedStrategy
-            
-            case withdraw customSharePrice updatedState shares withdrawer of
-              Nothing -> pure 0.0
-              Just result -> do
-                -- Calculate exit fee on the JitoSOL amount
-                let feeAmount = result.amount * updatedStrategy.exitFee
-                    netAmount = result.amount - feeAmount
-                    
-                    -- Use buffer first if available
-                    finalState = useBufferForWithdrawal result.state result.amount
-                
-                modify_ (\v -> v { state = finalState }) vaultRef
-                pure netAmount  -- Return net JitoSOL after fee
-        
-        -- Allocation strategy (manages buffer)
-        , allocate: do
-            modify_ (\v -> 
-              let strategy = v.state.strategyState
-                  newState = allocate v.state (feelsSOLAllocationStrategy strategy.bufferTargetRatio)
-              in v { state = newState }
-            ) vaultRef
-        
-        -- Strategy update
-        , updateStrategy: \newStrategy -> do
-            modify_ (\v -> v { state = v.state { strategyState = newStrategy } }) vaultRef
-        
-        -- Share price implementation
-        , sharePrice: feelsSOLVaultSharePrice
+      -- Calculate FeelsSOL to mint based on oracle price
+      -- 1 FeelsSOL = oracle price JitoSOL
+      feelsSOLAmount = netJitoSOL / oraclePrice.price
+      
+      -- Create ledger entry
+      entry: FeelsSOLEntry =
+        { jitoSOLAmount: netJitoSOL
+        , entryPrice: oraclePrice.price
+        , entryFee: entryFeeAmount
+        , exitFee: strategy.exitFee
+        , isBuffer: false
         }
   
-  -- Write the vault to the ref
-  _ <- write vault vaultRef
-  pure vaultRef
+  -- Record deposit
+  result <- vault.deposit user entry currentBlock
+  
+  -- Update strategy totals
+  let newStrategy = strategy
+        { totalJitoSOL = strategy.totalJitoSOL + netJitoSOL
+        , totalFeesCollected = strategy.totalFeesCollected + entryFeeAmount
+        }
+  vault.updateStrategy newStrategy
+  
+  -- Rebalance buffer if needed
+  _ <- rebalanceBuffer vaultRef currentBlock
+  
+  pure $ Right feelsSOLAmount
 
--- | Allocate portion of deposit to buffer based on target ratio
-allocateToBuffer :: forall a. VaultState a -> Number -> Number -> VaultState a
-allocateToBuffer vaultState _ _ = vaultState  -- Simplified for now
+-- | Withdraw FeelsSOL and receive JitoSOL
+withdrawFeelsSOL ::
+  Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) ->
+  String ->           -- User address
+  ShareAmount ->      -- FeelsSOL amount to burn
+  BlockNumber ->      -- Current block
+  Effect (Either ProtocolError Number)
+withdrawFeelsSOL vaultRef user feelsSOLAmount currentBlock = do
+  vault <- read vaultRef
+  
+  -- Get current oracle price
+  oraclePrice <- getOraclePrice vaultRef
+  
+  state <- read vault.state
+  let strategy = state.strategyState
+      
+      -- Calculate JitoSOL to return based on oracle price
+      jitoSOLAmount = feelsSOLAmount * oraclePrice.price
+  
+  -- Check if user has enough balance
+  userBalance <- getUserBalance vaultRef user
+  if userBalance < feelsSOLAmount
+    then pure $ Left $ InvalidCommandError "Insufficient FeelsSOL balance"
+    else do
+      -- Process withdrawal
+      result <- vault.withdraw user jitoSOLAmount currentBlock
+      case result of
+        Nothing -> pure $ Left $ InvalidCommandError "Withdrawal failed"
+        Just withdrawResult -> do
+          -- Calculate exit fee
+          let exitFeeAmount = withdrawResult.amount * strategy.exitFee
+              netJitoSOL = withdrawResult.amount - exitFeeAmount
+              
+              -- Update strategy totals
+              newStrategy = strategy
+                { totalJitoSOL = strategy.totalJitoSOL - withdrawResult.amount
+                , totalFeesCollected = strategy.totalFeesCollected + exitFeeAmount
+                }
+          vault.updateStrategy newStrategy
+          
+          pure $ Right netJitoSOL
 
--- | Use buffer for withdrawal if available
-useBufferForWithdrawal :: forall a. VaultState a -> Number -> VaultState a
-useBufferForWithdrawal vaultState _ = vaultState  -- Simplified for now
+-- Buffer Management Functions
 
--- | FeelsSOL allocation strategy for buffer management
-feelsSOLAllocationStrategy :: Number -> FeelsSOLStrategy -> Array Asset -> Array Asset
-feelsSOLAllocationStrategy targetBufferRatio _ assets =
-  let
-    -- Calculate total JitoSOL
-    totalJitoSOL = sum $ map _.amount $ filter (\a -> a.tokenType == JitoSOL) assets
-    
-    -- Determine buffer allocation
-    bufferAmount = totalJitoSOL * targetBufferRatio
-    backingAmount = totalJitoSOL - bufferAmount
-    
-    -- Create allocated assets
-    backingAsset = { tokenType: JitoSOL, amount: backingAmount, venue: "FeelsSOL-Backing" }
-    bufferAsset = { tokenType: JitoSOL, amount: bufferAmount, venue: "FeelsSOL-Buffer" }
-    
-  in [backingAsset, bufferAsset]
+-- | Get buffer status
+getBufferStatus :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> Effect BufferStatus
+getBufferStatus vaultRef = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
+      bufferRatio = if strategy.totalJitoSOL > 0.0
+                   then strategy.bufferJitoSOL / strategy.totalJitoSOL
+                   else 0.0
+  
+  pure
+    { bufferAmount: strategy.bufferJitoSOL
+    , totalBacking: strategy.totalJitoSOL
+    , bufferRatio: bufferRatio
+    , isHealthy: bufferRatio >= defaultProtocolConfig.buffer.minRatio
+    }
+
+-- | Rebalance buffer to target ratio
+rebalanceBuffer :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> BlockNumber -> Effect Unit
+rebalanceBuffer vaultRef currentBlock = do
+  vault <- read vaultRef
+  state <- read vault.state
+  let strategy = state.strategyState
+      targetBuffer = strategy.totalJitoSOL * strategy.bufferTargetRatio
+      currentBuffer = strategy.bufferJitoSOL
+      difference = targetBuffer - currentBuffer
+  
+  -- Only rebalance if difference exceeds threshold
+  if abs difference > (strategy.totalJitoSOL * defaultProtocolConfig.buffer.rebalanceThreshold)
+    then do
+      let newStrategy = strategy { bufferJitoSOL = targetBuffer }
+      vault.updateStrategy newStrategy
+    else pure unit
+
+-- Query Functions
+
+-- | Get user's FeelsSOL balance
+getUserBalance :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> String -> Effect ShareAmount
+getUserBalance vaultRef user = do
+  vault <- read vaultRef
+  vault.getBalance user
+
+-- | Get total JitoSOL in vault
+getTotalJitoSOL :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> Effect Number
+getTotalJitoSOL vaultRef = do
+  vault <- read vaultRef
+  state <- read vault.state
+  pure state.strategyState.totalJitoSOL
+
+-- | Get effective exchange rate (FeelsSOL/JitoSOL)
+getEffectiveExchangeRate :: Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) -> Effect Number
+getEffectiveExchangeRate vaultRef = do
+  oraclePrice <- getOraclePrice vaultRef
+  pure oraclePrice.price

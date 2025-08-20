@@ -11,7 +11,7 @@ import Data.Array ((:))
 import Data.Map as Map
 import Effect (Effect)
 import Effect.Console (log)
-import Protocol.POLVault (POLState, getAllAllocations)
+import Protocol.ProtocolVault (POLState, getAllAllocations)
 import Protocol.Pool (Pool)
 import Protocol.Oracle (Oracle, updatePriceWithTimestamp)
 import FFI (currentTime)

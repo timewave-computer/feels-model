@@ -7,7 +7,7 @@
 -- | and type safety, eliminating ~150-200 lines of unsafe operations.
 module UI.Util.Codecs
   ( -- Core data types (now with automatic JSON instances)
-    TokenMetadataCodec
+    TokenMetadataCodec(..)
   , PositionCodec 
   , LenderOfferCodec
   , LaunchResultCodec
@@ -31,9 +31,10 @@ import Simple.JSON (class ReadForeign, class WriteForeign, readJSON, writeJSON)
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Data.Array (mapMaybe)
-import Foreign (Foreign)
+import Foreign (Foreign, renderForeignError)
 import Data.Generic.Rep (class Generic)
 import Simple.JSON as JSON
+import Data.List.NonEmpty as NEL
 
 --------------------------------------------------------------------------------
 -- Token Metadata Codec (replaces 8+ unsafeCoerce instances)
@@ -48,15 +49,15 @@ newtype TokenMetadataCodec = TokenMetadataCodec
   , totalSupply :: Maybe Number
   }
 
--- Automatic JSON instances (no manual codec needed)
-instance readTokenMetadata :: ReadForeign TokenMetadataCodec where
-  readImpl = JSON.readImpl
-instance writeTokenMetadata :: WriteForeign TokenMetadataCodec where
-  writeImpl = JSON.writeImpl
+-- Derive newtype instance for automatic JSON
+derive newtype instance readForeignTokenMetadataCodec :: ReadForeign TokenMetadataCodec
+derive newtype instance writeForeignTokenMetadataCodec :: WriteForeign TokenMetadataCodec
 
 -- | Decode token metadata safely (automatic)
 decodeTokenMetadata :: String -> Either String TokenMetadataCodec
-decodeTokenMetadata = readJSON
+decodeTokenMetadata jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Encode token metadata safely (automatic)
 encodeTokenMetadata :: TokenMetadataCodec -> String
@@ -79,15 +80,15 @@ newtype PositionCodec = PositionCodec
   , owner :: Maybe String
   }
 
--- Automatic JSON instances
-instance readPosition :: ReadForeign PositionCodec where
-  readImpl = JSON.readImpl
-instance writePosition :: WriteForeign PositionCodec where
-  writeImpl = JSON.writeImpl
+-- Derive newtype instance for automatic JSON
+derive newtype instance readForeignPositionCodec :: ReadForeign PositionCodec
+derive newtype instance writeForeignPositionCodec :: WriteForeign PositionCodec
 
 -- | Decode position safely (automatic)
 decodePosition :: String -> Either String PositionCodec
-decodePosition = readJSON
+decodePosition jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Encode position safely (automatic)
 encodePosition :: PositionCodec -> String
@@ -106,15 +107,15 @@ newtype LenderOfferCodec = LenderOfferCodec
   , lockedAmount :: Number
   }
 
--- Automatic JSON instances
-instance readLenderOffer :: ReadForeign LenderOfferCodec where
-  readImpl = JSON.readImpl
-instance writeLenderOffer :: WriteForeign LenderOfferCodec where
-  writeImpl = JSON.writeImpl
+-- Derive newtype instance for automatic JSON
+derive newtype instance readForeignLenderOfferCodec :: ReadForeign LenderOfferCodec
+derive newtype instance writeForeignLenderOfferCodec :: WriteForeign LenderOfferCodec
 
 -- | Decode lender offer safely (automatic)
 decodeLenderOffer :: String -> Either String LenderOfferCodec
-decodeLenderOffer = readJSON
+decodeLenderOffer jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Encode lender offer safely (automatic)
 encodeLenderOffer :: LenderOfferCodec -> String
@@ -133,15 +134,15 @@ newtype LaunchResultCodec = LaunchResultCodec
   , revenue :: Number
   }
 
--- Automatic JSON instances
-instance readLaunchResult :: ReadForeign LaunchResultCodec where
-  readImpl = JSON.readImpl
-instance writeLaunchResult :: WriteForeign LaunchResultCodec where
-  writeImpl = JSON.writeImpl
+-- Derive newtype instance for automatic JSON
+derive newtype instance readForeignLaunchResultCodec :: ReadForeign LaunchResultCodec
+derive newtype instance writeForeignLaunchResultCodec :: WriteForeign LaunchResultCodec
 
 -- | Decode launch result safely (automatic)
 decodeLaunchResult :: String -> Either String LaunchResultCodec
-decodeLaunchResult = readJSON
+decodeLaunchResult jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Encode launch result safely (automatic)
 encodeLaunchResult :: LaunchResultCodec -> String
@@ -153,12 +154,18 @@ encodeLaunchResult = writeJSON
 
 -- | Decode array of tokens safely using automatic JSON parsing
 decodeTokenArray :: String -> Either String (Array TokenMetadataCodec)
-decodeTokenArray = readJSON
+decodeTokenArray jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Decode array of positions safely using automatic JSON parsing
 decodePositionArray :: String -> Either String (Array PositionCodec)
-decodePositionArray = readJSON
+decodePositionArray jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value
 
 -- | Decode array of lender offers safely using automatic JSON parsing
 decodeLenderOfferArray :: String -> Either String (Array LenderOfferCodec)
-decodeLenderOfferArray = readJSON
+decodeLenderOfferArray jsonStr = case readJSON jsonStr of
+  Left errors -> Left (renderForeignError (NEL.head errors))
+  Right value -> Right value

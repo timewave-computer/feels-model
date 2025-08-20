@@ -44,7 +44,7 @@ import Effect (Effect)
 import Effect.Random (random, randomInt)
 
 import Utils (formatAmount)
-import Protocol.PositionVault (Duration(..), Leverage(..))
+import Protocol.Pool (Duration(..), Leverage(..))
 import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------
@@ -106,7 +106,7 @@ type AgentPreferences =
 -- | Time tolerance preferences across duration options
 -- | Flash = Low tolerance (immediate settlement)
 -- | Monthly = High tolerance (28-day lock)
--- | Spot = Infinite tolerance (theoretical, no commitment)
+-- | Swap = Infinite tolerance (theoretical, no commitment)
 type TimeTolerance =
   { flashProbability :: Number     -- Low time tolerance (0.0-1.0)
   , monthlyProbability :: Number   -- High time tolerance (0.0-1.0)
@@ -283,7 +283,7 @@ sampleFromPreferences prefs = do
           then Flash
         else if timeRoll < (prefs.timeTolerances.flashProbability + prefs.timeTolerances.monthlyProbability)
           then Monthly
-        else Spot
+        else Swap
   
   -- Sample leverage
   leverageRoll <- random
@@ -297,7 +297,7 @@ sampleFromPreferences prefs = do
   let lendAsset =
         if liquidityRoll < prefs.liquidityTolerance.feelsSOLProbability
           then FeelsSOL
-        else Token "USDC"  -- Default to USDC for now, should be parameterized
+        else Custom "USDC"  -- Default to USDC for now, should be parameterized
   
   pure { duration, leverage, lendAsset }
 
@@ -309,7 +309,7 @@ getPositionProbability prefs duration leverage lendAsset =
     timeProbability = case duration of
       Flash -> prefs.timeTolerances.flashProbability
       Monthly -> prefs.timeTolerances.monthlyProbability
-      Spot -> prefs.timeTolerances.spotProbability
+      Swap -> prefs.timeTolerances.spotProbability
     
     leverageProbability = case leverage of
       Senior -> prefs.leverageTolerance.seniorProbability

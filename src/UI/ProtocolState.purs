@@ -31,10 +31,11 @@ import Protocol.Common (CommandResult, QueryResult)
 -- Import domain types needed for state
 import Protocol.Token (TokenType(..), TokenMetadata)
 import UI.TokenRegistry (TokenRegistry, initTokenRegistry)
-import Protocol.PositionVault (VaultPosition, Duration, Leverage)
+import Protocol.Pool (Duration, Leverage)
+import Protocol.PositionVault (VaultPosition)
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry, addPool)
 import Protocol.FeelsSOLVault (FeelsSOLState, createFeelsSOLVault)
-import Protocol.POLVault (POLState, initPOL, contribute, getTotalPOL)
+import Protocol.ProtocolVault (contributeToProtocol, getTotalProtocolPOL, createProtocolVault, ProtocolVault)
 import Protocol.Oracle (Oracle, initOracle)
 import UI.Account (AccountRegistry, initAccountRegistry, updateChainAccountBalance)
 import Protocol.LaunchVault (LaunchVault)
@@ -97,7 +98,7 @@ type ProtocolState =
   { tokenRegistry :: TokenRegistry
   , poolRegistry :: PoolRegistry
   , feelsSOL :: FeelsSOLState
-  , polState :: POLState
+  , polState :: Ref ProtocolVault
   , oracle :: Oracle
   , accounts :: AccountRegistry
   , launches :: Map String (Ref LaunchVault)     -- Pool ID -> Launch vault
@@ -135,11 +136,11 @@ initStateImpl = do
   -- Initialize oracle and POL
   let oracleInit = initOracle 1.05
   oracle :: Oracle <- oracleInit
-  let polInit = initPOL
-  polState :: POLState <- polInit
+  -- Initialize protocol vault instead of separate POL state
+  polState <- createProtocolVault "POL-System"
   
   -- Debug: Check POL initialization
-  totalPOL <- getTotalPOL polState
+  totalPOL <- getTotalProtocolPOL polState
   log $ "POL initialized with totalPOL: " <> show totalPOL
   
   -- Initialize FeelsSOL vault with oracle and fee configuration
@@ -206,7 +207,7 @@ initStateImpl = do
       , feelsSOLBurnFee: 10.0
       , swapFeeRate: 30.0
       , flashLoanFee: 5.0
-      , spotPositionFee: 30.0
+      , swapPositionFee: 30.0
       , monthlyPositionFee: 20.0
       , seniorLeverageFee: 1.0
       , juniorLeverageFee: 1.5

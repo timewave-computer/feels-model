@@ -15,12 +15,13 @@ import Effect (Effect)
 -- Import types
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..), TokenMetadata)
-import Protocol.PositionVault (Position, Duration, Leverage)
+import Protocol.Pool (Duration, Leverage)
+import Protocol.PositionVault (VaultPosition)
 import Protocol.Error (ProtocolError(..))
 
 -- Import actions
 import UI.Action.FeelsSOLActions (enterFeelsSOL)
-import UI.Action.PositionActions (createPosition)
+import UI.Action.PositionActions (createVaultPosition)
 import UI.Action.TokenActions (createToken)
 import UI.Account (getChainAccountBalance)
 
@@ -30,7 +31,7 @@ import UI.Account (getChainAccountBalance)
 
 -- | Result of atomic position creation from JitoSOL
 type AtomicPositionResult =
-  { position :: Position
+  { position :: VaultPosition
   , feelsSOLUsed :: Number
   , jitoSOLUsed :: Number
   }
@@ -38,7 +39,7 @@ type AtomicPositionResult =
 -- | Result of atomic token + position creation from JitoSOL
 type AtomicTokenPositionResult =
   { token :: TokenMetadata
-  , position :: Position
+  , position :: VaultPosition
   , feelsSOLUsed :: Number
   , jitoSOLUsed :: Number
   }
@@ -52,7 +53,7 @@ type AtomicTokenPositionResult =
 createPositionFromJitoSOL :: 
   String ->           -- user
   Number ->           -- JitoSOL amount
-  Duration ->         -- duration (Spot or Monthly)
+  Duration ->         -- duration (Swap or Monthly)
   Leverage ->         -- leverage tier (Senior or Junior)
   Boolean ->          -- rollover
   Maybe String ->     -- target token for staking

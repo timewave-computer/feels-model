@@ -7,8 +7,9 @@ module Test.Model where
 import Prelude
 
 import Data.Int as Int
-import Protocol.Token (TokenType(..), TokenSupply)
-import Protocol.PositionVault (Position, Duration(..), Leverage(..), leverageMultiplier, spotDuration)
+import Protocol.Token (TokenType(..))
+import Protocol.Pool (Duration(..), Leverage(..), leverageMultiplier)
+import Protocol.PositionVault (VaultPosition)
 import Data.Array (elem)
 import Data.Number (abs)
 import Data.Array.NonEmpty as NEA
@@ -17,6 +18,9 @@ import Effect.Console (log)
 import Test.QuickCheck (Result(..), quickCheck)
 import Test.QuickCheck.Arbitrary (class Arbitrary)
 import Test.QuickCheck.Gen (elements)
+
+-- Local type for testing
+type TokenSupply = { tokenType :: TokenType, supply :: Number }
 
 -- Convert leverage parameter to effective multiplier
 -- Leverage parameter of 0.5 = 50% additional exposure = 1.5x effective multiplier
@@ -47,7 +51,7 @@ testTickParameterAssociativity input x y =
     else Failed $ "Tick parameter associativity failed for " <> show x <> " * " <> show y <> " = " <> show expectedMultiplier
 
 -- Helper to extract effective leverage from position
-getLeverageFromPosition :: Position -> Number
+getLeverageFromPosition :: VaultPosition -> Number
 getLeverageFromPosition position = leverageMultiplier position.leverage
 
 -- Tick parameter identity tests

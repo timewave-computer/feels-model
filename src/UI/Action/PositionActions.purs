@@ -22,7 +22,8 @@ import Effect.Console (log)
 -- Import types
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..))
-import Protocol.PositionVault (Position, Duration(..), Leverage(..), isExpired, leverageMultiplier, isSpot, isVolHarvesterPosition)
+import Protocol.Pool (Duration(..), Leverage(..), leverageMultiplier)
+import Protocol.PositionVault (VaultPosition, isExpired, isSwap)
 import Protocol.PositionVault as P
 import Data.Array ((:))
 import UI.PoolRegistry (getPosition, removePosition, addPosition)
@@ -34,9 +35,9 @@ import UI.Account (getFeelsAccountBalance, updateFeelsAccountBalance)
 -- Helper Functions
 --------------------------------------------------------------------------------
 
--- | Check if position is spot (no duration)
-isSpotPosition :: Position -> Boolean
-isSpotPosition = isSpot
+-- | Check if position is swap (no duration)
+isSwapPosition :: VaultPosition -> Boolean
+isSwapPosition = isSwap
 
 -- | Validate position creation parameters
 validatePositionParams :: String -> Number -> Effect (Either ProtocolError Unit)
@@ -54,7 +55,7 @@ validatePositionParams user amount = do
         pure $ Right unit
 
 -- | Validate position ownership
-validatePositionOwnership :: String -> Position -> Effect (Either ProtocolError Unit)
+validatePositionOwnership :: String -> VaultPosition -> Effect (Either ProtocolError Unit)
 validatePositionOwnership user position = 
   if position.owner /= user
     then do
@@ -67,7 +68,7 @@ validatePositionOwnership user position =
 -- | Validate position can be closed
 validatePositionExpiry :: Int -> Position -> Effect (Either ProtocolError Unit)
 validatePositionExpiry currentBlock position =
-  if not (isSpotPosition position) && not (isExpired currentBlock position)
+  if not (isSwapPosition position) && not (isExpired currentBlock position)
     then do
       log $ "Position expiry validation failed: Position " <> show position.id <> " has not expired yet"
       pure $ Left $ InvalidCommandError $ "Position " <> show position.id <> " has not expired yet"
@@ -86,7 +87,7 @@ createPosition ::
   Number ->           -- amount
   TokenType ->        -- collateral asset
   Number ->           -- collateral amount
-  Duration ->         -- duration (Spot or Monthly)
+  Duration ->         -- duration (Swap or Monthly)
   Leverage ->         -- leverage tier (Senior or Junior)
   Boolean ->          -- rollover
   Maybe String ->     -- target token for staking
@@ -244,7 +245,7 @@ getPositionValue positionId state = do
       
       -- 4. Apply time-based returns for term positions (simplified)
       currentBlock <- pure state.currentBlock
-      let timeMultiplier = if isSpotPosition position
+      let timeMultiplier = if isSwapPosition position
                           then 1.0
                           else 
                             let blocksHeld = currentBlock - position.createdAt
@@ -271,9 +272,9 @@ initiateUnbonding user positionId state = do
           -- 3. Check if position can be unbonded
           -- For spot positions, unbonding is immediate
           -- For term positions, we must wait until expiry
-          if isSpotPosition position
+          if isSwapPosition position
             then do
-              -- Spot positions can be closed immediately
+              -- Swap positions can be closed immediately
               closePosition user positionId state
             else do
               -- Term positions must wait until expiry
@@ -294,7 +295,7 @@ withdrawPosition user positionId state = do
         else do
           -- 3. For term positions, check if expired
           currentBlock <- pure state.currentBlock
-          if not (isSpotPosition position) && not (isExpired currentBlock position)
+          if not (isSwapPosition position) && not (isExpired currentBlock position)
             then pure $ Left $ InvalidCommandError $ "Position " <> show positionId <> " has not expired yet"
             else do
               -- 4. Use closePosition logic to handle the withdrawal

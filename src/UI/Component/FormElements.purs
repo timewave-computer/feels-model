@@ -350,14 +350,14 @@ createAssetSelectOptions =
   [ createSelectOption "jitosol" "JitoSOL" false
   , createSelectOption "feelssol" "FeelsSOL" false
   , createSelectOption "position" "Existing Position" false
-  , createSelectOption "position-spot" "Spot Position" false
+  , createSelectOption "position-swap" "Swap Position" false
   , createSelectOption "position-term" "Term Position" false
   ]
 
 -- | Create options for term type selection
 createTermTypeOptions :: Array SelectOption
 createTermTypeOptions =
-  [ createSelectOption "spot" "Spot (Flexible)" false
+  [ createSelectOption "swap" "Swap (Flexible)" false
   , createSelectOption "monthly" "Monthly Term (Join Current Cycle)" false
   ]
 
