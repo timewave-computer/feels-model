@@ -176,4 +176,4 @@ defaultSimulationConfig =
 parseTokenType :: String -> TokenType
 parseTokenType "JitoSOL" = JitoSOL
 parseTokenType "FeelsSOL" = FeelsSOL
-parseTokenType ticker = Token ticker
+parseTokenType ticker = Custom ticker

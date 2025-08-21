@@ -12,6 +12,9 @@ module UI.Component.Panel
   , SectionConfig
   , CardConfig
   , PanelStyle(..)
+  -- Default configurations
+  , defaultPanelConfig
+  , defaultSectionConfig
   ) where
 
 import Prelude
@@ -33,6 +36,7 @@ data PanelStyle
   | InfoPanel
   | WarningPanel
   | ErrorPanel
+  | Standard
 
 derive instance eqPanelStyle :: Eq PanelStyle
 
@@ -43,6 +47,7 @@ instance showPanelStyle :: Show PanelStyle where
   show InfoPanel = "panel panel--info"
   show WarningPanel = "panel panel--warning"
   show ErrorPanel = "panel panel--error"
+  show Standard = "panel panel--standard"
 
 -- | Configuration for panel components
 type PanelConfig action =

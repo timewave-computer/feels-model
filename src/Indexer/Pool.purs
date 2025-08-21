@@ -106,6 +106,7 @@ processEvent event state = case event of
   SwapExecuted _ -> processSwapEvent event state
   LiquidityChanged _ -> processLiquidityEvent event state  
   POLDeployed polEvent -> processPOLDeployedEvent polEvent state
+  _ -> pure state  -- Ignore other events
 
 -- | Process swap events and update comprehensive pool metrics
 -- | Updates price, volume, trading patterns, and statistical measures

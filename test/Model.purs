@@ -32,7 +32,7 @@ newtype TestTokenType = TestTokenType TokenType
 
 -- Arbitrary instance for testing
 instance arbitraryTestTokenType :: Arbitrary TestTokenType where
-  arbitrary = TestTokenType <$> elements (NEA.cons' FeelsSOL [Token "TEST1", Token "TEST2", JitoSOL])
+  arbitrary = TestTokenType <$> elements (NEA.cons' FeelsSOL [Custom "TEST1", Custom "TEST2", JitoSOL])
 
 -- Test data generators
 genTokenSupply :: TestTokenType -> Number -> TokenSupply
@@ -52,7 +52,7 @@ testTickParameterAssociativity input x y =
 
 -- Helper to extract effective leverage from position
 getLeverageFromPosition :: VaultPosition -> Number
-getLeverageFromPosition position = leverageMultiplier position.leverage
+getLeverageFromPosition position = leverageMultiplier position.terms.leverage
 
 -- Tick parameter identity tests
 -- Tests that neutral tick parameters preserve base values: Tick(Token, 1x) = Token

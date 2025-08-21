@@ -19,10 +19,17 @@ module Protocol.Common
   , TokenMetadata
   , Position
   , LaunchResult
+  -- Event handling
+  , EventEmitter
+  , createEventEmitter
+  , emit
   ) where
 
 import Prelude
 import Data.Maybe (Maybe)
+import Data.Foldable (traverse_)
+import Effect (Effect)
+import Effect.Ref (Ref, new, read, modify_)
 import Protocol.Token (TokenType(..))
 
 --------------------------------------------------------------------------------
@@ -112,3 +119,23 @@ data QueryResult
   | ActiveLaunchesList                           -- Currently active token launches
       (Array { poolId :: String, phase :: String })
   | LaunchStatusResult (Maybe LaunchResult)      -- Current launch status
+
+--------------------------------------------------------------------------------
+-- EVENT HANDLING
+--------------------------------------------------------------------------------
+-- Simple event emitter for protocol events
+
+-- | Event emitter for protocol events
+type EventEmitter a = Ref
+  { handlers :: Array (a -> Effect Unit)
+  }
+
+-- | Create a new event emitter
+createEventEmitter :: forall a. Effect (EventEmitter a)
+createEventEmitter = new { handlers: [] }
+
+-- | Emit an event to all registered handlers
+emit :: forall a. EventEmitter a -> a -> Effect Unit
+emit emitterRef event = do
+  emitter <- read emitterRef
+  traverse_ (\handler -> handler event) emitter.handlers

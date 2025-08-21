@@ -15,6 +15,8 @@ module Protocol.LaunchVault
     LaunchEntry
   , LaunchPhase(..)
   , LaunchStatus
+  , DepositForLaunchParams
+  , WithdrawFromLaunchParams
   -- State types
   , LaunchStrategy
   , PhaseConfig
@@ -27,8 +29,8 @@ module Protocol.LaunchVault
   , transitionPhase
   , checkPhaseComplete
   -- Token operation functions
-  , purchaseTokens
-  , claimTokens
+  , depositForLaunchTokens
+  , withdrawFromLaunch
   -- Query functions
   , getUserPurchases
   , getTotalRaised
@@ -40,7 +42,7 @@ import Effect (Effect)
 import Effect.Ref (Ref, new, read)
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Data.Array (filter, find, mapWithIndex, sortBy)
+import Data.Array (filter, find, mapWithIndex, sortBy, (:), uncons)
 import Data.Array as Array
 import Data.Foldable (sum)
 import Data.Ord (compare)
@@ -48,7 +50,7 @@ import Data.Number (abs)
 import Protocol.Vault 
   ( LedgerEntry(..), LedgerVaultState, LedgerVault, ShareAmount
   , class LedgerOps, createEmptyLedgerState, createLedgerVault
-  , getAccountEntries, getAllAccounts
+  , getAccountEntries, getAllAccounts, entryValue, aggregateEntries
   )
 import Protocol.Common (BlockNumber)
 import Protocol.Pool (Duration(..))
@@ -60,7 +62,7 @@ import Protocol.Config (defaultProtocolConfig)
 --------------------------------------------------------------------------------
 
 -- | Launch-specific ledger entry
-type LaunchEntry =
+data LaunchEntry = LaunchEntry
   { shares :: ShareAmount        -- Number of tokens purchased
   , phase :: LaunchPhase         -- Phase when purchased
   , pricePerShare :: Number      -- Price paid per share
@@ -124,16 +126,19 @@ type LaunchConfig =
 -- | Ledger operations instance for launch entries
 instance ledgerOpsLaunch :: LedgerOps LaunchEntry where
   -- Extract share value from entry
-  entryValue (LedgerEntry e) = e.data.shares
+  entryValue (LedgerEntry e) = case e.data of
+    LaunchEntry rec -> rec.shares
   
   -- Check if entry is active (unlocked)
-  isActive currentBlock (LedgerEntry e) = 
-    case e.data.maturityBlock of
+  isActive currentBlock (LedgerEntry e) = case e.data of
+    LaunchEntry rec -> case rec.maturityBlock of
       Nothing -> true
       Just maturity -> currentBlock >= maturity
   
   -- Sum all share values
-  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> e.data.shares) entries
+  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> case e.data of
+    LaunchEntry rec -> rec.shares
+  ) entries
   
   -- No strategy transformations needed for launch entries
   applyStrategy _ entries = entries
@@ -155,12 +160,15 @@ instance ledgerOpsLaunch :: LedgerOps LaunchEntry where
                           Maybe (Array { entry :: LedgerEntry LaunchEntry, index :: Int })
       selectFromEntries [] remaining selected =
         if remaining > 0.0 then Nothing else Just selected
-      selectFromEntries (e : es) remaining selected =
-        let value = entryValue e.entry
-            newRemaining = remaining - value
-        in if newRemaining <= 0.0
-           then Just (e : selected)
-           else selectFromEntries es newRemaining (e : selected)
+      selectFromEntries entries remaining selected =
+        case uncons entries of
+          Nothing -> if remaining > 0.0 then Nothing else Just selected
+          Just { head: e, tail: es } ->
+            let value = entryValue e.entry
+                newRemaining = remaining - value
+            in if newRemaining <= 0.0
+               then Just (e : selected)
+               else selectFromEntries es newRemaining (e : selected)
     
     in selectFromEntries sortedByPurchaseTime requestedAmount []
 
@@ -247,16 +255,27 @@ transitionPhase vaultRef currentBlock = do
 
 -- Token Operation Functions
 
--- | Purchase tokens during launch
-purchaseTokens :: 
-  Ref (LedgerVault LaunchEntry LaunchStrategy) ->
-  String ->           -- User address
-  Number ->           -- FeelsSOL amount
-  Duration ->         -- Commitment duration
-  BlockNumber ->      -- Current block
-  Effect (Either ProtocolError ShareAmount)
-purchaseTokens vaultRef user feelsAmount duration currentBlock = do
-  vault <- read vaultRef
+-- | Parameters for depositing into launch vault
+type DepositForLaunchParams =
+  { vaultRef :: Ref (LedgerVault LaunchEntry LaunchStrategy)
+  , user :: String           -- User address
+  , feelsAmount :: Number    -- FeelsSOL amount
+  , duration :: Duration     -- Commitment duration
+  , currentBlock :: BlockNumber  -- Current block
+  }
+
+-- | Parameters for withdrawing from launch vault
+type WithdrawFromLaunchParams =
+  { vaultRef :: Ref (LedgerVault LaunchEntry LaunchStrategy)
+  , user :: String           -- User address
+  , shares :: ShareAmount    -- Shares to claim
+  , currentBlock :: BlockNumber  -- Current block
+  }
+
+-- | Deposit FeelsSOL to purchase launch tokens
+depositForLaunchTokens :: DepositForLaunchParams -> Effect (Either ProtocolError ShareAmount)
+depositForLaunchTokens params = do
+  vault <- read params.vaultRef
   state <- read vault.state
   let strategy = state.strategyState
   
@@ -269,12 +288,12 @@ purchaseTokens vaultRef user feelsAmount duration currentBlock = do
         Nothing -> pure $ Left $ InvalidCommandError "Invalid phase configuration"
         Just phaseConfig -> do
           -- Validate duration eligibility
-          if not (canParticipate strategy.currentPhase duration)
+          if not (canParticipate strategy.currentPhase params.duration)
             then pure $ Left $ InvalidCommandError $ 
-              "Duration " <> show duration <> " not eligible for " <> show strategy.currentPhase
+              "Duration " <> show params.duration <> " not eligible for " <> show strategy.currentPhase
             else do
               -- Calculate shares to allocate
-              let sharesToAllocate = feelsAmount / phaseConfig.pricePerShare
+              let sharesToAllocate = params.feelsAmount / phaseConfig.pricePerShare
                   tokensRemaining = phaseConfig.tokenAmount - strategy.tokensSold
               
               if sharesToAllocate > tokensRemaining
@@ -282,53 +301,51 @@ purchaseTokens vaultRef user feelsAmount duration currentBlock = do
                 else do
                   -- Create ledger entry
                   let maturityBlock = if phaseConfig.lockDuration > 0
-                                     then Just (currentBlock + phaseConfig.lockDuration)
+                                     then Just (params.currentBlock + phaseConfig.lockDuration)
                                      else Nothing
                       
-                      entry: LaunchEntry =
+                      entry = LaunchEntry
                         { shares: sharesToAllocate
                         , phase: strategy.currentPhase
                         , pricePerShare: phaseConfig.pricePerShare
-                        , duration: duration
+                        , duration: params.duration
                         , maturityBlock: maturityBlock
                         }
                   
                   -- Record purchase
-                  result <- vault.deposit user entry currentBlock
+                  result <- vault.deposit params.user entry params.currentBlock
                   
                   -- Update strategy
                   let newStrategy = strategy
                         { tokensSold = strategy.tokensSold + sharesToAllocate
-                        , totalRaised = strategy.totalRaised + feelsAmount
+                        , totalRaised = strategy.totalRaised + params.feelsAmount
                         }
                   vault.updateStrategy newStrategy
                   
                   pure $ Right result.shares
 
--- | Claim tokens after maturity
-claimTokens ::
-  Ref (LedgerVault LaunchEntry LaunchStrategy) ->
-  String ->           -- User address
-  ShareAmount ->      -- Shares to claim
-  BlockNumber ->      -- Current block
-  Effect (Either ProtocolError Number)
-claimTokens vaultRef user shares currentBlock = do
-  vault <- read vaultRef
+-- | Withdraw launch tokens after maturity  
+withdrawFromLaunch :: WithdrawFromLaunchParams -> Effect (Either ProtocolError Number)
+withdrawFromLaunch params = do
+  vault <- read params.vaultRef
   
   -- Check user has unlocked shares
-  userEntries <- getUserPurchases vaultRef user
+  userEntries <- getUserPurchases params.vaultRef params.user
   let unlockedEntries = filter (\(LedgerEntry e) -> 
-        case e.data.maturityBlock of
-          Nothing -> true
-          Just maturity -> currentBlock >= maturity
+        case e.data of
+          LaunchEntry rec -> case rec.maturityBlock of
+            Nothing -> true
+            Just maturity -> params.currentBlock >= maturity
       ) userEntries
-      unlockedShares = sum $ map (\(LedgerEntry e) -> e.data.shares) unlockedEntries
+      unlockedShares = sum $ map (\(LedgerEntry e) -> case e.data of
+        LaunchEntry rec -> rec.shares
+      ) unlockedEntries
   
-  if unlockedShares < shares
+  if unlockedShares < params.shares
     then pure $ Left $ InvalidCommandError "Insufficient unlocked shares"
     else do
       -- Process withdrawal
-      result <- vault.withdraw user shares currentBlock
+      result <- vault.withdraw params.user params.shares params.currentBlock
       case result of
         Nothing -> pure $ Left $ InvalidCommandError "Withdrawal failed"
         Just withdrawResult -> pure $ Right withdrawResult.amount

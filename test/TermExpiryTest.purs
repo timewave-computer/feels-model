@@ -16,36 +16,39 @@ import Data.Maybe (Maybe(..))
 import Protocol.Pool (Duration(..), Leverage(..))
 import Protocol.PositionVault 
   ( VaultPosition
+  , CreatePositionParams
   , createVaultPosition
   , blocksPerMonth
   , isExpired
   , handleExpiredVaultPosition
   , processExpiredVaultPositions
   )
+import Protocol.Common (PositionId, BlockNumber, ShareAmount)
 import Protocol.Token (TokenType(..))
 
--- | Create a test position for expiry testing
-createTestPosition :: Int -> Boolean -> Duration -> VaultPosition
-createTestPosition id rollover duration =
+-- | Create a test position for expiry testing  
+createTestPosition :: PositionId -> Boolean -> Duration -> BlockNumber -> Effect VaultPosition
+createTestPosition id rollover duration currentBlock =
   createVaultPosition
-    id                    -- Position ID
-    "test-user"          -- Owner
-    1000.0               -- Amount
-    1.0                  -- Price
-    duration             -- Duration
-    Senior               -- Leverage
-    (Token "TEST")       -- Lend asset
-    FeelsSOL             -- Collateral asset
-    rollover             -- Rollover setting
-    1000.0               -- Shares
-    0                    -- Created at block 0
+    { id: id
+    , owner: "test-user"
+    , amount: 1000.0
+    , price: 1.0
+    , duration: duration
+    , leverage: Senior
+    , lendAsset: Custom "TEST"
+    , collateralAsset: FeelsSOL
+    , rollover: rollover
+    , shares: 1000.0
+    , currentBlock: currentBlock
+    }
 
 -- | Test that monthly positions expire after exactly 28 days
 testMonthlyPositionExpiry :: Effect Unit
 testMonthlyPositionExpiry = do
   log "Testing monthly position expiry timing..."
   
-  let position = createTestPosition 1 false Monthly
+  position <- createTestPosition 1 false Monthly 0
   
   -- Position should not be expired before 28 days
   if not $ isExpired (blocksPerMonth - 1) position
@@ -67,19 +70,19 @@ testPositionRollover :: Effect Unit
 testPositionRollover = do
   log "Testing position rollover functionality..."
   
-  let position = createTestPosition 2 true Monthly
-      currentBlock = blocksPerMonth + 100
+  position <- createTestPosition 2 true Monthly 0
+  let currentBlock = blocksPerMonth + 100
       expiredPosition = handleExpiredVaultPosition position currentBlock
   
   -- Position should still be Monthly duration
-  if expiredPosition.duration == Monthly
+  if expiredPosition.terms.duration == Monthly
     then log "  ✓ Position maintained Monthly duration"
     else log "  ✗ FAILED: Position duration changed from Monthly"
   
   -- Creation time should be updated to current block
-  if expiredPosition.createdAt == currentBlock
+  if expiredPosition.timestamps.createdAt == currentBlock
     then log "  ✓ Position creation time updated to current block"
-    else log $ "  ✗ FAILED: Creation time not updated (expected " <> show currentBlock <> ", got " <> show expiredPosition.createdAt <> ")"
+    else log $ "  ✗ FAILED: Creation time not updated (expected " <> show currentBlock <> ", got " <> show expiredPosition.timestamps.createdAt <> ")"
   
   -- Position should no longer be expired after rollover
   if not $ isExpired currentBlock expiredPosition
@@ -96,14 +99,14 @@ testFlashLoanConversion :: Effect Unit
 testFlashLoanConversion = do
   log "Testing flash loan conversion..."
   
-  let position = createTestPosition 3 false Monthly
-      currentBlock = blocksPerMonth + 100
+  position <- createTestPosition 3 false Monthly 0
+  let currentBlock = blocksPerMonth + 100
       expiredPosition = handleExpiredVaultPosition position currentBlock
   
   -- Position should convert to Flash duration
-  if expiredPosition.duration == Flash
+  if expiredPosition.terms.duration == Flash
     then log "  ✓ Position converted to Flash duration"
-    else log $ "  ✗ FAILED: Position not converted to Flash (got " <> show expiredPosition.duration <> ")"
+    else log $ "  ✗ FAILED: Position not converted to Flash (got " <> show expiredPosition.terms.duration <> ")"
   
   -- Flash positions should never be expired (perpetual instant withdrawal)
   if not $ isExpired currentBlock expiredPosition
@@ -115,9 +118,9 @@ testFlashLoanConversion = do
     else log "  ✗ FAILED: Flash position expires in future"
   
   -- All other fields should remain unchanged
-  if expiredPosition.amount == position.amount &&
+  if expiredPosition.metrics.amount == position.metrics.amount &&
      expiredPosition.owner == position.owner &&
-     expiredPosition.leverage == position.leverage
+     expiredPosition.terms.leverage == position.terms.leverage
     then log "  ✓ Other position fields unchanged"
     else log "  ✗ FAILED: Position fields were modified"
 
@@ -126,13 +129,12 @@ testBatchExpiry :: Effect Unit
 testBatchExpiry = do
   log "Testing batch expiry processing..."
   
-  let positions =
-        [ createTestPosition 1 true Monthly    -- Will rollover
-        , createTestPosition 2 false Monthly   -- Will convert to flash
-        , createTestPosition 3 true Swap       -- Swap, never expires
-        , createTestPosition 4 false Flash     -- Flash, never expires
-        ]
-      
+  pos1 <- createTestPosition 1 true Monthly 0     -- Will rollover
+  pos2 <- createTestPosition 2 false Monthly 0    -- Will convert to flash  
+  pos3 <- createTestPosition 3 true Swap 0        -- Swap, never expires
+  pos4 <- createTestPosition 4 false Flash 0      -- Flash, never expires
+  
+  let positions = [pos1, pos2, pos3, pos4]
       currentBlock = blocksPerMonth + 50
       processed = processExpiredVaultPositions currentBlock positions
   
@@ -140,7 +142,7 @@ testBatchExpiry = do
   case processed !! 0 of
     Nothing -> log "  ✗ FAILED: Position 0 not found"
     Just p -> 
-      if p.duration == Monthly && p.createdAt == currentBlock
+      if p.terms.duration == Monthly && p.timestamps.createdAt == currentBlock
         then log "  ✓ Position 0 rolled over correctly"
         else log "  ✗ FAILED: Position 0 rollover incorrect"
   
@@ -148,7 +150,7 @@ testBatchExpiry = do
   case processed !! 1 of
     Nothing -> log "  ✗ FAILED: Position 1 not found"
     Just p -> 
-      if p.duration == Flash
+      if p.terms.duration == Flash
         then log "  ✓ Position 1 converted to Flash"
         else log "  ✗ FAILED: Position 1 not converted to Flash"
   
@@ -156,7 +158,7 @@ testBatchExpiry = do
   case processed !! 2 of
     Nothing -> log "  ✗ FAILED: Position 2 not found"
     Just p -> 
-      if p.duration == Swap && p.createdAt == 0
+      if p.terms.duration == Swap && p.timestamps.createdAt == 0
         then log "  ✓ Position 2 (Swap) unchanged"
         else log "  ✗ FAILED: Position 2 was modified"
   
@@ -164,7 +166,7 @@ testBatchExpiry = do
   case processed !! 3 of
     Nothing -> log "  ✗ FAILED: Position 3 not found"
     Just p -> 
-      if p.duration == Flash && p.createdAt == 0
+      if p.terms.duration == Flash && p.timestamps.createdAt == 0
         then log "  ✓ Position 3 (Flash) unchanged"
         else log "  ✗ FAILED: Position 3 was modified"
 
@@ -173,7 +175,7 @@ testSwapPositionNoExpiry :: Effect Unit
 testSwapPositionNoExpiry = do
   log "Testing swap position expiry behavior..."
   
-  let position = createTestPosition 5 false Swap
+  position <- createTestPosition 5 false Swap 0
   
   -- Swap positions should never expire, regardless of time
   if not (isExpired 0 position) && 
@@ -187,7 +189,7 @@ testFlashPositionNoExpiry :: Effect Unit
 testFlashPositionNoExpiry = do
   log "Testing flash position expiry behavior..."
   
-  let position = createTestPosition 6 false Flash
+  position <- createTestPosition 6 false Flash 0
   
   -- Flash positions should never expire
   if not (isExpired 0 position) && 

@@ -39,7 +39,7 @@ import Protocol.Common (PoolId, PositionId)
 
 -- | Global registry of all pools and positions
 type PoolRegistry = Ref
-  { pools :: Map PoolId PoolState           -- All pools by ID
+  { pools :: Map PoolId Pool                 -- All pools by ID
   , positions :: Map PositionId VaultPosition    -- All positions by ID
   , poolPositions :: Map PoolId (Array PositionId)  -- Track which positions belong to each pool
   , nextPositionId :: PositionId            -- Next available position ID
@@ -63,12 +63,12 @@ initPoolRegistry = new
 --------------------------------------------------------------------------------
 
 -- | Add a new pool to the registry
-addPool :: PoolId -> PoolState -> PoolRegistry -> Effect Unit
+addPool :: PoolId -> Pool -> PoolRegistry -> Effect Unit
 addPool poolId pool registryRef = do
   modify_ (\reg -> reg { pools = Map.insert poolId pool reg.pools }) registryRef
 
 -- | Update an existing pool in the registry
-updatePool :: PoolId -> PoolState -> PoolRegistry -> Effect Unit
+updatePool :: PoolId -> Pool -> PoolRegistry -> Effect Unit
 updatePool poolId pool registryRef = do
   modify_ (\reg -> reg { pools = Map.insert poolId pool reg.pools }) registryRef
 
@@ -78,13 +78,13 @@ removePool poolId registryRef = do
   modify_ (\reg -> reg { pools = Map.delete poolId reg.pools }) registryRef
 
 -- | Get a specific pool
-getPool :: PoolId -> PoolRegistry -> Effect (Maybe PoolState)
+getPool :: PoolId -> PoolRegistry -> Effect (Maybe Pool)
 getPool poolId registryRef = do
   registry <- read registryRef
   pure $ Map.lookup poolId registry.pools
 
 -- | Get all pools
-getAllPools :: PoolRegistry -> Effect (Array (Tuple PoolId PoolState))
+getAllPools :: PoolRegistry -> Effect (Array (Tuple PoolId Pool))
 getAllPools registryRef = do
   registry <- read registryRef
   pure $ Map.toUnfoldable registry.pools
@@ -106,7 +106,7 @@ getNextPositionId registryRef = do
 --------------------------------------------------------------------------------
 
 -- | Add a position to the registry and its pool
-addPosition :: PoolId -> Position -> PoolRegistry -> Effect Unit
+addPosition :: PoolId -> VaultPosition -> PoolRegistry -> Effect Unit
 addPosition poolId position registryRef = do
   -- Add to global position map and track pool relationship
   modify_ (\reg -> 
@@ -145,31 +145,31 @@ removePosition posId registryRef = do
     Nothing -> pure unit  -- Position doesn't exist
 
 -- | Get a specific position (searches across all pools)
-getPosition :: PositionId -> PoolRegistry -> Effect (Maybe Position)
+getPosition :: PositionId -> PoolRegistry -> Effect (Maybe VaultPosition)
 getPosition posId registryRef = do
   registry <- read registryRef
   pure $ Map.lookup posId registry.positions
 
 -- | Get all positions for a user across all pools
-getUserPositions :: String -> PoolRegistry -> Effect (Array Position)
+getUserPositions :: String -> PoolRegistry -> Effect (Array VaultPosition)
 getUserPositions userId registryRef = do
   registry <- read registryRef
   pure $ filter (\p -> p.owner == userId) $ fromFoldable $ Map.values registry.positions
 
 -- | Get all positions across all pools
-getAllPositions :: PoolRegistry -> Effect (Array Position)
+getAllPositions :: PoolRegistry -> Effect (Array VaultPosition)
 getAllPositions registryRef = do
   registry <- read registryRef
   pure $ fromFoldable $ Map.values registry.positions
 
 -- | Get positions map as a separate Ref (for compatibility with Protocol modules)
-getPositionsRef :: PoolRegistry -> Effect (Ref (Map PositionId Position))
+getPositionsRef :: PoolRegistry -> Effect (Ref (Map PositionId VaultPosition))
 getPositionsRef registryRef = do
   registry <- read registryRef
   new registry.positions
 
 -- | Get all positions in a specific pool
-getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array Position)
+getPoolPositions :: PoolId -> PoolRegistry -> Effect (Array VaultPosition)
 getPoolPositions poolId registryRef = do
   registry <- read registryRef
   -- Get position IDs for this pool

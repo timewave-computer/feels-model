@@ -25,6 +25,7 @@ module Protocol.Vault
   , isActive
   , aggregateEntries
   , applyStrategy
+  , selectForWithdrawal
   -- Query functions
   , getAccountBalance
   , getAccountEntries
@@ -44,10 +45,11 @@ import Prelude
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Array ((:), filter, find, findIndex, updateAt, deleteAt)
+import Data.Array ((:), filter, find, findIndex, updateAt, deleteAt, modifyAt)
 import Data.Array as Array
 import Data.Foldable (sum, foldl)
 import Data.Tuple (Tuple(..))
+import Data.Newtype (class Newtype)
 import Effect (Effect)
 import Effect.Ref (Ref, read, write, modify_)
 import Protocol.Common (BlockNumber)
@@ -228,7 +230,7 @@ updateLedgerEntry state accountId index updateFn =
   case Map.lookup accountId state.ledger of
     Nothing -> Nothing
     Just entries ->
-      case updateAt index updateFn entries of
+      case Array.modifyAt index updateFn entries of
         Nothing -> Nothing
         Just updatedEntries ->
           let

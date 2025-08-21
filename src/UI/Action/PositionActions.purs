@@ -14,7 +14,8 @@ module UI.Action.PositionActions
 
 import Prelude
 import Data.Either (Either(..))
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), isJust)
+import Control.Monad (when)
 import Effect (Effect)
 import Data.Int (toNumber)
 import Effect.Console (log)
@@ -23,7 +24,7 @@ import Effect.Console (log)
 import UI.ProtocolState (ProtocolState)
 import Protocol.Token (TokenType(..))
 import Protocol.Pool (Duration(..), Leverage(..), leverageMultiplier)
-import Protocol.PositionVault (VaultPosition, isExpired, isSwap)
+import Protocol.PositionVault (VaultPosition, CreatePositionParams, isExpired, isSwap)
 import Protocol.PositionVault as P
 import Data.Array ((:))
 import UI.PoolRegistry (getPosition, removePosition, addPosition)
@@ -66,7 +67,7 @@ validatePositionOwnership user position =
       pure $ Right unit
 
 -- | Validate position can be closed
-validatePositionExpiry :: Int -> Position -> Effect (Either ProtocolError Unit)
+validatePositionExpiry :: Int -> VaultPosition -> Effect (Either ProtocolError Unit)
 validatePositionExpiry currentBlock position =
   if not (isSwapPosition position) && not (isExpired currentBlock position)
     then do
@@ -92,7 +93,7 @@ createPosition ::
   Boolean ->          -- rollover
   Maybe String ->     -- target token for staking
   ProtocolState ->         -- current state
-  Effect (Either ProtocolError { position :: Position, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
+  Effect (Either ProtocolError { position :: VaultPosition, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
 createPosition user lendAsset amount collateralAsset _collateralAmount duration leverage rollover targetToken state = do
   log $ "Creating position for user " <> user <> " with amount " <> show amount
   
@@ -108,8 +109,8 @@ createPosition user lendAsset amount collateralAsset _collateralAmount duration 
       log $ "Assigned position ID: " <> show nextId
       
       -- Create a position in the new system
-      let currentBlock = state.currentBlock
-          poolId = "FeelsSOL/DEFAULT"  -- MVP: Single default pool
+      -- currentBlock removed as it's unused
+      let poolId = "FeelsSOL/DEFAULT"  -- MVP: Single default pool
           
           -- Use the leverage parameter passed in
           price = 1.0        -- MVP: Default to par price
@@ -118,18 +119,19 @@ createPosition user lendAsset amount collateralAsset _collateralAmount duration 
           -- Senior: 1x shares, Junior: 3x shares
           shares = amount * leverageMultiplier leverage
           
-          position = P.createPosition 
-            nextId
-            user
-            amount
-            price
-            duration
-            leverage
-            lendAsset
-            collateralAsset
-            rollover
-            shares
-            currentBlock
+      position <- P.createVaultPosition 
+        { id: nextId
+        , owner: user
+        , amount: amount
+        , price: price
+        , duration: duration
+        , leverage: leverage
+        , lendAsset: lendAsset
+        , collateralAsset: collateralAsset
+        , rollover: rollover
+        , shares: shares
+        , currentBlock: state.currentBlock
+        }
       
       log $ "Created position object with shares: " <> show shares
       
@@ -139,10 +141,11 @@ createPosition user lendAsset amount collateralAsset _collateralAmount duration 
       
       -- Update position-token mapping if target token specified
       let newMapping = case targetToken of
-            Just ticker -> do
-              log $ "Mapping position " <> show position.id <> " to token " <> ticker
-              { positionId: position.id, tokenTicker: ticker } : state.positionTokenMap
+            Just ticker -> { positionId: position.id, tokenTicker: ticker } : state.positionTokenMap
             Nothing -> state.positionTokenMap
+      
+      when (isJust targetToken) $ 
+        log $ "Mapping position " <> show position.id <> " to target token"
       
       log "Position creation completed successfully"
       pure $ Right { position, positionTokenMap: newMapping }
@@ -159,7 +162,7 @@ createVolHarvesterPosition ::
   Leverage ->         -- leverage tier (Senior or Junior)
   Boolean ->          -- enable auto-rollover
   ProtocolState ->    -- current state
-  Effect (Either ProtocolError { position :: Position, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
+  Effect (Either ProtocolError { position :: VaultPosition, positionTokenMap :: Array { positionId :: Int, tokenTicker :: String } })
 createVolHarvesterPosition user amount leverage rollover state = do
   -- Volatility harvesting positions:
   -- - FeelsSOL as lend asset
@@ -209,7 +212,7 @@ closePosition user positionId state = do
               log "Position validation passed, proceeding with closure"
               
               -- 4. Calculate returns (principal + any gains)
-              let returnAmount = position.amount  -- Simplified: return principal
+              let returnAmount = position.metrics.amount  -- Simplified: return principal
               log $ "Returning amount: " <> show returnAmount
               
               -- 5. Transfer funds back to user (positions are always in FeelsSOL)
@@ -236,10 +239,10 @@ getPositionValue positionId state = do
     Nothing -> pure $ Left $ InvalidCommandError $ "Position " <> show positionId <> " not found"
     Just position -> do
       -- 2. Calculate current value based on position type
-      let baseValue = position.amount
+      let baseValue = position.metrics.amount
       
       -- 3. Apply leverage multiplier (simplified)
-      let leverageMult = case position.leverage of
+      let leverageMult = case position.terms.leverage of
             Senior -> 1.0    -- Senior tier: no leverage, stable returns
             Junior -> 1.2    -- Junior tier: 20% bonus for risk (simplified)
       
@@ -248,7 +251,7 @@ getPositionValue positionId state = do
       let timeMultiplier = if isSwapPosition position
                           then 1.0
                           else 
-                            let blocksHeld = currentBlock - position.createdAt
+                            let blocksHeld = currentBlock - position.timestamps.createdAt
                                 annualReturn = 0.05  -- 5% annual return
                                 blocksPerYear = 2628000.0  -- ~5 blocks per minute * 60 * 24 * 365
                             in 1.0 + (annualReturn * (toNumber blocksHeld) / blocksPerYear)

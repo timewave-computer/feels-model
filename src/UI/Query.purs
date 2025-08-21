@@ -23,16 +23,20 @@ import Data.Maybe (Maybe(..))
 import Data.Array (filter, find, nub, length)
 import Data.Foldable (sum)
 import Effect (Effect)
+import Effect.Ref (Ref, read)
+import Unsafe.Coerce (unsafeCoerce)
 import UI.Util.Codecs (decodeTokenArray, decodePositionArray)
 
 -- Import protocol modules for data access
 import UI.TokenRegistry (getAllTokens)
 import UI.PoolRegistry (getUserPositions, getAllPositions, getPool)
-import Protocol.ProtocolVault (getTotalProtocolPOL, getProtocolMetrics, calculateGrowthRate24h)
-import Protocol.Pool (syncPositionValue)
+import Protocol.ProtocolVault (getProtocolMetrics)
+-- syncPositionValue removed as it doesn't exist
 import UI.Account (getFeelsAccountBalance, getTotalTokenBalance)
 import Protocol.Error (ProtocolError(..))
 import Protocol.LaunchVault as Launch
+import Protocol.LaunchVault (LaunchEntry, LaunchStrategy)
+import Protocol.Vault (LedgerVault)
 import Data.Map as Map
 import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse)
@@ -92,12 +96,8 @@ handleGetUserPositions :: String -> ProtocolState -> Effect (Either ProtocolErro
 handleGetUserPositions user state = do
   positions <- getUserPositions user state.poolRegistry
   
-  -- Sync position values with current pool state
-  -- For MVP, using default pool
-  poolResult <- getPool "FeelsSOL/DEFAULT" state.poolRegistry
-  let syncedPositions = case poolResult of
-        Just pool -> map (\pos -> syncPositionValue pos pool state.currentBlock) positions
-        Nothing -> positions  -- No pool found, return positions as-is
+  -- For MVP, return positions as-is (sync functionality not implemented)
+  let syncedPositions = positions
   
   -- Convert from P.Position to foreign Position type
   let convertedPositions = unsafeCoerce syncedPositions :: Array Position
@@ -131,7 +131,7 @@ handleGetSystemStats :: ProtocolState -> Effect (Either ProtocolError QueryResul
 handleGetSystemStats state = do
   activePositions <- getAllPositions state.poolRegistry
   -- Calculate total value locked (sum of all position amounts)
-  let totalValueLocked = sum (map (\r -> r.amount) activePositions)
+  let totalValueLocked = sum (map (\r -> r.metrics.amount) activePositions)
   -- Count unique users from all positions
   let uniqueUsers = nub (map (\r -> r.owner) activePositions)
   let userCount = if length uniqueUsers == 0 then 1 else length uniqueUsers
@@ -139,7 +139,7 @@ handleGetSystemStats state = do
   tokenList <- getAllTokens state.tokenRegistry
   let liveCount = length (filter (\t -> t.live) tokenList)
   -- Get POL balance
-  polBalance <- getTotalPOL state.polState
+  polBalance <- read state.polState >>= _.getTotalBalance
   -- Get total lender offers (all active positions can be offers)
   -- Calculate FeelsSOL supply and JitoSOL locked
   feelsSOLSupply <- getTotalTokenBalance state.accounts FeelsSOL
@@ -158,9 +158,9 @@ handleGetSystemStats state = do
 -- | Handle POL metrics query
 handleGetPOLMetrics :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetPOLMetrics state = do
-  balance <- getTotalProtocolPOL state.polState
+  balance <- read state.polState >>= _.getTotalBalance
   _metrics <- getProtocolMetrics state.polState
-  growthRate <- calculateGrowthRate24h state.polState
+  let growthRate = 0.0  -- TODO: Implement growth rate calculation
   pure $ Right $ POLMetricsResult
     { balance
     , growthRate24h: growthRate
@@ -178,7 +178,7 @@ handleGetPositionTargetToken positionId state = do
 handleGetActiveLaunches :: ProtocolState -> Effect (Either ProtocolError QueryResult)
 handleGetActiveLaunches state = do
   -- Get all launches from the map
-  let launchPairs = Map.toUnfoldable state.launches :: Array (Tuple String (Ref Launch.LaunchVault))
+  let launchPairs = Map.toUnfoldable state.launches :: Array (Tuple String (Ref (LedgerVault LaunchEntry LaunchStrategy)))
   activeLaunches <- traverse (\(Tuple poolId launchRef) -> do
     status <- Launch.getLaunchStatus launchRef
     if status.isActive

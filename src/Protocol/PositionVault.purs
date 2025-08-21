@@ -17,6 +17,11 @@
 module Protocol.PositionVault
   ( -- Balance Sheet exports
     VaultPosition
+  , VaultAssets
+  , VaultTerms
+  , VaultMetrics
+  , VaultPricing
+  , VaultTimestamps
   , AllocationStrategy
   , DurationWeights
   , LeverageWeights
@@ -24,10 +29,11 @@ module Protocol.PositionVault
   , WithdrawParams
   , QuoteResult
   , PoolStrategy
+  , CreatePositionParams
   -- State exports
   , PositionVault
   , VaultConfig
-  , VaultMetrics
+  , PositionVaultMetrics
   , PoolMetrics
   -- Function exports
   , initPositionVault
@@ -62,13 +68,13 @@ import Data.Number (log)
 import Data.Tuple (Tuple(..))
 import Data.Map as Map
 import Protocol.Token (TokenType(..), PositionToken, createPositionToken)
-import Protocol.Pool (Pool, TickCoordinate, PoolPosition, LiquidityCube3D,
+import Protocol.Pool (Pool, TickCoordinate, PoolPosition,
                        addLiquidity3D, removeLiquidity3D, swap3D, SwapResult3D,
                        calculateSwapPrice3D, calculateInvariant3D, getVirtualBalances,
                        Duration(..), Leverage(..), leverageMultiplier,
                        durationToTick, leverageToTick)
 import Protocol.Common (BlockNumber, PositionId, PoolId, ShareAmount)
-import Protocol.Vault (Vault, VaultState, BalanceSheet)
+import Protocol.Vault (LedgerVault, LedgerVaultState)
 import Data.Map (Map)
 import Data.Array.NonEmpty as NEA
 import Data.Array.NonEmpty (NonEmptyArray)
@@ -106,25 +112,50 @@ borrowLendSpread = defaultProtocolConfig.risk.borrowLendSpread
 -- BALANCE SHEET
 --------------------------------------------------------------------------------
 
+-- | Asset allocation details
+type VaultAssets =
+  { lend :: TokenType              -- Asset being lent
+  , collateral :: TokenType        -- Asset provided as collateral
+  }
+
+-- | Position terms and conditions
+type VaultTerms =
+  { duration :: Duration           -- Time commitment
+  , leverage :: Leverage           -- Risk/reward tier
+  , rollover :: Boolean            -- Whether position auto-rolls
+  }
+
+-- | Financial metrics and values
+type VaultMetrics =
+  { amount :: Number               -- Initial capital invested
+  , value :: Number                -- Current value
+  , shares :: ShareAmount          -- Vault shares owned
+  , lockedAmount :: Number         -- Amount locked below floor
+  , accumulatedYield :: Number     -- Total yield earned
+  }
+
+-- | Pricing and fee information
+type VaultPricing =
+  { price :: Number                -- Price level for liquidity
+  , feeGrowthInside0 :: Number     -- Fee growth (token0)
+  , feeGrowthInside1 :: Number     -- Fee growth (token1)
+  }
+
+-- | Timestamp tracking
+type VaultTimestamps =
+  { createdAt :: BlockNumber       -- Creation block
+  , lastYieldClaim :: BlockNumber  -- Last yield claim block
+  }
+
 -- | Vault position structure - tokenized multidimensional shares issued by the vault
 type VaultPosition =
   { id :: PositionId
   , owner :: String
-  , amount :: Number               -- Initial capital invested
-  , price :: Number                -- Price level for liquidity
-  , duration :: Duration           -- Time commitment
-  , leverage :: Leverage           -- Risk/reward tier
-  , lendAsset :: TokenType         -- Asset being lent
-  , collateralAsset :: TokenType   -- Asset provided as collateral
-  , rollover :: Boolean            -- Whether position auto-rolls
-  , shares :: ShareAmount          -- Vault shares owned
-  , createdAt :: BlockNumber       -- Creation block
-  , value :: Number                -- Current value
-  , lockedAmount :: Number         -- Amount locked below floor
-  , accumulatedYield :: Number     -- Total yield earned
-  , lastYieldClaim :: BlockNumber  -- Last yield claim block
-  , feeGrowthInside0 :: Number     -- Fee growth (token0)
-  , feeGrowthInside1 :: Number     -- Fee growth (token1)
+  , assets :: VaultAssets          -- Asset allocation details
+  , terms :: VaultTerms            -- Position terms and conditions
+  , metrics :: VaultMetrics        -- Financial metrics and values
+  , pricing :: VaultPricing        -- Pricing and fee information
+  , timestamps :: VaultTimestamps  -- Timestamp tracking
   , positionToken :: PositionToken -- Fungible token representing position
   }
 
@@ -195,7 +226,7 @@ type PositionVault =
   , activePositions :: Array PositionId   -- Active liquidity positions
   , positionTokenSupply :: Number         -- Total position tokens issued
   , lastRebalanceBlock :: BlockNumber     -- Last rebalancing
-  , metrics :: VaultMetrics               -- Performance metrics
+  , metrics :: PositionVaultMetrics       -- Performance metrics
   , pool :: Pool                          -- Reference to 3D AMM pool
   , positions :: Map PositionId VaultPosition  -- All vault positions issued to depositors
   , liquidityCubes :: Array String        -- Active liquidity cube IDs in pool
@@ -211,8 +242,8 @@ type VaultConfig =
   , feeRate :: Number                          -- Vault management fee (basis points)
   }
 
--- | Vault performance metrics
-type VaultMetrics =
+-- | Position vault performance metrics
+type PositionVaultMetrics =
   { totalValueLocked :: Number
   , utilizationRate :: Number     -- Fraction of capital deployed
   , avgExecutionPrice :: Number   -- Volume-weighted avg price
@@ -249,7 +280,7 @@ initPositionVault vaultId config pool =
   , liquidityCubes: []
   }
 
-initMetrics :: VaultMetrics
+initMetrics :: PositionVaultMetrics
 initMetrics =
   { totalValueLocked: 0.0
   , utilizationRate: 0.0
@@ -283,7 +314,7 @@ getDepositQuote vault params = do
       -- Calculate spot price in 3D space
       currentBalances = getVirtualBalances vault.pool { rateTick: 0, durationTick: 1, leverageTick: 0 }
       swapPrice = calculateSwapPrice3D currentBalances vault.pool.weights 
-                    vault.pool.globalState.currentTick 
+                    vault.pool.poolState.currentTick 
                     { rateTick: round (targetRateRange.min * 10000.0), durationTick: 1, leverageTick: 0 }
       
       -- Vault deposits don't have slippage - they're providing liquidity
@@ -440,16 +471,16 @@ analyzeMarket3D :: Pool -> { avgLendRate :: Number, avgBorrowRate :: Number, uti
 analyzeMarket3D pool =
   let
     -- Calculate utilization from virtual balances
-    balances = pool.globalState.virtualBalances
+    balances = pool.poolState.virtualBalances
     totalBalance = balances.r + balances.d + balances.l
     avgBalance = totalBalance / 3.0
     
     -- Estimate rates from current tick position
-    currentRate = toNumber pool.globalState.currentTick.rateTick / 10000.0
+    currentRate = toNumber pool.poolState.currentTick.rateTick / 10000.0
     
   in { avgLendRate: currentRate      -- Current rate
      , avgBorrowRate: currentRate * (1.0 + borrowLendSpread)  -- 20% spread
-     , utilization: pool.globalState.totalLiquidity / totalBalance
+     , utilization: pool.poolState.totalLiquidity / totalBalance
      }
 
 -- | Adjust rate range based on market conditions
@@ -464,9 +495,9 @@ adjustRateRange baseRange market =
 
 -- | Get term expiry for vault positions
 getTermExpiry :: VaultPosition -> Maybe Int
-getTermExpiry pos = case pos.duration of
-  Flash -> Just (pos.createdAt + 1)
-  Monthly -> Just (pos.createdAt + blocksPerMonth)
+getTermExpiry pos = case pos.terms.duration of
+  Flash -> Just (pos.timestamps.createdAt + 1)
+  Monthly -> Just (pos.timestamps.createdAt + blocksPerMonth)
   Swap -> Nothing
 
 -- | Process expired vault positions
@@ -479,7 +510,7 @@ processExpiredVaultPositions currentBlock = map processOne
       else pos
 
 -- | Get vault metrics
-getVaultMetrics :: PositionVault -> VaultMetrics
+getVaultMetrics :: PositionVault -> PositionVaultMetrics
 getVaultMetrics vault = vault.metrics
 
 -- | Price to tick conversion
@@ -488,50 +519,55 @@ priceToTick price = round (log price / log 1.0001)
 
 -- Position Management Functions
 
+-- | Parameters for creating a vault position
+type CreatePositionParams =
+  { id :: PositionId
+  , owner :: String
+  , amount :: Number
+  , price :: Number
+  , duration :: Duration
+  , leverage :: Leverage
+  , lendAsset :: TokenType
+  , collateralAsset :: TokenType
+  , rollover :: Boolean
+  , shares :: ShareAmount
+  , currentBlock :: BlockNumber
+  }
+
 -- | Create a new vault position with specified parameters
-createVaultPosition :: PositionId -> String -> Number -> Number -> Duration -> Leverage -> TokenType -> TokenType -> Boolean -> ShareAmount -> BlockNumber -> Effect VaultPosition
-createVaultPosition id owner amount price duration leverage lendAsset collateralAsset rollover shares currentBlock = do
+createVaultPosition :: CreatePositionParams -> Effect VaultPosition
+createVaultPosition params = do
   -- Create the fungible position token
-  let poolId = "POOL-" <> show id
-      tickLower = round (price * 100.0) - 50
-      tickUpper = round (price * 100.0) + 50
-      leverageTier = show leverage
-      durationStr = show duration
+  let poolId = "POOL-" <> show params.id
+      tickLower = round (params.price * 100.0) - 50
+      tickUpper = round (params.price * 100.0) + 50
+      leverageTier = show params.leverage
+      durationStr = show params.duration
   
   posToken <- createPositionToken poolId tickLower tickUpper leverageTier durationStr
   
   pure
-    { id
-    , owner
-    , amount
-    , price
-    , duration
-    , leverage
-    , lendAsset
-    , collateralAsset
-    , rollover
-    , shares
-    , createdAt: currentBlock
-    , value: amount
-    , lockedAmount: 0.0
-    , accumulatedYield: 0.0
-    , lastYieldClaim: currentBlock
-    , feeGrowthInside0: 0.0
-    , feeGrowthInside1: 0.0
+    { id: params.id
+    , owner: params.owner
+    , assets: { lend: params.lendAsset, collateral: params.collateralAsset }
+    , terms: { duration: params.duration, leverage: params.leverage, rollover: params.rollover }
+    , metrics: { amount: params.amount, value: params.amount, shares: params.shares, lockedAmount: 0.0, accumulatedYield: 0.0 }
+    , pricing: { price: params.price, feeGrowthInside0: 0.0, feeGrowthInside1: 0.0 }
+    , timestamps: { createdAt: params.currentBlock, lastYieldClaim: params.currentBlock }
     , positionToken: posToken
     }
 
 -- | Get current vault position value
 getVaultPositionValue :: VaultPosition -> Number
-getVaultPositionValue pos = pos.value
+getVaultPositionValue pos = pos.metrics.value
 
 -- | Check if vault position is spot (cross spread immediately)
 isSwap :: VaultPosition -> Boolean
-isSwap pos = pos.duration == Swap
+isSwap pos = pos.terms.duration == Swap
 
 -- | Check if vault position has a term commitment
 isTermVaultPosition :: VaultPosition -> Boolean
-isTermVaultPosition pos = pos.duration == Flash || pos.duration == Monthly
+isTermVaultPosition pos = pos.terms.duration == Flash || pos.terms.duration == Monthly
 
 -- | Duration constructors
 swapDuration :: Duration
@@ -545,7 +581,7 @@ monthlyDuration = Monthly
 calculateMonthlyYield :: VaultPosition -> BlockNumber -> Number
 calculateMonthlyYield vaultPos currentBlock =
   let
-    blocksHeld = currentBlock - vaultPos.createdAt
+    blocksHeld = currentBlock - vaultPos.timestamps.createdAt
     blocksIntoMonth = blocksHeld `mod` blocksPerMonth
     progressToMaturity = toNumber blocksIntoMonth / toNumber blocksPerMonth
     
@@ -573,28 +609,28 @@ getNextMonthlyExpiry currentBlock =
 
 -- | Calculate blocks remaining until expiry
 blocksUntilExpiry :: VaultPosition -> Int -> Int
-blocksUntilExpiry vaultPosition currentBlock = case vaultPosition.duration of
-  Flash -> max 0 ((vaultPosition.createdAt + 1) - currentBlock)
-  Monthly -> max 0 ((vaultPosition.createdAt + blocksPerMonth) - currentBlock)
+blocksUntilExpiry vaultPosition currentBlock = case vaultPosition.terms.duration of
+  Flash -> max 0 ((vaultPosition.timestamps.createdAt + 1) - currentBlock)
+  Monthly -> max 0 ((vaultPosition.timestamps.createdAt + blocksPerMonth) - currentBlock)
   Swap -> 2147483647
 
 -- | Check if a vault position has expired
 isExpired :: Int -> VaultPosition -> Boolean
-isExpired currentBlock position = case position.duration of
+isExpired currentBlock position = case position.terms.duration of
   Flash -> false
-  Monthly -> currentBlock >= (position.createdAt + blocksPerMonth)
+  Monthly -> currentBlock >= (position.timestamps.createdAt + blocksPerMonth)
   Swap -> false
 
 -- | Handle an expired vault position
 handleExpiredVaultPosition :: VaultPosition -> Int -> VaultPosition
 handleExpiredVaultPosition position currentBlock =
-  if position.rollover && position.duration == Monthly
-    then position { createdAt = currentBlock }
+  if position.terms.rollover && position.terms.duration == Monthly
+    then position { timestamps = position.timestamps { createdAt = currentBlock } }
     else rollToFlash position
 
 -- | Convert a vault position to flash loan
 rollToFlash :: VaultPosition -> VaultPosition
-rollToFlash position = position { duration = Flash }
+rollToFlash position = position { terms = position.terms { duration = Flash } }
 
 -- | Track upcoming term expiry dates
 type TermSchedule =
@@ -637,13 +673,12 @@ groupVaultPositionsByExpiry positions =
 -- Pool Vault Functions
 
 -- | Get pool metrics from a vault
-getPoolMetrics :: forall d e. Ref (Vault d { poolId :: String, totalFeesCollected :: Number, deployedAmount :: Number, performance :: Number | e }) -> Effect PoolMetrics
+getPoolMetrics :: forall d e. Ref (LedgerVault d { poolId :: String, totalFeesCollected :: Number, deployedAmount :: Number, performance :: Number | e }) -> Effect PoolMetrics
 getPoolMetrics poolRef = do
   vault <- read poolRef
-  let strategy = vault.state.strategyState
-      totalPOL = case vault.state.balanceSheet.assets of
-        [] -> 0.0
-        assets -> sum $ map (\a -> a.amount) assets
+  state <- read vault.state
+  let strategy = state.strategyState
+      totalPOL = state.totalBalance
       
   pure { totalPOL: totalPOL
        , deployedAmount: strategy.deployedAmount

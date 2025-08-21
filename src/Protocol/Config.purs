@@ -33,6 +33,12 @@ module Protocol.Config
   -- FeelsSOL Configuration
   , FeelsSOLParameters(..)
   , defaultFeelsSOLParameters
+  -- Buffer Configuration
+  , BufferParameters(..)
+  , defaultBufferParameters
+  -- Protocol Configuration
+  , ProtocolParameters(..)
+  , defaultProtocolParameters
   -- Complete Protocol Configuration
   , ProtocolConfig(..)
   , defaultProtocolConfig
@@ -106,6 +112,29 @@ type PoolParameters =
   , maxDeploymentRatio :: Number        -- Max POL deployment ratio
   , flashFeeBase :: Number              -- Base fee for flash loans (tick 30 = 0.3%)
   , swapPriceBase :: Number             -- Base price multiplier (tick 100 = 1.01)
+  -- 3D AMM constants
+  , initialVirtualBalance :: Number     -- Initial virtual balance for AMM
+  , baseRateYield :: Number             -- Base yield rate per block
+  , baseDurationYield :: Number         -- Base duration yield per block
+  , baseLeverageYield :: Number         -- Base leverage yield per block
+  , defaultSwapBuffer :: Number         -- Buffer for swap calculations
+  , tickBase :: Number                  -- Base for tick-to-price conversion
+  , ticksPerPercent :: Number           -- Ticks per percentage point
+  -- Duration multipliers
+  , flashDurationMultiplier :: Number   -- Flash duration multiplier
+  , monthlyDurationMultiplier :: Number -- Monthly duration multiplier
+  , swapDurationMultiplier :: Number    -- Swap duration multiplier
+  -- Leverage risk multipliers
+  , seniorLeverageRiskMultiplier :: Number -- Senior leverage risk multiplier
+  , juniorLeverageRiskMultiplier :: Number -- Junior leverage risk multiplier
+  , juniorYieldPremium :: Number        -- Junior yield premium multiplier
+  -- Swap solver constants
+  , swapSolverBufferRatio :: Number     -- Buffer ratio for swap solver
+  , swapSolverPremiumRatio :: Number    -- Premium ratio for swap solver
+  , maxOracleDeviation :: Number        -- Maximum allowed price deviation from oracle
+  -- Rebalancing parameters
+  , rebalanceThreshold :: Number        -- Minimum deviation to trigger rebalancing
+  , maxRebalanceSlippage :: Number      -- Maximum slippage per rebalance
   }
 
 -- | Default pool parameters
@@ -119,6 +148,29 @@ defaultPoolParameters =
   , maxDeploymentRatio: 0.8            -- 80% max deployment
   , flashFeeBase: 0.003                -- 0.3% base flash fee
   , swapPriceBase: 1.01                -- 1% base price change
+  -- 3D AMM constants
+  , initialVirtualBalance: 1000.0      -- Initial virtual balance for AMM
+  , baseRateYield: 0.0001              -- 0.01% base rate yield per block
+  , baseDurationYield: 0.00005         -- 0.005% base duration yield per block
+  , baseLeverageYield: 0.00008         -- 0.008% base leverage yield per block
+  , defaultSwapBuffer: 1.1             -- 10% buffer for swap calculations
+  , tickBase: 1.0001                   -- Base for tick-to-price conversion
+  , ticksPerPercent: 100.0             -- 100 ticks per percentage point
+  -- Duration multipliers
+  , flashDurationMultiplier: 0.8       -- 20% discount for flash
+  , monthlyDurationMultiplier: 1.0     -- Base rate for monthly
+  , swapDurationMultiplier: 1.2        -- 20% premium for swap
+  -- Leverage risk multipliers
+  , seniorLeverageRiskMultiplier: 1.0  -- Senior leverage risk multiplier
+  , juniorLeverageRiskMultiplier: 3.0  -- Junior leverage risk multiplier
+  , juniorYieldPremium: 1.5            -- 50% higher yield for junior
+  -- Swap solver constants
+  , swapSolverBufferRatio: 0.8         -- Buffer ratio for dimension adjustment
+  , swapSolverPremiumRatio: 0.9        -- Premium ratio for dimension adjustment
+  , maxOracleDeviation: 0.1             -- 10% max deviation from oracle price
+  -- Rebalancing parameters
+  , rebalanceThreshold: 0.05             -- 5% deviation triggers rebalancing
+  , maxRebalanceSlippage: 0.02           -- 2% max slippage per rebalance
   }
 
 --------------------------------------------------------------------------------
@@ -220,18 +272,74 @@ defaultLaunchParameters =
 -- | FeelsSOL system parameter configuration
 type FeelsSOLParameters =
   { defaultOraclePrice :: Number        -- Default price if oracle unavailable
-  , bufferTargetRatio :: Number         -- Target withdrawal buffer ratio
+  , entryFee :: Number                  -- Fee for JitoSOL → FeelsSOL conversion
+  , exitFee :: Number                   -- Fee for FeelsSOL → JitoSOL conversion
+  , polAllocationRate :: Number         -- Portion of fees allocated to POL system
   , solvencyCheckFrequency :: Int       -- How often to check solvency (blocks)
-  , emergencyBufferRatio :: Number      -- Emergency buffer threshold
   }
 
 -- | Default FeelsSOL parameters
 defaultFeelsSOLParameters :: FeelsSOLParameters
 defaultFeelsSOLParameters =
   { defaultOraclePrice: 1.05           -- 5% premium default price
-  , bufferTargetRatio: 0.1             -- 10% withdrawal buffer
+  , entryFee: 0.001                    -- 0.1% entry fee
+  , exitFee: 0.001                     -- 0.1% exit fee
+  , polAllocationRate: 0.5             -- 50% of fees to POL
   , solvencyCheckFrequency: 1200       -- Check every ~4 hours
-  , emergencyBufferRatio: 0.05         -- 5% emergency buffer
+  }
+
+--------------------------------------------------------------------------------
+-- BUFFER CONFIGURATION
+--------------------------------------------------------------------------------
+
+-- | Buffer management configuration
+type BufferParameters =
+  { targetRatio :: Number              -- Target buffer as ratio of total backing
+  , minRatio :: Number                 -- Minimum buffer ratio before health warning
+  , maxRatio :: Number                 -- Maximum buffer ratio before rebalancing
+  , rebalanceThreshold :: Number       -- Threshold for automatic rebalancing
+  }
+
+-- | Default buffer parameters
+defaultBufferParameters :: BufferParameters
+defaultBufferParameters =
+  { targetRatio: 0.1                   -- 10% target buffer
+  , minRatio: 0.05                     -- 5% minimum buffer
+  , maxRatio: 0.2                      -- 20% maximum buffer
+  , rebalanceThreshold: 0.02           -- 2% rebalance threshold
+  }
+
+--------------------------------------------------------------------------------
+-- PROTOCOL CONFIGURATION
+--------------------------------------------------------------------------------
+
+-- | Protocol-level configuration
+type ProtocolParameters =
+  { maxPoolAllocation :: Number        -- Max % per pool
+  , minPoolAllocation :: Number        -- Min % per pool
+  , rebalanceThreshold :: Number       -- Min delta to trigger rebalance
+  , rebalanceFrequency :: Int          -- Blocks between rebalances
+  , protocolFeeShare :: Number         -- % of fees to protocol
+  , feeToStakers :: Number            -- % of fees to stakers
+  , feeToPOL :: Number                -- % of fees to POL
+  , feeToTreasury :: Number           -- % of fees to treasury
+  , maxConcentrationRisk :: Number    -- Max acceptable concentration
+  , minHealthScore :: Number          -- Min acceptable health
+  }
+
+-- | Default protocol parameters
+defaultProtocolParameters :: ProtocolParameters
+defaultProtocolParameters =
+  { maxPoolAllocation: 0.3             -- 30% max per pool
+  , minPoolAllocation: 0.05            -- 5% min per pool
+  , rebalanceThreshold: 0.02           -- 2% delta triggers rebalance
+  , rebalanceFrequency: 100            -- Every 100 blocks
+  , protocolFeeShare: 0.15             -- 15% of fees to protocol
+  , feeToStakers: 0.4                  -- 40% to stakers
+  , feeToPOL: 0.4                      -- 40% to POL
+  , feeToTreasury: 0.2                 -- 20% to treasury
+  , maxConcentrationRisk: 0.7          -- 70% max risk
+  , minHealthScore: 0.6                -- 60% min health
   }
 
 --------------------------------------------------------------------------------
@@ -248,6 +356,8 @@ type ProtocolConfig =
   , oracle :: OracleParameters
   , launch :: LaunchParameters
   , feelsSOL :: FeelsSOLParameters
+  , buffer :: BufferParameters
+  , protocol :: ProtocolParameters
   }
 
 -- | Default protocol configuration
@@ -261,4 +371,6 @@ defaultProtocolConfig =
   , oracle: defaultOracleParameters
   , launch: defaultLaunchParameters
   , feelsSOL: defaultFeelsSOLParameters
+  , buffer: defaultBufferParameters
+  , protocol: defaultProtocolParameters
   }

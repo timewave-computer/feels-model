@@ -8,17 +8,14 @@ module UI.Action.FeelsSOLActions
 
 import Prelude
 import Data.Either (Either(..))
-import Data.Maybe (Maybe(..))
 import Effect (Effect)
 
 -- Import types
 import UI.ProtocolState (ProtocolState)
-import Protocol.FeelsSOLVault (updateOraclePrice)
+import Protocol.FeelsSOLVault (getOraclePrice, depositForFeelsSOL, withdrawFromFeelsSOL)
 import Protocol.Token (TokenType(..))
 import Protocol.Error (ProtocolError(..))
 import UI.Account (depositFromChain, withdrawToChain, getChainAccountBalance, getFeelsAccountBalance)
-import Effect.Ref (read)
-import FFI (currentTime)
 
 --------------------------------------------------------------------------------
 -- FeelsSOL Operations
@@ -36,16 +33,17 @@ enterFeelsSOL user jitoAmount state = do
       then pure $ Left (InvalidAmountError jitoAmount)
       else do
         -- Execute the FeelsSOL conversion through vault
-        vault <- read state.feelsSOL
-        feelsSOLMinted <- vault.deposit JitoSOL jitoAmount user unit
-        
-        -- Move JitoSOL from chain account to protocol
-        depositResult <- depositFromChain state.accounts user jitoAmount
-        case depositResult of
-          Left err -> pure $ Left $ InvalidCommandError err
-          Right _ -> do
-            -- Fee contribution to POL is handled internally by FeelsSOL vault
-            pure $ Right { user, feelsSOLMinted }
+        result <- depositForFeelsSOL state.feelsSOL user jitoAmount state.currentBlock
+        case result of
+          Left err -> pure $ Left err
+          Right feelsSOLMinted -> do
+            -- Move JitoSOL from chain account to protocol
+            depositResult <- depositFromChain state.accounts user jitoAmount
+            case depositResult of
+              Left err -> pure $ Left $ InvalidCommandError err
+              Right _ -> do
+                -- Fee contribution to POL is handled internally by FeelsSOL vault
+                pure $ Right { user, feelsSOLMinted }
 
 -- | Exit the FeelsSOL system by converting FeelsSOL to JitoSOL
 exitFeelsSOL :: String -> Number -> ProtocolState -> Effect (Either ProtocolError { user :: String, jitoSOLReceived :: Number })
@@ -59,24 +57,22 @@ exitFeelsSOL user feelsAmount state = do
       then pure $ Left (InvalidAmountError feelsAmount)
       else do
         -- Execute the FeelsSOL conversion through vault
-        vault <- read state.feelsSOL
-        jitoSOLReleased <- vault.withdraw feelsAmount user
-        
-        -- Move FeelsSOL back to JitoSOL in chain account
-        withdrawResult <- withdrawToChain state.accounts user jitoSOLReleased
+        withdrawResult <- withdrawFromFeelsSOL state.feelsSOL user feelsAmount state.currentBlock
         case withdrawResult of
-          Left err -> pure $ Left $ InvalidCommandError err
-          Right _ -> do
-            -- Fee contribution to POL is handled internally by FeelsSOL vault
-            pure $ Right { user, jitoSOLReceived: jitoSOLReleased }
+          Left err -> pure $ Left err
+          Right jitoSOLReleased -> do
+            
+            -- Move FeelsSOL back to JitoSOL in chain account
+            chainResult <- withdrawToChain state.accounts user jitoSOLReleased
+            case chainResult of
+              Left err -> pure $ Left $ InvalidCommandError err
+              Right _ -> do
+                -- Fee contribution to POL is handled internally by FeelsSOL vault
+                pure $ Right { user, jitoSOLReceived: jitoSOLReleased }
 
 -- | Get the current JitoSOL/FeelsSOL exchange rate
 getExchangeRate :: ProtocolState -> Effect Number
 getExchangeRate state = do
   -- Get the oracle price from the vault
-  vault <- read state.feelsSOL
-  let strategy = vault.state.strategyState
-  updatedStrategy <- updateOraclePrice strategy
-  pure $ case updatedStrategy.cachedPrice of
-    Just oracle -> oracle.price
-    Nothing -> 1.05
+  oraclePrice <- getOraclePrice state.feelsSOL
+  pure oraclePrice.price

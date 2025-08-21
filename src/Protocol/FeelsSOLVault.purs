@@ -23,9 +23,9 @@ module Protocol.FeelsSOLVault
   -- Oracle management functions
   , updateOraclePrice
   , getOraclePrice
-  -- Deposit/withdrawal functions
-  , depositJitoSOL
-  , withdrawFeelsSOL
+  -- Deposit/withdrawal functions  
+  , depositForFeelsSOL
+  , withdrawFromFeelsSOL
   -- Buffer management functions
   , getBufferStatus
   , rebalanceBuffer
@@ -40,14 +40,14 @@ import Effect (Effect)
 import Effect.Ref (Ref, new, read)
 import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Data.Array (filter, partition, mapWithIndex)
+import Data.Array (filter, partition, mapWithIndex, (:), uncons)
 import Data.Array as Array
 import Data.Foldable (sum)
 import Data.Number (abs)
 import Protocol.Vault 
   ( LedgerEntry(..), LedgerVaultState, LedgerVault, ShareAmount
   , class LedgerOps, createEmptyLedgerState, createLedgerVault
-  , getAccountEntries, getAllAccounts
+  , getAccountEntries, getAllAccounts, entryValue, aggregateEntries
   )
 import Protocol.Common (BlockNumber)
 import Protocol.Token (TokenType(..))
@@ -60,12 +60,12 @@ import FFI (currentTime)
 --------------------------------------------------------------------------------
 
 -- | FeelsSOL-specific ledger entry
-type FeelsSOLEntry =
+data FeelsSOLEntry = FeelsSOLEntry
   { jitoSOLAmount :: ShareAmount    -- JitoSOL deposited
-  , entryPrice :: Number           -- Oracle price at deposit
-  , entryFee :: Number             -- Fee paid on deposit
-  , exitFee :: Number              -- Fee to be paid on withdrawal
-  , isBuffer :: Boolean            -- Whether this entry is buffer allocation
+  , entryPrice :: Number            -- Oracle price at deposit
+  , entryFee :: Number              -- Fee paid on deposit
+  , exitFee :: Number               -- Fee to be paid on withdrawal
+  , isBuffer :: Boolean             -- Whether this entry is buffer allocation
   }
 
 -- | Oracle price information
@@ -103,13 +103,16 @@ type FeelsSOLStrategy =
 -- | Ledger operations instance for FeelsSOL entries
 instance ledgerOpsFeelsSOL :: LedgerOps FeelsSOLEntry where
   -- Extract JitoSOL value from entry
-  entryValue (LedgerEntry e) = e.data.jitoSOLAmount
+  entryValue (LedgerEntry e) = case e.data of
+    FeelsSOLEntry rec -> rec.jitoSOLAmount
   
   -- All entries are always active (no time locks)
   isActive _ _ = true
   
   -- Sum all JitoSOL amounts
-  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> e.data.jitoSOLAmount) entries
+  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> case e.data of
+    FeelsSOLEntry rec -> rec.jitoSOLAmount
+  ) entries
   
   -- Apply buffer rebalancing strategy
   applyStrategy strategy entries = 
@@ -122,9 +125,12 @@ instance ledgerOpsFeelsSOL :: LedgerOps FeelsSOLEntry where
     let
       -- Separate buffer and non-buffer entries with indices
       indexedEntries = Array.mapWithIndex (\idx entry -> { entry: entry, index: idx }) entries
-      (bufferEntries, regularEntries) = Array.partition (\e -> case e.entry of
-        LedgerEntry le -> le.data.isBuffer
+      partitionResult = Array.partition (\e -> case e.entry of
+        LedgerEntry le -> case le.data of
+          FeelsSOLEntry rec -> rec.isBuffer
       ) indexedEntries
+      bufferEntries = partitionResult.yes
+      regularEntries = partitionResult.no
       
       -- Try to fulfill from buffer first
       selectFromEntries :: Array { entry :: LedgerEntry FeelsSOLEntry, index :: Int } -> 
@@ -133,12 +139,15 @@ instance ledgerOpsFeelsSOL :: LedgerOps FeelsSOLEntry where
                           Maybe (Array { entry :: LedgerEntry FeelsSOLEntry, index :: Int })
       selectFromEntries [] remaining selected =
         if remaining > 0.0 then Nothing else Just selected
-      selectFromEntries (e : es) remaining selected =
-        let value = entryValue e.entry
-            newRemaining = remaining - value
-        in if newRemaining <= 0.0
-           then Just (e : selected)
-           else selectFromEntries es newRemaining (e : selected)
+      selectFromEntries entries remaining selected =
+        case Array.uncons entries of
+          Nothing -> if remaining > 0.0 then Nothing else Just selected
+          Just { head: e, tail: es } ->
+            let value = entryValue e.entry
+                newRemaining = remaining - value
+            in if newRemaining <= 0.0
+               then Just (e : selected)
+               else selectFromEntries es newRemaining (e : selected)
       
       -- First try buffer entries, then regular entries
       bufferResult = selectFromEntries bufferEntries requestedAmount []
@@ -230,14 +239,14 @@ updateOraclePrice vaultRef newPrice = do
 
 -- Deposit/Withdrawal Functions
 
--- | Deposit JitoSOL and receive FeelsSOL
-depositJitoSOL ::
+-- | Deposit JitoSOL and receive FeelsSOL shares
+depositForFeelsSOL ::
   Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) ->
   String ->           -- User address
   Number ->           -- JitoSOL amount
   BlockNumber ->      -- Current block
   Effect (Either ProtocolError ShareAmount)
-depositJitoSOL vaultRef user jitoSOLAmount currentBlock = do
+depositForFeelsSOL vaultRef user jitoSOLAmount currentBlock = do
   vault <- read vaultRef
   
   -- Get current oracle price
@@ -255,7 +264,7 @@ depositJitoSOL vaultRef user jitoSOLAmount currentBlock = do
       feelsSOLAmount = netJitoSOL / oraclePrice.price
       
       -- Create ledger entry
-      entry: FeelsSOLEntry =
+      entry = FeelsSOLEntry
         { jitoSOLAmount: netJitoSOL
         , entryPrice: oraclePrice.price
         , entryFee: entryFeeAmount
@@ -278,14 +287,14 @@ depositJitoSOL vaultRef user jitoSOLAmount currentBlock = do
   
   pure $ Right feelsSOLAmount
 
--- | Withdraw FeelsSOL and receive JitoSOL
-withdrawFeelsSOL ::
+-- | Withdraw FeelsSOL shares and receive JitoSOL
+withdrawFromFeelsSOL ::
   Ref (LedgerVault FeelsSOLEntry FeelsSOLStrategy) ->
   String ->           -- User address
   ShareAmount ->      -- FeelsSOL amount to burn
   BlockNumber ->      -- Current block
   Effect (Either ProtocolError Number)
-withdrawFeelsSOL vaultRef user feelsSOLAmount currentBlock = do
+withdrawFromFeelsSOL vaultRef user feelsSOLAmount currentBlock = do
   vault <- read vaultRef
   
   -- Get current oracle price

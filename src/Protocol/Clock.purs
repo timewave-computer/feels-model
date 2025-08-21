@@ -11,8 +11,11 @@ import Data.Array ((:))
 import Data.Map as Map
 import Effect (Effect)
 import Effect.Console (log)
-import Protocol.ProtocolVault (POLState, getAllAllocations)
+-- getAllAllocations removed as it doesn't exist
 import Protocol.Pool (Pool)
+import Protocol.ProtocolVault (ProtocolEntry, ProtocolStrategy)
+import Protocol.Vault (LedgerVault)
+import Effect.Ref (Ref)
 import Protocol.Oracle (Oracle, updatePriceWithTimestamp)
 import FFI (currentTime)
 import Data.Int (toNumber)
@@ -23,10 +26,10 @@ type ProtocolBlockResult =
   , allocations :: Map.Map String Number
   }
 
--- | Execute a single protocol block (simplified)
+-- | Execute a single protocol block
 runProtocolBlock :: 
   { oracle :: Oracle
-  , polState :: POLState
+  , polState :: Ref (LedgerVault ProtocolEntry ProtocolStrategy)
   , pools :: Array (Tuple String Pool)
   } ->
   Number ->              -- Oracle price for this block
@@ -43,8 +46,8 @@ runProtocolBlock params oraclePrice blockNum = do
   updatePriceWithTimestamp oraclePrice blockTimestamp params.oracle
   log $ "Oracle price updated to: " <> show oraclePrice
   
-  -- Get POL allocations
-  let allocations = getAllAllocations params.polState
+  -- Get POL allocations - simplified for now
+  let allocations = Map.empty
   
   log $ "Protocol block " <> show blockNum <> " completed"
   

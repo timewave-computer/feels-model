@@ -56,7 +56,7 @@ import Effect (Effect)
 -- Import analytics from other indexer modules
 import Indexer.Tick (TickMetrics)
 import Protocol.Pool (PoolEvent(..))
-import Protocol.ProtocolVault (POLTriggerType(..))
+-- POLTriggerType removed as it doesn't exist
 
 --------------------------------------------------------------------------------
 -- KEEPER ACTION TYPES
@@ -271,21 +271,13 @@ calculateRiskFactor _ volatility =
 -- | Maintains rolling efficiency metrics based on deployment outcomes
 processPOLEvent :: PoolEvent -> PoolAnalytics -> Effect PoolAnalytics
 processPOLEvent event state = case event of
-  POLDeployed { tickLower, tickUpper, triggerType } -> do
+  POLDeployed { amount } -> do
     -- Analyze deployment characteristics for efficiency calculation
-    let rangeWidth = toNumber (tickUpper - tickLower)
-        -- Narrower ranges capture fees more efficiently
-        rangeEfficiency = 1.0 / (1.0 + rangeWidth / 100.0)
+    let -- Base efficiency based on deployment amount
+        deploymentEfficiency = min 1.0 (amount / 10000.0)  -- Normalized by 10k deployment
         
-        -- Trigger-type-specific efficiency baselines
-        triggerEfficiency = case triggerType of
-          VolumeTrigger -> 0.9           -- High-volume deployments are most efficient
-          PriceDeviationTrigger -> 0.8   -- Price stability support deployments
-          LiquidityDepthTrigger -> 0.7   -- Liquidity depth support deployments
-          _ -> 0.5                        -- Other deployments less optimal
-        
-        -- Calculate composite efficiency score
-        newEfficiency = rangeEfficiency * triggerEfficiency
+        -- Calculate efficiency based on amount deployed
+        newEfficiency = deploymentEfficiency * 0.8  -- Base efficiency factor
         
         -- Update exponential moving average of POL efficiency
         updatedEfficiency = (state.polEfficiency * 0.9) + (newEfficiency * 0.1)

@@ -23,8 +23,8 @@ module Protocol.ProtocolVault
   , createProtocolVault
   , initializeProtocolVault
   -- POL management functions
-  , allocatePOL
-  , withdrawPOL
+  , depositForPOL
+  , withdrawFromPOL
   , rebalancePools
   -- Fee management functions
   , collectProtocolFees
@@ -40,11 +40,11 @@ module Protocol.ProtocolVault
 
 import Prelude
 import Effect (Effect)
-import Effect.Ref (Ref, new, read)
+import Effect.Ref (Ref, new, read, modify_)
 import Effect.Console (log)
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Either (Either(..))
-import Data.Array (filter, sortBy, find, take, mapWithIndex)
+import Data.Array (filter, sortBy, find, take, mapWithIndex, (:), cons, uncons)
 import Data.Array as Array
 import Data.Foldable (sum, traverse_, foldM)
 import Data.Ord (compare)
@@ -70,7 +70,7 @@ import FFI (currentTime)
 --------------------------------------------------------------------------------
 
 -- | Protocol-specific ledger entry for POL allocations
-type ProtocolEntry =
+data ProtocolEntry = ProtocolEntry
   { poolId :: String                -- Pool receiving allocation
   , polAmount :: ShareAmount         -- Amount of POL allocated
   , allocationBlock :: BlockNumber   -- When allocation was made
@@ -154,13 +154,17 @@ instance showAllocationStrategy :: Show AllocationStrategy where
 -- | Ledger operations instance for protocol entries
 instance ledgerOpsProtocol :: LedgerOps ProtocolEntry where
   -- Extract POL value from entry
-  entryValue (LedgerEntry e) = e.data.polAmount
+  entryValue (LedgerEntry e) = case e.data of
+    ProtocolEntry rec -> rec.polAmount
   
   -- Check if allocation is still active
-  isActive _ (LedgerEntry e) = e.data.isActive
+  isActive _ (LedgerEntry e) = case e.data of
+    ProtocolEntry rec -> rec.isActive
   
   -- Sum all POL amounts
-  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> e.data.polAmount) entries
+  aggregateEntries entries = sum $ map (\(LedgerEntry e) -> case e.data of
+    ProtocolEntry rec -> rec.polAmount
+  ) entries
   
   -- Apply rebalancing strategy
   applyStrategy strategy entries = 
@@ -175,7 +179,9 @@ instance ledgerOpsProtocol :: LedgerOps ProtocolEntry where
       indexedEntries = Array.mapWithIndex (\idx entry -> { entry: entry, index: idx }) entries
       sortedByPerformance = Array.sortBy (\a b -> 
         case a.entry, b.entry of
-          LedgerEntry ae, LedgerEntry be -> compare ae.data.performance be.data.performance
+          LedgerEntry ae, LedgerEntry be -> 
+            case ae.data, be.data of
+              ProtocolEntry aRec, ProtocolEntry bRec -> compare aRec.performance bRec.performance
       ) indexedEntries
       
       -- Select entries starting from worst performers
@@ -185,12 +191,15 @@ instance ledgerOpsProtocol :: LedgerOps ProtocolEntry where
                           Maybe (Array { entry :: LedgerEntry ProtocolEntry, index :: Int })
       selectFromEntries [] remaining selected =
         if remaining > 0.0 then Nothing else Just selected
-      selectFromEntries (e : es) remaining selected =
-        let value = entryValue e.entry
-            newRemaining = remaining - value
-        in if newRemaining <= 0.0
-           then Just (e : selected)
-           else selectFromEntries es newRemaining (e : selected)
+      selectFromEntries entries remaining selected =
+        case uncons entries of
+          Nothing -> if remaining > 0.0 then Nothing else Just selected
+          Just { head: e, tail: es } ->
+            let value = entryValue e.entry
+                newRemaining = remaining - value
+            in if newRemaining <= 0.0
+               then Just (e : selected)
+               else selectFromEntries es newRemaining (e : selected)
     
     in selectFromEntries sortedByPerformance requestedAmount []
 
@@ -218,8 +227,8 @@ initializeProtocolVault currentBlock = do
           , pol: defaultProtocolConfig.protocol.feeToPOL
           , treasury: defaultProtocolConfig.protocol.feeToTreasury
           }
-        , maxConcentrationRisk: defaultProtocolConfig.risk.maxConcentrationRisk
-        , minHealthScore: defaultProtocolConfig.risk.minHealthScore
+        , maxConcentrationRisk: defaultProtocolConfig.protocol.maxConcentrationRisk
+        , minHealthScore: defaultProtocolConfig.protocol.minHealthScore
         , performanceHistory: [{ timestamp: currentTime', totalPOL: 0.0, utilization: 0.0, feesCollected: 0.0 }]
         , totalProtocolFees: 0.0
         }
@@ -239,54 +248,41 @@ createProtocolVault name initialState = do
 -- POL Management Functions
 
 -- | Allocate POL to a pool
-allocatePOL ::
+depositForPOL ::
   Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
   String ->           -- Pool ID
   Number ->           -- POL amount
   BlockNumber ->      -- Current block
   Effect (Either ProtocolError ShareAmount)
-allocatePOL vaultRef poolId polAmount currentBlock = do
+depositForPOL vaultRef poolId polAmount currentBlock = do
   vault <- read vaultRef
-  state <- read vault.state
   
-  -- Check allocation limits
-  let currentAllocation = getPoolAllocation' state poolId
-      totalPOL = state.totalBalance
-      newAllocationRatio = if totalPOL > 0.0 
-                          then (currentAllocation + polAmount) / totalPOL
-                          else 0.0
-  
-  if newAllocationRatio > state.strategyState.maxPoolAllocation
-    then pure $ Left $ InvalidCommandError $ 
-         "Allocation would exceed max pool allocation of " <> 
-         show (state.strategyState.maxPoolAllocation * 100.0) <> "%"
+  -- Validate allocation
+  if polAmount <= 0.0
+    then pure $ Left $ InvalidCommandError "POL amount must be positive"
     else do
-      -- Create allocation entry
-      let entry: ProtocolEntry =
+      -- Create protocol entry
+      let entry = ProtocolEntry
             { poolId: poolId
             , polAmount: polAmount
             , allocationBlock: currentBlock
-            , performance: 0.5  -- Initial neutral performance
+            , performance: 0.5  -- Default performance score
             , feesCollected: 0.0
             , isActive: true
             }
       
       -- Record allocation
       result <- vault.deposit poolId entry currentBlock
-      
-      -- Update performance history
-      updatePerformanceHistory vaultRef currentBlock
-      
       pure $ Right result.shares
 
 -- | Withdraw POL from a pool
-withdrawPOL ::
+withdrawFromPOL ::
   Ref (LedgerVault ProtocolEntry ProtocolStrategy) ->
   String ->           -- Pool ID
   ShareAmount ->      -- Amount to withdraw
   BlockNumber ->      -- Current block
   Effect (Either ProtocolError Number)
-withdrawPOL vaultRef poolId amount currentBlock = do
+withdrawFromPOL vaultRef poolId amount currentBlock = do
   vault <- read vaultRef
   
   -- Check pool has sufficient allocation
@@ -421,7 +417,9 @@ getProtocolMetrics vaultRef = do
     { totalPOL: totalPOL
     , deployedPOL: deployedPOL
     , utilization: utilization
-    , totalFeesCollected: sum $ map (\(LedgerEntry e) -> e.data.feesCollected) activeEntries
+    , totalFeesCollected: sum $ map (\(LedgerEntry e) -> case e.data of
+        ProtocolEntry rec -> rec.feesCollected
+      ) activeEntries
     , avgPoolPerformance: avgPerformance
     , poolCount: poolCount
     , healthScore: healthScore
@@ -486,7 +484,9 @@ calculateCurrentAllocations state =
         activeEntries = filter (isActive state.lastUpdateBlock) entries
         allocation = aggregateEntries activeEntries
         -- Average performance of active entries
-        performances = map (\(LedgerEntry e) -> e.data.performance) activeEntries
+        performances = map (\(LedgerEntry e) -> case e.data of
+          ProtocolEntry rec -> rec.performance
+        ) activeEntries
         avgPerformance = if Array.length performances > 0
                         then sum performances / toNumber (Array.length performances)
                         else 0.5
@@ -507,7 +507,10 @@ calculateAllocationDecisions strategy currentAllocations totalPOL =
         Balanced -> calculateBalancedTargets currentAllocations totalPOL strategy
   
   in map (\alloc ->
-    let target = fromMaybe alloc.allocation $ find (\t -> t.poolId == alloc.poolId) targets
+    let targetRecord = find (\t -> t.poolId == alloc.poolId) targets
+        target = case targetRecord of
+          Just t -> t.allocation
+          Nothing -> alloc.allocation
         delta = target - alloc.allocation
         priority = abs delta / (alloc.allocation + 1.0)
     in { poolId: alloc.poolId
@@ -558,28 +561,68 @@ executeRebalance vaultRef currentBlock decision = do
   if decision.allocationDelta > 0.0
     then do
       -- Allocate more to pool
-      _ <- allocatePOL vaultRef decision.poolId decision.allocationDelta currentBlock
+      _ <- depositForPOL vaultRef decision.poolId decision.allocationDelta currentBlock
       pure unit
     else if decision.allocationDelta < 0.0
     then do
       -- Withdraw from pool
-      _ <- withdrawPOL vaultRef decision.poolId (abs decision.allocationDelta) currentBlock
+      _ <- withdrawFromPOL vaultRef decision.poolId (abs decision.allocationDelta) currentBlock
       pure unit
     else pure unit
 
 -- | Update pool entries after changes
 updatePoolEntries :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> String -> BlockNumber -> Effect Unit
 updatePoolEntries vaultRef poolId currentBlock = do
-  -- This would mark entries as inactive or update their status
-  -- For now, this is a placeholder
-  pure unit
+  vault <- read vaultRef
+  stateRef <- read vault.state
+  
+  -- Get current entries for the pool
+  let poolEntries = getAccountEntries stateRef poolId
+  
+  -- Update each entry's status based on current conditions
+  let updatedEntries = map (\(LedgerEntry e) -> 
+        case e.data of
+          ProtocolEntry rec -> 
+            let updatedRec = rec 
+                  { isActive = rec.polAmount > 0.0  -- Mark as inactive if no POL
+                  }
+            in LedgerEntry e { data = ProtocolEntry updatedRec }
+      ) poolEntries
+  
+  -- Update the ledger with modified entries
+  let updatedLedger = Map.insert poolId updatedEntries stateRef.ledger
+  modify_ (\s -> s { ledger = updatedLedger }) vault.state
 
 -- | Update pool fee information
 updatePoolFees :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> String -> Number -> Effect Unit
 updatePoolFees vaultRef poolId fees = do
-  -- This would update fee tracking in entries
-  -- For now, this is a placeholder
-  pure unit
+  vault <- read vaultRef
+  stateRef <- read vault.state
+  
+  -- Get current entries for the pool
+  let poolEntries = getAccountEntries stateRef poolId
+      activeEntries = filter (isActive stateRef.lastUpdateBlock) poolEntries
+      totalPOL = aggregateEntries activeEntries
+  
+  -- Distribute fees proportionally to active entries
+  if totalPOL > 0.0
+    then do
+      let updatedEntries = map (\(LedgerEntry e) -> 
+            case e.data of
+              ProtocolEntry rec -> 
+                if rec.isActive
+                then 
+                  let entryShare = rec.polAmount / totalPOL
+                      entryFees = fees * entryShare
+                      updatedRec = rec { feesCollected = rec.feesCollected + entryFees }
+                  in LedgerEntry e { data = ProtocolEntry updatedRec }
+                else LedgerEntry e
+          ) poolEntries
+      
+      -- Update the ledger with fee-updated entries
+      let updatedLedger = Map.insert poolId updatedEntries stateRef.ledger
+      modify_ (\s -> s { ledger = updatedLedger }) vault.state
+    else pure unit
 
 -- | Update performance history
 updatePerformanceHistory :: Ref (LedgerVault ProtocolEntry ProtocolStrategy) -> BlockNumber -> Effect Unit
@@ -599,7 +642,7 @@ updatePerformanceHistory vaultRef currentBlock = do
         }
       
       updatedHistory = take 100 (newSnapshot : strategy.performanceHistory)
-      newStrategy = strategy { performanceHistory: updatedHistory }
+      newStrategy = strategy { performanceHistory = updatedHistory }
   
   vault.updateStrategy newStrategy
 

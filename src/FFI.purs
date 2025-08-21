@@ -65,3 +65,4 @@ foreign import removeElementAttribute :: String -> String -> Effect Unit
 -- Math utility functions
 foreign import unsafeToInt :: Number -> Int
 foreign import unsafeToNumber :: Int -> Number
+foreign import sqrt :: Number -> Number

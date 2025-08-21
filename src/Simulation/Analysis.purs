@@ -85,7 +85,7 @@ calculateResults config finalState = do
   
   -- Protocol liquidity and position analysis
   positions <- PR.getAllPositions finalState.poolRegistry
-  let totalLiquidity = sum (map _.amount positions)
+  let totalLiquidity = sum (map _.metrics.amount positions)
   let activePositionCount = length positions
   
   -- Trading volume calculation from action history

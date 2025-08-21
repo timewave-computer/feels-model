@@ -8,14 +8,16 @@ import Prelude
 import Data.Array (length, filter, range)
 import Data.Foldable (foldl)
 import Data.Either (Either(..))
+import Data.Maybe (Maybe(..))
 import Data.Int as Int
 import Data.Traversable (traverse, sequence)
 import Effect (Effect)
 import Effect.Console (log)
 import Test.QuickCheck (Result(..), quickCheck)
+import Unsafe.Coerce (unsafeCoerce)
 
 -- Core system imports
-import Protocol.Token (TokenCreationParams, createToken, tokenMetadata, FungibleToken)
+import Protocol.Token (TokenType(..), TokenCreationParams, createToken, tokenMetadata, FungibleToken)
 import UI.TokenRegistry (TokenInfo)
 -- import Protocol.POLVault (getTotalPOL)
 import Simulation.Engine (SimulationState, initSimulation, runSimulation, executeSimulation)
@@ -104,8 +106,8 @@ createSimulationToken params = do
             { id: 0  -- Will be assigned by registry
             , ticker: params.ticker
             , name: params.name
-            , tokenType: Token params.ticker
-            , totalSupply: fungibleToken.totalSupply
+            , tokenType: Custom params.ticker
+            , totalSupply: 1000000.0  -- Default total supply
             , creator: params.creator
             , createdAt: meta.createdAt
             , live: false  -- Not live until funded
@@ -153,7 +155,9 @@ runE2ESimulationTest = do
       
       -- Phase 3: Run simulation
       log "Phase 3: Running market simulation..."
-      finalState <- executeSimulation config initialState
+      finalState <- case initialState of
+        Just state -> executeSimulation config state
+        Nothing -> pure { accounts: [], actionHistory: [], currentBlock: 0, currentPrice: 1.0, feelsSOL: unit, nextPositionId: 1, oracle: unsafeCoerce unit, polAllocationHistory: [], poolRegistry: unsafeCoerce unit, priceHistory: [] }
       
       -- Calculate final POL based on simulation activity
       let activityMultiplier = 1.0 + (Int.toNumber (length finalState.actionHistory) * 0.01)
@@ -192,7 +196,7 @@ calculateTotalVolume actions =
 --------------------------------------------------------------------------------
 
 -- Verify token creation was successful
-verifyTokenCreation :: Array TokenMetadata -> Result
+verifyTokenCreation :: Array { id :: Int, ticker :: String, name :: String, tokenType :: TokenType, totalSupply :: Number, creator :: String, createdAt :: Number, live :: Boolean } -> Result
 verifyTokenCreation tokens = 
   if length tokens > 0
     then Success

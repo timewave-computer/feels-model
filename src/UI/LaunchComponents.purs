@@ -5,7 +5,7 @@ import Prelude
 import Data.Maybe (Maybe(..), isJust, fromMaybe)
 import Data.Array (length, head, filter)
 import Data.Number as Number
-import UI.Util.Codecs (intToNumber)
+import Data.Int (toNumber)
 import Halogen as H
 import Halogen.HTML as HH
 import Halogen.HTML.Events as HE
@@ -250,13 +250,13 @@ renderBatchRow batch =
   HH.tr_
     [ HH.td_ [ HH.text $ show batch.batchNumber ]
     , HH.td_ [ HH.text $ show (length batch.winners) ]
-    , HH.td_ [ HH.text $ formatAmount (batch.basePayment / toNumber (length batch.winners)) ]
+    , HH.td_ [ HH.text $ formatAmount (batch.basePayment / intToNum (length batch.winners)) ]
     , HH.td_ [ HH.text $ formatPercent batch.avgPriorityFeeRatio ]
     , HH.td_ [ HH.text $ formatAmount batch.protocolRevenue ]
     ]
   where
-    toNumber :: Int -> Number
-    toNumber n = intToNumber n
+    intToNum :: Int -> Number
+    intToNum n = toNumber n
 
 --------------------------------------------------------------------------------
 -- Helper Functions

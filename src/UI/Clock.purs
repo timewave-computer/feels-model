@@ -46,9 +46,6 @@ runProtocolBlock protocolRef oraclePrice blockNum = do
         { oracle: protocolState.oracle
         , polState: protocolState.polState
         , pools: pools
-        , positionsRef: positionsRef
-        , getPool: \poolId -> getPool poolId protocolState.poolRegistry
-        , updatePool: \poolId poolState -> updatePool poolId poolState protocolState.poolRegistry
         }
   
   -- Call the Protocol.Clock function
