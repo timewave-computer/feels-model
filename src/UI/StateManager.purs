@@ -303,17 +303,13 @@ executeProtocolCommand cmd runtime = do
       -- Log all messages on error
       traverse_ (\msg -> pure unit) logs -- Would use actual logging
       pure $ Left err
-    Tuple (Right (Tuple cmdResult logs)) _ -> do
+    Tuple (Right cmdResult) logs -> do
       -- Log all messages on success
       traverse_ (\msg -> pure unit) logs -- Would use actual logging  
       pure $ Right cmdResult
   where
     executeProtocolCommandM :: AppM PC.CommandResult
-    executeProtocolCommandM = handleAppError
-      (executeCommandM cmd)
-      (\err -> do
-        logMessage $ "Protocol command execution failed: " <> err
-        throwAppError err)
+    executeProtocolCommandM = executeCommandM cmd
 
 -- | Execute protocol command with transaction-like semantics
 executeProtocolCommandTx :: ProtocolCommand -> AppRuntime -> Effect (Either String PC.CommandResult)

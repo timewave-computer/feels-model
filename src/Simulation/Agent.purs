@@ -289,8 +289,8 @@ sampleFromPreferences prefs = do
   leverageRoll <- random
   let leverage = 
         if leverageRoll < prefs.leverageTolerance.seniorProbability
-          then Senior
-        else Junior
+          then Leverage 1.0 -- Senior placeholder
+        else Leverage 3.0 -- Junior placeholder
   
   -- Sample lending asset
   liquidityRoll <- random
@@ -310,10 +310,14 @@ getPositionProbability prefs duration leverage lendAsset =
       Flash -> prefs.timeTolerances.flashProbability
       Monthly -> prefs.timeTolerances.monthlyProbability
       Swap -> prefs.timeTolerances.spotProbability
+      Weekly -> prefs.timeTolerances.monthlyProbability  -- Use monthly as fallback
+      Quarterly -> prefs.timeTolerances.monthlyProbability  -- Use monthly as fallback  
+      Annual -> prefs.timeTolerances.monthlyProbability  -- Use monthly as fallback
     
     leverageProbability = case leverage of
-      Senior -> prefs.leverageTolerance.seniorProbability
-      Junior -> prefs.leverageTolerance.juniorProbability
+      Leverage lev -> if lev == 1.0 
+        then prefs.leverageTolerance.seniorProbability -- Senior case
+        else prefs.leverageTolerance.juniorProbability -- Junior case
     
     liquidityProbability = case lendAsset of
       FeelsSOL -> prefs.liquidityTolerance.feelsSOLProbability

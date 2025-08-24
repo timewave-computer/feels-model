@@ -243,8 +243,7 @@ getPositionValue positionId state = do
       
       -- 3. Apply leverage multiplier (simplified)
       let leverageMult = case position.terms.leverage of
-            Senior -> 1.0    -- Senior tier: no leverage, stable returns
-            Junior -> 1.2    -- Junior tier: 20% bonus for risk (simplified)
+            Leverage x -> x    -- Use the actual leverage value
       
       -- 4. Apply time-based returns for term positions (simplified)
       currentBlock <- pure state.currentBlock

@@ -35,7 +35,7 @@ createTestPosition id rollover duration currentBlock =
     , amount: 1000.0
     , price: 1.0
     , duration: duration
-    , leverage: Senior
+    , leverage: Leverage 1.0  -- 1x leverage for test
     , lendAsset: Custom "TEST"
     , collateralAsset: FeelsSOL
     , rollover: rollover

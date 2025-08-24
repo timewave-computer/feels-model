@@ -50,35 +50,36 @@ module Protocol.PositionVault
   , isExpired
   , isSwap
   , handleExpiredVaultPosition
+  , getVaultPositionValue
+  , calculateMonthlyYield
+  , blocksUntilExpiry
+  , groupVaultPositionsByExpiry
   ) where
 
 import Prelude hiding (max)
 import Data.Ord (max)
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
-import Data.Array (filter, foldl, length, sortBy, head, mapMaybe)
-import Data.Foldable (sum)
+import Data.Array (filter, groupBy, sortWith)
+-- import Data.Foldable (sum) -- removed: redundant
 import Effect.Ref (Ref, read)
 import Data.Int (toNumber, round)
-import Data.Traversable (traverse, traverse_)
+import Data.Traversable (traverse)
 import Effect (Effect)
-import Effect.Class (liftEffect)
-import FFI (generateId, currentTime)
-import Data.Number (log)
-import Data.Tuple (Tuple(..))
+-- import Effect.Class (liftEffect) -- removed: redundant
+-- import FFI (generateId, currentTime) -- removed: redundant
+-- import Data.Number (log) -- removed: redundant
+-- import Data.Tuple (Tuple(..)) -- removed: redundant
 import Data.Map as Map
-import Protocol.Token (TokenType(..), PositionToken, createPositionToken)
-import Protocol.Pool (Pool, TickCoordinate, PoolPosition,
-                       addLiquidity3D, removeLiquidity3D, swap3D, SwapResult3D,
-                       calculateSwapPrice3D, calculateInvariant3D, getVirtualBalances,
-                       Duration(..), Leverage(..), leverageMultiplier,
+import Protocol.Token (TokenType, PositionToken, createPositionToken)
+import Protocol.Pool (Pool, getVirtualBalances,
+                       Duration(..), Leverage(..), 
                        durationToTick, leverageToTick)
-import Protocol.Common (BlockNumber, PositionId, PoolId, ShareAmount)
-import Protocol.Vault (LedgerVault, LedgerVaultState)
+import Protocol.Common (BlockNumber, PositionId, ShareAmount)
+import Protocol.Vault (LedgerVault)
 import Data.Map (Map)
 import Data.Array.NonEmpty as NEA
 import Data.Array.NonEmpty (NonEmptyArray)
-import Data.Array (groupBy, sortWith)
 import Data.Array as Array
 import Protocol.Config (defaultProtocolConfig)
 
@@ -311,11 +312,8 @@ getDepositQuote vault params = do
                           then newShare * vault.positionTokenSupply / (1.0 - newShare)
                           else params.amountIn  -- First deposit gets 1:1
       
-      -- Calculate spot price in 3D space
-      currentBalances = getVirtualBalances vault.pool { rateTick: 0, durationTick: 1, leverageTick: 0 }
-      swapPrice = calculateSwapPrice3D currentBalances vault.pool.weights 
-                    vault.pool.poolState.currentTick 
-                    { rateTick: round (targetRateRange.min * 10000.0), durationTick: 1, leverageTick: 0 }
+      -- Calculate spot price in 3D space  
+      _currentBalances = getVirtualBalances vault.pool { rateTick: 0, durationTick: 1, leverageTick: 0 }
       
       -- Vault deposits don't have slippage - they're providing liquidity
       avgRate = (targetRateRange.min + targetRateRange.max) / 2.0
@@ -348,7 +346,7 @@ getWithdrawQuote vault params = do
 
 -- | Withdraw from the vault
 withdraw :: PositionVault -> WithdrawParams -> BlockNumber -> Effect (Either String PositionVault)
-withdraw vault params currentBlock = do
+withdraw vault params _currentBlock = do
   -- Get quote
   quote <- getWithdrawQuote vault params
   
@@ -411,16 +409,16 @@ calculateOptimalAllocation vault totalAmount =
     -- Create allocations for loan durations only
     allocations = 
       [ { amount: flashAmount * config.leverageWeights.senior
-        , rate: midRate, duration: Flash, leverage: Senior
+        , rate: midRate, duration: Flash, leverage: Leverage 1.0 -- Senior placeholder
         }
       , { amount: flashAmount * config.leverageWeights.junior
-        , rate: midRate * juniorRiskPremium, duration: Flash, leverage: Junior  -- Higher rate for junior
+        , rate: midRate * juniorRiskPremium, duration: Flash, leverage: Leverage 3.0  -- Junior placeholder (Higher rate for junior)
         }
       , { amount: monthlyAmount * config.leverageWeights.senior
-        , rate: midRate, duration: Monthly, leverage: Senior
+        , rate: midRate, duration: Monthly, leverage: Leverage 1.0 -- Senior placeholder
         }
       , { amount: monthlyAmount * config.leverageWeights.junior
-        , rate: midRate * juniorRiskPremium, duration: Monthly, leverage: Junior
+        , rate: midRate * juniorRiskPremium, duration: Monthly, leverage: Leverage 3.0 -- Junior placeholder
         }
       ]
     
@@ -432,7 +430,7 @@ calculateOptimalAllocation vault totalAmount =
 -- | Redenominate vault positions based on 3D pool performance
 -- TODO: Implement actual performance tracking and redenomination
 redenominateVaultPositions :: PositionVault -> BlockNumber -> Effect PositionVault
-redenominateVaultPositions vault currentBlock = 
+redenominateVaultPositions vault _currentBlock = 
   -- Currently a no-op - positions maintain their value
   -- In production, would track pool performance and adjust position values
   pure vault
@@ -451,14 +449,14 @@ placeVaultLiquidity3D vault allocations currentBlock = do
                        , leverageTick: leverageToTick alloc.leverage
                        }
           -- Create range around center tick
-          lowerTick = { rateTick: centerTick.rateTick - 100  -- +/- 1% range
-                      , durationTick: centerTick.durationTick
-                      , leverageTick: centerTick.leverageTick
-                      }
-          upperTick = { rateTick: centerTick.rateTick + 100
-                      , durationTick: centerTick.durationTick
-                      , leverageTick: centerTick.leverageTick
-                      }
+          _lowerTick = { rateTick: centerTick.rateTick - 100  -- +/- 1% range
+                       , durationTick: centerTick.durationTick
+                       , leverageTick: centerTick.leverageTick
+                       }
+          _upperTick = { rateTick: centerTick.rateTick + 100
+                       , durationTick: centerTick.durationTick
+                       , leverageTick: centerTick.leverageTick
+                       }
       
       -- Add liquidity to pool (would update pool state in practice)
       let cubeId = vault.id <> "-" <> show currentBlock <> "-" <> show centerTick.rateTick
@@ -473,7 +471,6 @@ analyzeMarket3D pool =
     -- Calculate utilization from virtual balances
     balances = pool.poolState.virtualBalances
     totalBalance = balances.r + balances.d + balances.l
-    avgBalance = totalBalance / 3.0
     
     -- Estimate rates from current tick position
     currentRate = toNumber pool.poolState.currentTick.rateTick / 10000.0
@@ -497,8 +494,11 @@ adjustRateRange baseRange market =
 getTermExpiry :: VaultPosition -> Maybe Int
 getTermExpiry pos = case pos.terms.duration of
   Flash -> Just (pos.timestamps.createdAt + 1)
-  Monthly -> Just (pos.timestamps.createdAt + blocksPerMonth)
   Swap -> Nothing
+  Weekly -> Just (pos.timestamps.createdAt + blocksPerMonth / 4)
+  Monthly -> Just (pos.timestamps.createdAt + blocksPerMonth)
+  Quarterly -> Just (pos.timestamps.createdAt + blocksPerMonth * 3)
+  Annual -> Just (pos.timestamps.createdAt + blocksPerMonth * 12)
 
 -- | Process expired vault positions
 processExpiredVaultPositions :: BlockNumber -> Array VaultPosition -> Array VaultPosition
@@ -514,8 +514,8 @@ getVaultMetrics :: PositionVault -> PositionVaultMetrics
 getVaultMetrics vault = vault.metrics
 
 -- | Price to tick conversion
-priceToTick :: Number -> Int
-priceToTick price = round (log price / log 1.0001)
+-- priceToTick :: Number -> Int
+-- priceToTick price = round (log price / log 1.0001)
 
 -- Position Management Functions
 
@@ -566,8 +566,8 @@ isSwap :: VaultPosition -> Boolean
 isSwap pos = pos.terms.duration == Swap
 
 -- | Check if vault position has a term commitment
-isTermVaultPosition :: VaultPosition -> Boolean
-isTermVaultPosition pos = pos.terms.duration == Flash || pos.terms.duration == Monthly
+-- isTermVaultPosition :: VaultPosition -> Boolean
+-- isTermVaultPosition pos = pos.terms.duration == Flash || pos.terms.duration == Monthly
 
 -- | Duration constructors
 swapDuration :: Duration
@@ -594,18 +594,21 @@ calculateMonthlyYield vaultPos currentBlock =
 -- Term Expiry Functions
 
 -- | Get the next expiry block for a given duration
-getNextExpiry :: Duration -> Int -> Int
-getNextExpiry duration currentBlock = case duration of
-  Flash -> currentBlock + 1
-  Monthly -> getNextMonthlyExpiry currentBlock
-  Swap -> 2147483647  -- MaxInt32
+-- getNextExpiry :: Duration -> Int -> Int
+-- getNextExpiry duration currentBlock = case duration of
+--   Flash -> currentBlock + 1
+--   Monthly -> getNextMonthlyExpiry currentBlock
+--   Swap -> 2147483647  -- MaxInt32
+--   Weekly -> currentBlock + (blocksPerMonth / 4)  -- ~7 days from now
+--   Quarterly -> currentBlock + (blocksPerMonth * 3)  -- ~3 months from now
+--   Annual -> currentBlock + (blocksPerMonth * 12)  -- ~12 months from now
 
 -- | Calculate the next monthly boundary block
-getNextMonthlyExpiry :: Int -> Int
-getNextMonthlyExpiry currentBlock =
-  let currentPeriod = currentBlock / blocksPerMonth
-      nextPeriod = currentPeriod + 1
-  in nextPeriod * blocksPerMonth
+-- getNextMonthlyExpiry :: Int -> Int
+-- getNextMonthlyExpiry currentBlock =
+--   let currentPeriod = currentBlock / blocksPerMonth
+--       nextPeriod = currentPeriod + 1
+--   in nextPeriod * blocksPerMonth
 
 -- | Calculate blocks remaining until expiry
 blocksUntilExpiry :: VaultPosition -> Int -> Int
@@ -613,6 +616,9 @@ blocksUntilExpiry vaultPosition currentBlock = case vaultPosition.terms.duration
   Flash -> max 0 ((vaultPosition.timestamps.createdAt + 1) - currentBlock)
   Monthly -> max 0 ((vaultPosition.timestamps.createdAt + blocksPerMonth) - currentBlock)
   Swap -> 2147483647
+  Weekly -> max 0 ((vaultPosition.timestamps.createdAt + (blocksPerMonth / 4)) - currentBlock)  -- ~7 days
+  Quarterly -> max 0 ((vaultPosition.timestamps.createdAt + (blocksPerMonth * 3)) - currentBlock)  -- ~3 months  
+  Annual -> max 0 ((vaultPosition.timestamps.createdAt + (blocksPerMonth * 12)) - currentBlock)  -- ~12 months
 
 -- | Check if a vault position has expired
 isExpired :: Int -> VaultPosition -> Boolean
@@ -620,6 +626,9 @@ isExpired currentBlock position = case position.terms.duration of
   Flash -> false
   Monthly -> currentBlock >= (position.timestamps.createdAt + blocksPerMonth)
   Swap -> false
+  Weekly -> currentBlock >= (position.timestamps.createdAt + (blocksPerMonth / 4))
+  Quarterly -> currentBlock >= (position.timestamps.createdAt + (blocksPerMonth * 3))
+  Annual -> currentBlock >= (position.timestamps.createdAt + (blocksPerMonth * 12))
 
 -- | Handle an expired vault position
 handleExpiredVaultPosition :: VaultPosition -> Int -> VaultPosition
@@ -644,10 +653,10 @@ type ExpiryBatch =
   }
 
 -- | Get the next term expiry blocks
-getNextTermExpiries :: BlockNumber -> TermSchedule
-getNextTermExpiries currentBlock =
-  { nextMonthly: getNextMonthlyExpiry currentBlock
-  }
+-- getNextTermExpiries :: BlockNumber -> TermSchedule
+-- getNextTermExpiries currentBlock =
+--   { nextMonthly: getNextMonthlyExpiry currentBlock
+--   }
 
 -- | Group vault positions by their expiry block
 groupVaultPositionsByExpiry :: Array VaultPosition -> Array ExpiryBatch

@@ -12,53 +12,126 @@ import Data.String.Common (trim)
 import Data.String as String
 import Data.Maybe (Maybe(..))
 import Data.Variant (Variant, inj, match)
-import Data.Variant as V
-import Data.Symbol (SProxy(..))
-import Data.Either (Either(..), note)
-import Effect.Aff (Aff, attempt, parallel, sequential)
-import Effect.Aff.Class (liftAff)
-import Data.Tuple (Tuple(..), snd)
-import Effect.Aff.Class (class MonadAff)
-import UI.Util.Logger (logInfo, logError, logActionStart, logActionEnd, logActionError, timeAction)
+-- import Data.Variant as V -- removed: redundant
+import Type.Proxy (Proxy(..))
+import Data.Either (Either(..))
+import Effect.Aff (Aff, attempt, parallel, sequential, throwError, error)
+import Effect.Aff.Class (liftAff, class MonadAff)
+-- import Effect (Effect) -- removed: redundant
+import Effect.Class (liftEffect)
+import Effect.Console (log)
+import Data.Tuple (Tuple(..))
+import UI.Util.Logger (logInfo, logError, logActionStart, logActionEnd)
 -- Record updates now done directly with PureScript record update syntax
 import Effect.Ref (read, write)
 import Halogen as H
 
 -- Import state and action types
 import UI.State (UIState, Action(..))
+import UI.ProtocolState as UI.ProtocolState
 import UI.Integration (initializeRemoteActions, refreshProtocolData, processSimulationResults)
-import UI.Util.CommandExecution (executeCommandWithErrorHandling, executeCommandWithRefresh, setErrorMessage, clearErrors, resetTokenForm)
+import UI.Util.CommandExecution (executeCommandWithRefresh)
 
 -- Import API and data types
-import UI.ProtocolState (initState, ProtocolCommand(..), IndexerQuery(..))
+import UI.ProtocolState (initState, ProtocolCommand(..), IndexerQuery(..), addListener)
 import Protocol.Common (QueryResult(..), CommandResult(..), TokenMetadata)
 import UI.Command (executeCommand)
 import UI.Query (executeQuery)
 import Protocol.Token (TokenType(..))
-import Protocol.Pool (Leverage(..))
+import Protocol.Pool (Duration, Leverage(..))
 import Protocol.PositionVault (swapDuration, monthlyDuration)
 import FFI (setTimeout, checkAndInitializeChart, setChartData)
-import Simulation.Engine (initSimulationWithPoolRegistry, calculateResults, runProtocolSimulation)
-import Protocol.ProtocolVault (getProtocolMetrics, getProtocolTotalFeesCollected)
-import UI.PoolRegistry (getAllPools)
+import Simulation.Engine (SimulatedAccount, SimulationConfig, SimulationState, calculateResults, initSimulationWithPoolRegistry, runProtocolSimulation)
+import Protocol.ProtocolVault (getProtocolMetrics)
+-- import Protocol.Vault (LedgerVault) -- removed: redundant
+-- import Protocol.FeelsSOLVault (FeelsSOLEntry, FeelsSOLStrategy) -- removed: redundant
+-- import Protocol.LaunchVault (LaunchEntry, LaunchStrategy) -- removed: redundant
+-- import Protocol.ProtocolVault (ProtocolEntry, ProtocolStrategy) -- removed: redundant
+-- import UI.Account (ChainAccount, FeelsAccount) -- removed: redundant
+-- import Protocol.Oracle (Oracle) -- removed: redundant
+-- import Data.Map (Map) -- removed: redundant
+-- import UI.PoolRegistry (PoolRegistry) -- removed: redundant
+-- import UI.TokenRegistry (TokenRegistry) -- removed: redundant
+-- import UI.PoolRegistry (getAllPools) -- removed: redundant
+
+--------------------------------------------------------------------------------
+-- Type Aliases
+--------------------------------------------------------------------------------
+
+-- ProtocolRef is just an alias for AppRuntime from UI.ProtocolState
+type ProtocolRef = UI.ProtocolState.AppRuntime
+
+-- We should use the ProtocolState from UI.ProtocolState directly
+-- This is just an alias for documentation purposes
+type ProtocolState = UI.ProtocolState.ProtocolState
+
+-- SimState is just an alias for SimulationState from Simulation.Engine
+type SimState = SimulationState
+
+-- SimAccount is just an alias for SimulatedAccount from Simulation.Agent
+type SimAccount = SimulatedAccount
+
+type SimResults =
+  { activePositions :: Int
+  , averageUtilization :: Number
+  , priceChange :: Number
+  , protocolTVL :: Number
+  , scenarioSuccess :: Boolean
+  , totalFees :: Number
+  , totalUsers :: Int
+  , totalVolume :: Number
+  , volatility :: Number
+  }
+
+type POLMetrics =
+  { avgPoolPerformance :: Number
+  , concentrationRisk :: Number
+  , deployedPOL :: Number
+  , healthScore :: Number
+  , poolCount :: Int
+  , totalFeesCollected :: Number
+  , totalPOL :: Number
+  , utilization :: Number
+  }
+
+type PriceHistoryEntry =
+  { block :: Int
+  , polValue :: Number
+  , price :: Number
+  , timestamp :: Number
+  , tokens :: Array TokenPriceEntry
+  }
+
+type TokenPriceEntry =
+  { live :: Boolean
+  , polFloor :: Number
+  , price :: Number
+  , ticker :: String
+  }
 
 --------------------------------------------------------------------------------
 -- Simulation Helper Functions (Aff-based - reduces 98 lines to ~30)
 --------------------------------------------------------------------------------
 
 -- | Initialize simulation with proper error handling
-initializeSimulation :: UIState -> Aff { protocol :: _, simState :: _, protocolState :: _ }
+initializeSimulation :: UIState -> Aff { protocol :: ProtocolRef, simState :: SimState, protocolState :: ProtocolState }
 initializeSimulation state = do
-  protocol <- note "Protocol not initialized" state.api
+  protocol <- case state.api of
+    Nothing -> H.liftAff $ throwError $ error "Protocol not initialized"
+    Just p -> pure p
   protocolState <- liftEffect $ read protocol.state
-  simState <- liftEffect $ initSimulationWithPoolRegistry 
+  -- poolRegistry and oracle are not refs in ProtocolState, use them directly
+  maybeSimState <- liftEffect $ initSimulationWithPoolRegistry 
     state.simulationConfig 
     protocolState.poolRegistry
     protocolState.oracle
+  simState <- case maybeSimState of
+    Nothing -> throwError $ error "Failed to initialize simulation"
+    Just s -> pure s
   pure { protocol, simState, protocolState }
 
 -- | Seed initial liquidity positions in parallel
-seedLiquidityPositions :: _ -> Aff Unit
+seedLiquidityPositions :: ProtocolRef -> Aff Unit
 seedLiquidityPositions protocol = do
   liftEffect $ logActionStart "SimulationEngine" "SeedLiquidity"
   
@@ -71,12 +144,12 @@ seedLiquidityPositions protocol = do
   liftEffect $ logActionEnd "SimulationEngine" "SeedLiquidity"
 
 -- | Create a single liquidity position with error handling
-createLiquidityPosition :: _ -> String -> _ -> Number -> _ -> Number -> Aff Unit
+createLiquidityPosition :: ProtocolRef -> String -> TokenType -> Number -> TokenType -> Number -> Aff Unit
 createLiquidityPosition protocol positionType lendAsset lendAmount collateralAsset collateralAmount = do
   liftEffect $ log $ "Creating " <> positionType <> " liquidity position..."
   state <- liftEffect $ read protocol.state
   result <- liftEffect $ executeCommand 
-    (CreatePosition "liquidity-bot" lendAsset lendAmount collateralAsset collateralAmount swapDuration Senior false Nothing) 
+    (CreatePosition "liquidity-bot" lendAsset lendAmount collateralAsset collateralAmount swapDuration (Leverage 1.0) false Nothing) 
     state
   case result of
     Right (Tuple newState _) -> do
@@ -86,25 +159,27 @@ createLiquidityPosition protocol positionType lendAsset lendAmount collateralAss
       liftEffect $ log $ "Failed to create " <> positionType <> " position: " <> show err
 
 -- | Run simulation and collect results in parallel
-runSimulationWithMetrics :: _ -> _ -> _ -> Aff { results :: _, polMetrics :: _, totalFees :: _, priceHistory :: _ }
+runSimulationWithMetrics :: ProtocolRef -> SimState -> SimulationConfig -> Aff { results :: SimResults, polMetrics :: POLMetrics, totalFees :: Number, priceHistory :: Array PriceHistoryEntry }
 runSimulationWithMetrics protocol simState config = do
   liftEffect $ log "Starting simulation..."
   
   -- Run simulation
-  executionResult <- liftEffect $ runProtocolSimulation protocol.state config simState
+  -- Pass the ref directly, not protocol.state
+  protocolStateRef <- liftEffect $ pure protocol.state
+  executionResult <- liftEffect $ runProtocolSimulation protocolStateRef config simState
   let finalState = executionResult.finalSimState
       finalProtocolState = executionResult.finalProtocolState
   
-  -- Calculate all metrics in parallel
-  sequential $ ado
-    results <- parallel $ liftEffect $ calculateResults config finalState
-    polMetrics <- parallel $ liftEffect $ getProtocolMetrics finalProtocolState.polState
-    pools <- parallel $ liftEffect $ getAllPools finalProtocolState.poolRegistry
-    priceHistory <- parallel $ liftEffect $ processSimulationResults protocol finalState results
-    in do
-      let poolStates = map snd pools
-      totalFees <- liftEffect $ getProtocolTotalFeesCollected poolStates
-      pure { results, polMetrics, totalFees, priceHistory }
+  -- Calculate all metrics
+  results <- liftEffect $ calculateResults config finalState
+  polMetrics <- liftEffect $ getProtocolMetrics finalProtocolState.polState
+  -- pools <- liftEffect $ getAllPools finalProtocolState.poolRegistry
+  priceHistory <- liftEffect $ processSimulationResults protocol finalState results
+  
+  -- Calculate total fees from simulation results
+  let totalFees = results.totalFees + polMetrics.totalFeesCollected
+  
+  pure { results, polMetrics, totalFees, priceHistory }
 
 --------------------------------------------------------------------------------
 -- Main Action Handler
@@ -116,9 +191,9 @@ handleAction = case _ of
     -- Initialize protocol
     protocol <- H.liftEffect initState
     
-    -- Subscribe to protocol state changes (disabled - subscribe function not implemented)
-    -- _ <- H.liftEffect $ subscribe protocol \_ -> do
-    --   log "Protocol state changed, refreshing UI data"
+    -- Subscribe to protocol state changes
+    _ <- H.liftEffect $ addListener (\_ -> do
+      log "Protocol state changed, refreshing UI data") protocol
     
     -- Store protocol runtime
     H.modify_ _ { api = Just protocol, loading = false }
@@ -321,11 +396,11 @@ type ExchangeRouteV = Variant
   )
 
 -- | Route proxy symbols for type safety
-_jitoSOLToSwapPosition = SProxy :: SProxy "jitoSOLToSwapPosition"
-_jitoSOLToTermPosition = SProxy :: SProxy "jitoSOLToTermPosition"
-_feelsSOLToPosition = SProxy :: SProxy "feelsSOLToPosition"
-_directSwap = SProxy :: SProxy "directSwap"
-_unsupportedRoute = SProxy :: SProxy "unsupportedRoute"
+_jitoSOLToSwapPosition = Proxy :: Proxy "jitoSOLToSwapPosition"
+_jitoSOLToTermPosition = Proxy :: Proxy "jitoSOLToTermPosition"
+_feelsSOLToPosition = Proxy :: Proxy "feelsSOLToPosition"
+-- _directSwap = Proxy :: Proxy "directSwap"
+_unsupportedRoute = Proxy :: Proxy "unsupportedRoute"
 
 -- | Parse route from UI selection state (type-safe variant construction)
 parseExchangeRoute :: String -> String -> ExchangeRouteV
@@ -337,7 +412,7 @@ parseExchangeRoute from to = case { from, to } of
   _ -> inj _unsupportedRoute $ "Route " <> from <> " -> " <> to <> " is not yet implemented"
 
 -- | Execute exchange based on route variant (extensible pattern with better error handling)
-executeExchangeRoute :: forall o m. MonadAff m => ExchangeRouteV -> UIState -> _ -> H.HalogenM UIState Action () o m Unit
+executeExchangeRoute :: forall o m. MonadAff m => ExchangeRouteV -> UIState -> ProtocolRef -> H.HalogenM UIState Action () o m Unit
 executeExchangeRoute route state protocol = 
   route # match
     { jitoSOLToSwapPosition: \_ -> executeJitoSOLToPosition swapDuration state protocol
@@ -348,7 +423,7 @@ executeExchangeRoute route state protocol =
     }
 
 -- | Execute JitoSOL -> Position conversion (unified handler)
-executeJitoSOLToPosition :: forall o m. MonadAff m => _ -> UIState -> _ -> H.HalogenM UIState Action () o m Unit
+executeJitoSOLToPosition :: forall o m. MonadAff m => Duration -> UIState -> ProtocolRef -> H.HalogenM UIState Action () o m Unit
 executeJitoSOLToPosition duration state protocol = do
   protocolState <- H.liftEffect $ read protocol.state
   H.liftEffect $ log $ "Exchange: JitoSOL -> " <> show duration <> " Position"
@@ -363,9 +438,9 @@ executeJitoSOLToPosition duration state protocol = do
       case state.selectedTargetToken of
         Nothing -> H.modify_ _ { error = Just "Please select a target token for the position" }
         Just ticker -> do
-          let leverage = if state.selectedLeverage == "senior" then Senior else Junior
+          let leverage = if state.selectedLeverage == "senior" then Leverage 1.0 else Leverage 3.0
           posResult <- H.liftEffect $ executeCommand
-            (CreatePosition state.currentUser FeelsSOL mintResult.feelsSOLMinted (Token ticker) mintResult.feelsSOLMinted duration leverage false Nothing)
+            (CreatePosition state.currentUser FeelsSOL mintResult.feelsSOLMinted (Custom ticker) mintResult.feelsSOLMinted duration leverage false Nothing)
             newState1
           case posResult of
             Left err -> H.modify_ _ { error = Just $ show err }
@@ -376,12 +451,12 @@ executeJitoSOLToPosition duration state protocol = do
     _ -> H.modify_ _ { error = Just "Unexpected result from FeelsSOL entry" }
 
 -- | Execute direct position creation (for future implementation)
-executeDirectPosition :: forall o m. MonadAff m => UIState -> _ -> H.HalogenM UIState Action () o m Unit
+executeDirectPosition :: forall o m. MonadAff m => UIState -> ProtocolRef -> H.HalogenM UIState Action () o m Unit
 executeDirectPosition _ _ = 
   H.modify_ _ { error = Just "Direct position creation not yet implemented" }
 
 -- | Execute direct swap (for future implementation)
-executeDirectSwap :: forall o m. MonadAff m => UIState -> _ -> H.HalogenM UIState Action () o m Unit
+executeDirectSwap :: forall o m. MonadAff m => UIState -> ProtocolRef -> H.HalogenM UIState Action () o m Unit
 executeDirectSwap _ _ = 
   H.modify_ _ { error = Just "Direct swap not yet implemented" }
 
@@ -422,7 +497,7 @@ handleRunSimulation = do
       -- Log completion
       H.liftEffect $ do
         log $ "Simulation completed with " <> show simulationData.results.totalUsers <> " users"
-        log $ "POL reserves: " <> show simulationData.polMetrics.totalValue
+        log $ "POL reserves: " <> show simulationData.polMetrics.totalPOL
         log $ "Total fees collected: " <> show simulationData.totalFees
         log $ "Setting chart data with " <> show (length simulationData.priceHistory) <> " points"
         setChartData simulationData.priceHistory
@@ -442,7 +517,7 @@ handleRunSimulation = do
         handleAction RenderChart
 
 -- | Complete simulation workflow (replaces 98 lines with 12 + helpers)
-runFullSimulation :: UIState -> Aff { results :: _, polMetrics :: _, totalFees :: _, priceHistory :: _ }
+runFullSimulation :: UIState -> Aff { results :: SimResults, polMetrics :: POLMetrics, totalFees :: Number, priceHistory :: Array PriceHistoryEntry }
 runFullSimulation state = do
   -- Initialize (replaces 15 lines)
   { protocol, simState } <- initializeSimulation state

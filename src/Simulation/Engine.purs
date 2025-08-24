@@ -68,6 +68,7 @@ import Data.Tuple (Tuple(..))
 import Data.Traversable (traverse_)
 import Data.Maybe (Maybe(..))
 import Data.Ord (abs)
+import Data.Int (toNumber)
 
 -- Import protocol types and functions for protocol engine
 import Protocol.Common (CommandResult(..))
@@ -107,15 +108,60 @@ type SimulationState =
 -- | Creates new pool registry, oracle, and all protocol components from scratch
 initSimulation :: SimulationConfig -> Effect (Maybe SimulationState)
 initSimulation config = do
-  -- Temporarily disabled due to type conflicts - needs proper implementation
-  pure Nothing
+  log "Initializing fresh simulation environment"
+  
+  -- Create fresh components
+  poolRegistry <- initPoolRegistry
+  oracle <- initOracle config.initialJitoSOLPrice
+  
+  -- Generate simulated accounts based on config
+  let agentConfig = { numAccounts: config.numAccounts, accountProfiles: config.accountProfiles }
+  accounts <- generateAccounts agentConfig
+  
+  -- Create initial simulation state
+  let initialState =
+        { accounts: accounts
+        , poolRegistry: poolRegistry
+        , feelsSOL: unit  -- Placeholder
+        , oracle: oracle
+        , currentBlock: 0
+        , currentPrice: config.initialJitoSOLPrice
+        , priceHistory: []
+        , actionHistory: []
+        , nextPositionId: 1
+        , polAllocationHistory: []
+        }
+  
+  pure $ Just initialState
 
 -- | Initialize simulation with existing pool registry for UI integration
 -- | Enables seamless integration with existing protocol state from UI interactions
 initSimulationWithPoolRegistry :: SimulationConfig -> PoolRegistry -> Oracle -> Effect (Maybe SimulationState)
 initSimulationWithPoolRegistry config existingPoolRegistry oracle = do
-  -- Temporarily disabled due to type conflicts - needs proper implementation
-  pure Nothing
+  log "Initializing simulation with existing protocol state"
+  
+  -- Generate simulated accounts
+  let agentConfig = { numAccounts: config.numAccounts, accountProfiles: config.accountProfiles }
+  accounts <- generateAccounts agentConfig
+  
+  -- Get current price from oracle
+  snapshot <- takeMarketSnapshot oracle
+  
+  -- Create simulation state with existing components
+  let initialState =
+        { accounts: accounts
+        , poolRegistry: existingPoolRegistry
+        , feelsSOL: unit  -- Placeholder
+        , oracle: oracle
+        , currentBlock: 0
+        , currentPrice: snapshot.spot
+        , priceHistory: []
+        , actionHistory: []
+        , nextPositionId: 1
+        , polAllocationHistory: []
+        }
+  
+  pure $ Just initialState
 
 --------------------------------------------------------------------------------
 -- SIMULATION EXECUTION ORCHESTRATION
@@ -136,17 +182,31 @@ runSimulation config = do
       log "Failed to initialize simulation"
       pure { totalVolume: 0.0, priceChange: 0.0, volatility: 0.0, avgPositionSize: 0.0, numTransactions: 0, numPositionsCreated: 0, protocolFees: 0.0, userReturns: [], marketStats: { avgSlippage: 0.0, peakTVL: 0.0, finalTVL: 0.0 } }
     Just initialState -> do
-      -- Temporarily disabled due to type conflicts
-      -- finalState <- executeSimulation config initialState  
-      -- results <- calculateResults config finalState
-      let results = { totalVolume: 0.0, priceChange: 0.0, volatility: 0.0, avgPositionSize: 0.0, numTransactions: 0, numPositionsCreated: 0, protocolFees: 0.0, userReturns: [], marketStats: { avgSlippage: 0.0, peakTVL: 0.0, finalTVL: 0.0 } }
+      -- Execute the simulation
+      finalState <- executeSimulation config initialState  
+      simResults <- calculateResults config finalState
   
       log $ "Simulation completed successfully"
-      log $ "Total volume: " <> formatAmount results.totalVolume
-      log $ "Price change: " <> show (results.priceChange * 100.0) <> "%"
-      log $ "Volatility: " <> show (results.volatility * 100.0) <> "%"
+      log $ "Total volume: " <> formatAmount simResults.totalVolume
+      log $ "Price change: " <> show (simResults.priceChange * 100.0) <> "%"
+      log $ "Volatility: " <> show (simResults.volatility * 100.0) <> "%"
   
-      pure results
+      -- Transform SimulationResults to match expected return type
+      pure { totalVolume: simResults.totalVolume
+           , priceChange: simResults.priceChange
+           , volatility: simResults.volatility
+           , avgPositionSize: if simResults.activePositions > 0 
+                              then simResults.totalVolume / toNumber simResults.activePositions
+                              else 0.0
+           , numTransactions: length finalState.actionHistory
+           , numPositionsCreated: finalState.nextPositionId - 1
+           , protocolFees: simResults.totalFees
+           , userReturns: []  -- TODO: Calculate actual user returns
+           , marketStats: { avgSlippage: 0.0  -- TODO: Calculate from trading history
+                          , peakTVL: simResults.protocolTVL  -- TODO: Track peak during simulation
+                          , finalTVL: simResults.protocolTVL
+                          }
+           }
 
 -- | Run simulation with existing pool registry for UI integration
 -- | Enables running simulations against existing protocol state from UI interactions
@@ -164,9 +224,29 @@ runSimulationWithPoolRegistry config existingPoolRegistry oracle = do
       log "Failed to initialize simulation with pool registry"
       pure { totalVolume: 0.0, priceChange: 0.0, volatility: 0.0, avgPositionSize: 0.0, numTransactions: 0, numPositionsCreated: 0, protocolFees: 0.0, userReturns: [], marketStats: { avgSlippage: 0.0, peakTVL: 0.0, finalTVL: 0.0 } }
     Just initialState -> do
-      -- Temporarily disabled execution due to type conflicts
-      let results = { totalVolume: 0.0, priceChange: 0.0, volatility: 0.0, avgPositionSize: 0.0, numTransactions: 0, numPositionsCreated: 0, protocolFees: 0.0, userReturns: [], marketStats: { avgSlippage: 0.0, peakTVL: 0.0, finalTVL: 0.0 } }
-      pure results
+      -- Execute the simulation
+      finalState <- executeSimulation config initialState
+      simResults <- calculateResults config finalState
+      
+      log $ "Simulation completed successfully"
+      log $ "Total volume: " <> formatAmount simResults.totalVolume
+      
+      -- Transform SimulationResults to match expected return type
+      pure { totalVolume: simResults.totalVolume
+           , priceChange: simResults.priceChange
+           , volatility: simResults.volatility
+           , avgPositionSize: if simResults.activePositions > 0 
+                              then simResults.totalVolume / toNumber simResults.activePositions
+                              else 0.0
+           , numTransactions: length finalState.actionHistory
+           , numPositionsCreated: finalState.nextPositionId - 1
+           , protocolFees: simResults.totalFees
+           , userReturns: []  -- TODO: Calculate actual user returns
+           , marketStats: { avgSlippage: 0.0  -- TODO: Calculate from trading history
+                          , peakTVL: simResults.protocolTVL  -- TODO: Track peak during simulation
+                          , finalTVL: simResults.protocolTVL
+                          }
+           }
 
 --------------------------------------------------------------------------------
 -- CORE SIMULATION EXECUTION ENGINE
@@ -473,7 +553,7 @@ executeAgentOrder protocolRef simStateEffect action = do
               
     -- Agent creates lending position
     CreateLendOffer userId lendAsset amount collateralAsset collateralAmount duration _leverage _targetToken -> do
-      let protocolLeverage = Senior  -- Default leverage for simulation
+      let protocolLeverage = Leverage 1.0  -- Default 1x leverage for simulation
       
       result <- executeCommand 
         (PS.CreatePosition userId lendAsset amount collateralAsset collateralAmount 
@@ -508,7 +588,7 @@ executeAgentOrder protocolRef simStateEffect action = do
                 FeelsSOL -> false  -- Selling token for FeelsSOL
                 _ -> true          -- Selling FeelsSOL for token
               
-              swapParams = 
+              _swapParams = 
                 { zeroForOne: zeroForOne
                 , amountSpecified: amount  -- Positive = exact input
                 , sqrtPriceLimitX96: 0.0   -- No price limit
@@ -516,7 +596,7 @@ executeAgentOrder protocolRef simStateEffect action = do
           
           -- Execute swap
           protocolState' <- read protocolRef
-          let currentBlock = protocolState'.currentBlock + 1
+          let _currentBlock = protocolState'.currentBlock + 1
           -- let swapResult = swap pool swapParams currentBlock  -- function doesn't exist
           let swapResult = { updatedPool: pool, amountOut: amount * 0.99, result: { amount1: amount * 0.99, amount0: amount * 0.01 } }  -- placeholder
           

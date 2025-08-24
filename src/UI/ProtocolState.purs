@@ -35,6 +35,8 @@ import UI.TokenRegistry (TokenRegistry, initTokenRegistry)
 import Protocol.Pool (Duration, Leverage)
 import Protocol.PositionVault (VaultPosition)
 import UI.PoolRegistry (PoolRegistry, initPoolRegistry, addPool)
+import Protocol.Pool (initPool)
+import Protocol.Config (defaultProtocolConfig)
 import Protocol.FeelsSOLVault (FeelsSOLStrategy, FeelsSOLEntry, initializeFeelsSOLVault)
 import Protocol.Vault (LedgerVault)
 import Protocol.ProtocolVault (initializeProtocolVault, ProtocolStrategy, ProtocolEntry, getProtocolMetrics)
@@ -184,9 +186,19 @@ initStateImpl = do
         , priceHistory: []
         }
   
-  -- Skip initial pool creation for now due to type mismatch
-  -- TODO: Fix pool initialization to match the new Pool type structure
-  pure unit
+  -- Create initial pools for JitoSOL/FeelsSOL trading
+  let defaultWeights = { wr: 0.4, wd: 0.3, wl: 0.3 }  -- Balanced weights
+      defaultFeeRate = 30.0  -- 30 basis points (0.3%)
+  
+  -- Create JitoSOL pool
+  jitoSOLPool <- initPool "JITOSOL/FEELSSOL" JitoSOL defaultFeeRate defaultWeights defaultProtocolConfig.pools initialState.currentBlock oracle
+  _ <- addPool "JITOSOL/FEELSSOL" jitoSOLPool poolRegistry
+  
+  -- Create a test token pool for demo purposes
+  testPool <- initPool "TEST/FEELSSOL" (Custom "TEST") defaultFeeRate defaultWeights defaultProtocolConfig.pools initialState.currentBlock oracle
+  _ <- addPool "TEST/FEELSSOL" testPool poolRegistry
+  
+  log "Initial pools created successfully"
   
   -- Set up initial balances for default users
   _ <- updateChainAccountBalance accounts "main-user" 1000.0

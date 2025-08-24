@@ -28,6 +28,8 @@ module Protocol.Pool
     , SwapResult3D
     , YieldRates
     , RiskParameters
+    , ProtectionCurve(..)
+    , RiskProfile
     , CompositeBalance
     , LossDistribution
     , MaturityInfo
@@ -52,6 +54,8 @@ module Protocol.Pool
   , calculateInvariant3DWithAdjustments
   , calculateSwapPrice3DWithRisk
   , calculateLossDistribution
+  , calculateProtection
+  , createRiskProfile
   -- Composite views
   , calculateCompositeBalance
   , getCompositePrice
@@ -86,11 +90,11 @@ module Protocol.Pool
   ) where
 
 import Prelude
-import Data.Array (filter, sortBy, take, length, (:), any, mapMaybe, concat, concatMap, fromFoldable, elem, nub, range) as Array
+import Data.Array (filter, sortBy, take, length, (:), any, mapMaybe, concat, concatMap, fromFoldable, elem, nub, range, head, reverse, tail) as Array
 import Data.Foldable (sum, traverse_, foldl)
 import Data.Map (Map, values)
 import Data.Map as Map
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Either (Either(..))
 import Data.Int (round, toNumber)
 import Data.Tuple (Tuple(..), uncurry)
@@ -115,46 +119,59 @@ import Protocol.Oracle (Oracle, getCurrentPrice)
 --------------------------------------------------------------------------------
 
 -- | Duration options - represents time commitment for liquidity
+-- | Based on the fixed duration types from the 3D protocol specification
 data Duration
-  = Flash     -- Single block loan, highest turnover, lowest yield
-  | Monthly   -- 28-day term loan, medium yield, capital locked
-  | Swap      -- Permanent position, highest yield, no lockup
+  = Flash      -- 1 block duration
+  | Swap       -- Immediate (spot)
+  | Weekly     -- 7 days  
+  | Monthly    -- 28 days
+  | Quarterly  -- 90 days
+  | Annual     -- 365 days
 
 derive instance eqDuration :: Eq Duration
 derive instance ordDuration :: Ord Duration
 
 instance showDuration :: Show Duration where
   show Flash = "Flash"
-  show Monthly = "Monthly"
   show Swap = "Swap"
+  show Weekly = "Weekly"
+  show Monthly = "Monthly"
+  show Quarterly = "Quarterly"
+  show Annual = "Annual"
 
--- | Leverage tiers - risk tranches in the liquidity structure
+-- | Leverage represents continuous scaling from 1.0x to pool-specific maximums
+-- | The actual leverage value is stored separately as a Number
+-- | This type is used for categorization and backwards compatibility
 data Leverage  
-  = Senior    -- 1x exposure, first loss protection, lower yield
-  | Junior    -- 3x exposure, absorbs losses first, higher yield
+  = Leverage Number  -- Continuous leverage value (1.0 to max)
 
-derive instance eqLeverage :: Eq Leverage
-derive instance ordLeverage :: Ord Leverage
+instance eqLeverage :: Eq Leverage where
+  eq (Leverage a) (Leverage b) = a == b
+
+instance ordLeverage :: Ord Leverage where
+  compare (Leverage a) (Leverage b) = compare a b
 
 instance showLeverage :: Show Leverage where
-  show Senior = "Senior (1x)"
-  show Junior = "Junior (3x)"
+  show (Leverage x) = "Leverage " <> show x <> "x"
 
--- | Get numeric multiplier for leverage tier - determines position sizing
+-- | Get numeric multiplier for leverage - now just returns the contained value
 leverageMultiplier :: Leverage -> Number
-leverageMultiplier Senior = defaultProtocolConfig.pools.seniorLeverageMultiplier
-leverageMultiplier Junior = defaultProtocolConfig.pools.juniorLeverageMultiplier
+leverageMultiplier (Leverage x) = x
 
 -- | Convert duration to tick - maps time commitment to discrete tick space
+-- | Based on Duration enum from spec: Flash=0, Swap=1, Weekly=2, Monthly=3, Quarterly=4, Annual=5
 durationToTick :: Duration -> Int
 durationToTick Flash = 0
-durationToTick Monthly = 1
-durationToTick Swap = 2
+durationToTick Swap = 1
+durationToTick Weekly = 2
+durationToTick Monthly = 3
+durationToTick Quarterly = 4
+durationToTick Annual = 5
 
--- | Convert leverage to tick - maps risk tier to discrete tick space
+-- | Convert leverage to tick - maps continuous leverage to discrete tick space
+-- | Uses 6 bits for 64 discrete levels as per spec
 leverageToTick :: Leverage -> Int
-leverageToTick Senior = 0
-leverageToTick Junior = 1
+leverageToTick (Leverage x) = round ((x - 1.0) * 10.0)  -- Maps 1.0-6.4x to 0-63
 
 --------------------------------------------------------------------------------
 -- CORE TYPES
@@ -188,7 +205,7 @@ type Pool =
   , poolState :: PoolState3D                     -- Current AMM state and invariant
   , feeRate :: Number                            -- Swap fee in basis points
   , weights :: DimensionWeights                  -- Dimension importance in pricing
-  , riskParams :: RiskParameters                 -- Senior/junior risk parameters
+  , riskParams :: RiskParameters                 -- Continuous leverage risk parameters
   , creationBlock :: BlockNumber                 -- Genesis block for time calculations
   , totalDeposited :: Number                     -- Tracks deposits for loss socialization
   , lastUpdateBlock :: BlockNumber               -- Last state transition
@@ -200,7 +217,7 @@ type Pool =
 type TickCoordinate =
   { rateTick :: Int       -- Price dimension: swap rate, lending APR, or flash fee
   , durationTick :: Int   -- Time dimension: 0=Flash, 1=Monthly, 2=Swap
-  , leverageTick :: Int   -- Risk dimension: 0=Senior, 1=Junior
+  , leverageTick :: Int   -- Risk dimension: continuous leverage encoded as tick
   }
 
 -- | Concentrated liquidity in 3D space - defines a liquidity "cube" in the market
@@ -268,10 +285,34 @@ type SwapResult3D =
   , sqrtRateAfter :: Number          -- New pool sqrt price
   }
 
--- | Risk parameters for leverage tranches - controls loss distribution
+-- | Risk parameters for leverage - controls protection curves and ceilings
 type RiskParameters =
-  { alphaSenior :: Number  -- Senior protection factor (1.0 = no leverage)
-  , alphaJunior :: Number  -- Junior risk factor (3.0 = 3x exposure)
+  { maxLeverage :: Number           -- Pool-specific maximum leverage
+  , currentCeiling :: Number        -- Dynamic leverage ceiling based on conditions
+  , protectionCurve :: ProtectionCurve  -- How protection scales with leverage
+  , lastCeilingUpdate :: BlockNumber    -- When ceiling was last adjusted
+  }
+
+-- | Protection curve types for continuous leverage
+data ProtectionCurve
+  = Linear                          -- protection = 1 - (leverage - 1) / (max - 1)
+  | Exponential { decayRate :: Number }  -- protection = e^(-k * (leverage - 1))
+  | Piecewise { points :: Array (Tuple Number Number) }  -- Custom breakpoints
+
+derive instance eqProtectionCurve :: Eq ProtectionCurve
+
+instance showProtectionCurve :: Show ProtectionCurve where
+  show Linear = "Linear"
+  show (Exponential { decayRate }) = "Exponential(k=" <> show decayRate <> ")"
+  show (Piecewise { points }) = "Piecewise(" <> show (Array.length points) <> " points)"
+
+-- | Risk profile for a specific leverage level
+type RiskProfile =
+  { leverage :: Number              -- Input leverage (1.0 to max)
+  , protectionFactor :: Number      -- Derived from curve (0.0 to 1.0)
+  , feeMultiplier :: Number         -- Fee scaling (sqrt of leverage)
+  , maxLossPercentage :: Number     -- Maximum loss during redenomination
+  , requiredMarginRatio :: Number   -- Margin requirement
   }
 
 -- | Composite balance view - aggregates 3D position into single value
@@ -282,11 +323,10 @@ type CompositeBalance =
   , total :: Number                -- Sum of all components
   }
 
--- | Loss distribution for risk waterfall - junior absorbs first
+-- | Loss distribution for continuous leverage model
 type LossDistribution =
-  { totalLoss :: Number    -- Total protocol loss
-  , juniorLoss :: Number   -- Loss absorbed by junior (up to 3x)
-  , seniorLoss :: Number   -- Remaining loss to senior
+  { totalLoss :: Number              -- Total protocol loss
+  , distributionByLeverage :: Map Number Number  -- Loss per leverage level
   }
 
 -- | Maturity information for term positions - tracks time decay
@@ -364,13 +404,54 @@ calculateFee amount feeRate = amount * feeRate / 10000.0
 -- | Get duration multiplier
 getDurationMultiplier :: PoolParameters -> Duration -> Number
 getDurationMultiplier poolConfig Flash = poolConfig.flashDurationMultiplier
-getDurationMultiplier poolConfig Monthly = poolConfig.monthlyDurationMultiplier
 getDurationMultiplier poolConfig Swap = poolConfig.swapDurationMultiplier
+getDurationMultiplier poolConfig Weekly = poolConfig.monthlyDurationMultiplier * 0.25  -- Approximation
+getDurationMultiplier poolConfig Monthly = poolConfig.monthlyDurationMultiplier
+getDurationMultiplier poolConfig Quarterly = poolConfig.monthlyDurationMultiplier * 3.0
+getDurationMultiplier poolConfig Annual = poolConfig.monthlyDurationMultiplier * 12.0
 
--- | Get leverage risk multiplier - determines loss absorption priority
+-- | Get leverage risk multiplier - now based on continuous leverage
 getLeverageRiskMultiplier :: PoolParameters -> Leverage -> Number
-getLeverageRiskMultiplier poolConfig Senior = poolConfig.seniorLeverageRiskMultiplier
-getLeverageRiskMultiplier poolConfig Junior = poolConfig.juniorLeverageRiskMultiplier
+getLeverageRiskMultiplier poolConfig (Leverage x) = x
+
+-- | Calculate protection factor based on leverage and curve
+calculateProtection :: Number -> ProtectionCurve -> Number
+calculateProtection leverage Linear = 
+  max 0.0 (1.0 - (leverage - 1.0) / 5.0)  -- Assuming max leverage of 6.0
+calculateProtection leverage (Exponential { decayRate }) = 
+  pow 2.71828 (-decayRate * (leverage - 1.0))
+calculateProtection leverage (Piecewise { points }) =
+  -- Find the appropriate segment and interpolate
+  fromMaybe 0.0 $ interpolatePoints leverage points
+  where
+    interpolatePoints :: Number -> Array (Tuple Number Number) -> Maybe Number
+    interpolatePoints _ [] = Nothing
+    interpolatePoints lev pts = 
+      -- Simple linear interpolation between points
+      case Array.filter (\(Tuple l _) -> l <= lev) pts of
+        [] -> map (\(Tuple _ p) -> p) (Array.head pts)
+        filtered -> 
+          case Array.head (Array.reverse filtered) of
+            Nothing -> Nothing
+            Just (Tuple l1 p1) ->
+              case Array.head (Array.filter (\(Tuple l _) -> l > lev) pts) of
+                Nothing -> Just p1
+                Just (Tuple l2 p2) -> 
+                  Just $ p1 + (p2 - p1) * (lev - l1) / (l2 - l1)
+
+-- | Create risk profile for a given leverage
+createRiskProfile :: Number -> RiskParameters -> RiskProfile
+createRiskProfile leverage params =
+  let protection = calculateProtection leverage params.protectionCurve
+      feeMultiplier = pow leverage 0.5  -- Square root scaling
+      maxLoss = 1.0 - protection
+      marginRatio = 1.0 / leverage + 0.1  -- 10% buffer
+  in { leverage: leverage
+     , protectionFactor: protection
+     , feeMultiplier: feeMultiplier
+     , maxLossPercentage: maxLoss
+     , requiredMarginRatio: marginRatio
+     }
 
 --------------------------------------------------------------------------------
 -- POOL INITIALIZATION
@@ -398,11 +479,13 @@ initPool poolId token feeRate weights poolConfig currentBlock oracle = do
     , eventEmitter: eventEmitter
     }
 
--- | Default risk parameters - sets leverage multipliers from config
+-- | Default risk parameters - sets up continuous leverage system
 defaultRiskParameters :: PoolParameters -> RiskParameters
 defaultRiskParameters poolConfig =
-  { alphaSenior: poolConfig.seniorLeverageRiskMultiplier
-  , alphaJunior: poolConfig.juniorLeverageRiskMultiplier
+  { maxLeverage: 6.0  -- Default maximum leverage
+  , currentCeiling: 3.0  -- Conservative starting ceiling
+  , protectionCurve: Linear  -- Simple linear protection to start
+  , lastCeilingUpdate: 0
   }
 
 -- | Initialize pool state - sets starting point in 3D market space
@@ -1143,10 +1226,15 @@ calculateDurationYield position3D blocksSince =
 -- | Calculate leverage-based yield
 calculateLeverageYield :: Liquidity3D -> Int -> Number -> Number
 calculateLeverageYield position3D blocksSince baseYield =
-  case position3D.tickLower.leverageTick of
-    0 -> baseYield * toNumber blocksSince  -- Senior: base yield
-    1 -> baseYield * defaultProtocolConfig.pools.juniorYieldPremium * toNumber blocksSince  -- Junior: higher yield
-    _ -> 0.0
+  let
+    -- Convert tick to leverage
+    tickToLeverage t = 1.0 + (toNumber t) / 10.0
+    leverage = tickToLeverage position3D.tickLower.leverageTick
+    
+    -- Yield scales with leverage (higher leverage = higher yield)
+    leverageYieldMultiplier = pow leverage 0.5  -- Square root scaling
+    
+  in baseYield * leverageYieldMultiplier * toNumber blocksSince
 
 -- | Calculate total pool value - weighted sum of virtual reserves
 calculateTotalPoolValue :: Pool -> Number
@@ -1185,16 +1273,17 @@ data TokenAmount = Amount0 | Amount1
 
 -- | Get duration multiplier from tick - maps time commitment to yield
 getDurationMultiplierFromTick :: PoolParameters -> Int -> Number
-getDurationMultiplierFromTick poolConfig 0 = poolConfig.flashDurationMultiplier  -- Lowest yield
-getDurationMultiplierFromTick poolConfig 1 = poolConfig.monthlyDurationMultiplier -- Base yield
-getDurationMultiplierFromTick poolConfig 2 = poolConfig.swapDurationMultiplier    -- Highest yield
+getDurationMultiplierFromTick poolConfig 0 = poolConfig.flashDurationMultiplier      -- Flash (1 block)
+getDurationMultiplierFromTick poolConfig 1 = poolConfig.swapDurationMultiplier       -- Swap (immediate)
+getDurationMultiplierFromTick poolConfig 2 = poolConfig.monthlyDurationMultiplier * 0.25  -- Weekly
+getDurationMultiplierFromTick poolConfig 3 = poolConfig.monthlyDurationMultiplier    -- Monthly
+getDurationMultiplierFromTick poolConfig 4 = poolConfig.monthlyDurationMultiplier * 3.0   -- Quarterly
+getDurationMultiplierFromTick poolConfig 5 = poolConfig.monthlyDurationMultiplier * 12.0  -- Annual
 getDurationMultiplierFromTick _ _ = 1.0
 
--- | Get leverage multiplier from tick - maps risk tier to exposure
+-- | Get leverage multiplier from tick - maps continuous leverage
 getLeverageMultiplierFromTick :: PoolParameters -> Int -> Number
-getLeverageMultiplierFromTick poolConfig 0 = poolConfig.seniorLeverageRiskMultiplier  -- 1x protected
-getLeverageMultiplierFromTick poolConfig 1 = poolConfig.juniorLeverageRiskMultiplier  -- 3x exposed
-getLeverageMultiplierFromTick _ _ = 1.0
+getLeverageMultiplierFromTick _ tick = 1.0 + (toNumber tick) / 10.0  -- Maps 0-63 to 1.0-7.3x
 
 -- | Calculate token amount for 3D liquidity (unified)
 getAmountFor3DLiquidity :: TokenAmount -> Number -> TickCoordinate -> TickCoordinate -> Number -> Number
@@ -1348,10 +1437,13 @@ calculateSwapPrice3DWithRisk pool balances fromTick toTick currentBlock =
       in durationPrice * (1.0 + (durationRatio - 0.333) * 0.1)
       
     else if leverageChange && not rateChange && not durationChange then
-      -- Leverage swap with risk multipliers
-      let fromRisk = if fromTick.leverageTick == 0 then pool.riskParams.alphaSenior else pool.riskParams.alphaJunior
-          toRisk = if toTick.leverageTick == 0 then pool.riskParams.alphaSenior else pool.riskParams.alphaJunior
-          leveragePrice = toRisk / fromRisk
+      -- Leverage swap with continuous risk profiles
+      let tickToLeverage t = 1.0 + (toNumber t) / 10.0
+          fromLeverage = tickToLeverage fromTick.leverageTick
+          toLeverage = tickToLeverage toTick.leverageTick
+          fromProfile = createRiskProfile fromLeverage pool.riskParams
+          toProfile = createRiskProfile toLeverage pool.riskParams
+          leveragePrice = toProfile.feeMultiplier / fromProfile.feeMultiplier
           weightAdjustment = fromWeights.wl / toWeights.wl
       in leveragePrice * weightAdjustment
       
@@ -1421,10 +1513,13 @@ calculateInvariant3D balances weights =
 calculateEffectiveWeights :: DimensionWeights -> RiskParameters -> TickCoordinate -> DimensionWeights
 calculateEffectiveWeights baseWeights riskParams tick =
   let
-    -- Apply risk multiplier based on leverage
-    leverageMultiplier = if tick.leverageTick == 0 
-                        then riskParams.alphaSenior
-                        else riskParams.alphaJunior
+    -- Convert tick to leverage and get risk profile
+    tickToLeverage t = 1.0 + (toNumber t) / 10.0
+    leverage = tickToLeverage tick.leverageTick
+    riskProfile = createRiskProfile leverage riskParams
+    
+    -- Apply fee multiplier based on continuous leverage
+    leverageMultiplier = riskProfile.feeMultiplier
     
     -- Adjust leverage weight by risk multiplier
     adjustedWl = baseWeights.wl * leverageMultiplier
@@ -1818,6 +1913,26 @@ getTotalLiquidityByLeverage pool leverageTick =
     matching3DPositions = Array.filter (\pos3D -> pos3D.tickLower.leverageTick == leverageTick) (Array.fromFoldable (values pool.liquidity3Ds))
   in sum (map _.liquidity matching3DPositions)
 
+-- | Group positions by their leverage level
+groupPositionsByLeverage :: Pool -> Array { leverage :: Number, liquidity :: Number }
+groupPositionsByLeverage pool =
+  let
+    -- Extract leverage from tick and accumulate liquidity
+    positions3D = Array.fromFoldable (values pool.liquidity3Ds)
+    
+    -- Convert leverage tick to actual leverage value
+    tickToLeverage :: Int -> Number
+    tickToLeverage tick = 1.0 + (toNumber tick) / 10.0  -- Maps 0-63 to 1.0-7.3x
+    
+    -- Group by leverage value
+    grouped = foldl (\acc pos -> 
+      let lev = tickToLeverage pos.tickLower.leverageTick
+          existing = fromMaybe 0.0 (Map.lookup lev acc)
+      in Map.insert lev (existing + pos.liquidity) acc
+    ) Map.empty positions3D
+    
+  in Array.fromFoldable $ map (\(Tuple lev liq) -> { leverage: lev, liquidity: liq }) (Map.toUnfoldable grouped :: Array (Tuple Number Number))
+
 -- | Calculate pool performance ratio
 calculatePoolPerformance :: Pool -> Number
 calculatePoolPerformance pool =
@@ -1825,27 +1940,36 @@ calculatePoolPerformance pool =
   then pool.poolState.totalLiquidity / pool.totalDeposited
   else 1.0
 
--- | Calculate loss distribution with risk waterfall
+-- | Calculate loss distribution across continuous leverage levels
 calculateLossDistribution :: Pool -> Number -> LossDistribution
 calculateLossDistribution pool totalLoss =
   let
-    -- Get total liquidity by tranche
-    juniorLiquidity = getTotalLiquidityByLeverage pool 1  -- Junior
-    seniorLiquidity = getTotalLiquidityByLeverage pool 0  -- Senior
+    -- Group positions by leverage level
+    leverageGroups = groupPositionsByLeverage pool
     
-    -- Junior absorbs losses first (up to its total liquidity)
-    juniorLoss = min totalLoss juniorLiquidity
-    remainingLoss = max 0.0 (totalLoss - juniorLoss)
+    -- Sort by leverage (highest first absorbs losses)
+    sortedGroups = Array.sortBy (\a b -> compare b.leverage a.leverage) leverageGroups
     
-    -- Senior only loses if Junior is exhausted
-    seniorLoss = min remainingLoss seniorLiquidity
+    -- Distribute losses starting from highest leverage
+    distributeToGroups :: Number -> Array { leverage :: Number, liquidity :: Number } -> Map Number Number
+    distributeToGroups remaining groups = 
+      case Array.head groups of
+        Nothing -> Map.empty
+        Just group ->
+          let profile = createRiskProfile group.leverage pool.riskParams
+              maxGroupLoss = group.liquidity * profile.maxLossPercentage
+              groupLoss = min remaining maxGroupLoss
+              remainingLoss = remaining - groupLoss
+              restDistribution = distributeToGroups remainingLoss (fromMaybe [] $ Array.tail groups)
+          in Map.insert group.leverage groupLoss restDistribution
+    
+    distribution = distributeToGroups totalLoss sortedGroups
     
   in { totalLoss: totalLoss
-     , juniorLoss: juniorLoss
-     , seniorLoss: seniorLoss
+     , distributionByLeverage: distribution
      }
 
--- | Redenominate 3D position with loss waterfall - junior absorbs first
+-- | Redenominate 3D position with continuous leverage loss distribution
 redenominate3DWithWaterfall :: Pool -> BlockNumber -> Liquidity3D -> Liquidity3D
 redenominate3DWithWaterfall pool currentBlock position3D =
   let
@@ -1860,22 +1984,25 @@ redenominate3DWithWaterfall pool currentBlock position3D =
         -- Calculate total loss
         totalLoss = (1.0 - poolPerformance) * pool.totalDeposited
         
-        -- Get loss distribution according to waterfall
+        -- Get loss distribution across leverage levels
         lossDistribution = calculateLossDistribution pool totalLoss
         
-        -- Calculate loss factor based on leverage tier
-        lossFactor = case position3D.tickLower.leverageTick of
-          1 -> -- Junior tranche
-            let juniorTVL = getTotalLiquidityByLeverage pool 1
-            in if juniorTVL > 0.0
-               then max 0.0 (1.0 - lossDistribution.juniorLoss / juniorTVL)
-               else 1.0
-          0 -> -- Senior tranche
-            let seniorTVL = getTotalLiquidityByLeverage pool 0
-            in if seniorTVL > 0.0 && lossDistribution.seniorLoss > 0.0
-               then max 0.0 (1.0 - lossDistribution.seniorLoss / seniorTVL)
-               else 1.0
-          _ -> 1.0
+        -- Convert position's leverage tick to actual leverage
+        tickToLeverage tick = 1.0 + (toNumber tick) / 10.0
+        positionLeverage = tickToLeverage position3D.tickLower.leverageTick
+        
+        -- Get loss for this leverage level
+        leverageLoss = fromMaybe 0.0 (Map.lookup positionLeverage lossDistribution.distributionByLeverage)
+        
+        -- Get total liquidity at this leverage level
+        leverageGroups = groupPositionsByLeverage pool
+        leverageGroup = Array.head $ Array.filter (\g -> abs (g.leverage - positionLeverage) < 0.01) leverageGroups
+        leverageTVL = maybe 0.0 _.liquidity leverageGroup
+        
+        -- Calculate loss factor
+        lossFactor = if leverageTVL > 0.0 && leverageLoss > 0.0
+                     then max 0.0 (1.0 - leverageLoss / leverageTVL)
+                     else 1.0
       
       in baseRedenomination { liquidity = baseRedenomination.liquidity * lossFactor }
     else
@@ -1901,11 +2028,10 @@ calculateCompositeBalance pool tick currentBlock =
     timeValueComponent = balances.d * pow timeToMaturity timeAdjustedWd
     
     -- Leverage component with risk adjustment
-    riskMultiplier = case tick.leverageTick of
-      0 -> pool.riskParams.alphaSenior
-      1 -> pool.riskParams.alphaJunior
-      _ -> 1.0
-    leverageComponent = balances.l * riskMultiplier
+    tickToLeverage t = 1.0 + (toNumber t) / 10.0
+    leverage = tickToLeverage tick.leverageTick
+    riskProfile = createRiskProfile leverage pool.riskParams
+    leverageComponent = balances.l * riskProfile.feeMultiplier
     
     -- Total composite value (weighted sum)
     total = timeValueComponent * weights.wd + leverageComponent * weights.wl
@@ -2035,10 +2161,9 @@ tickToDuration 0 = Flash
 tickToDuration 1 = Monthly
 tickToDuration _ = Swap
 
--- | Tick to leverage mapping
+-- | Tick to leverage mapping - continuous leverage system
 tickToLeverage :: Int -> Leverage
-tickToLeverage 0 = Senior
-tickToLeverage _ = Junior
+tickToLeverage tick = Leverage (1.0 + (toNumber tick) / 10.0)  -- Maps 0-63 to 1.0-7.3x
 
 -- | Convert rate/price to tick
 -- For Swap: price 1.05 → tick 500 (5% premium)

@@ -34,6 +34,7 @@ import Effect.Class (class MonadEffect)
 import Effect.Console (log)
 import Effect.Ref (Ref, read, write)
 import Halogen as H
+import Unsafe.Coerce (unsafeCoerce)
 import UI.State (UIState, Action(..))
 import UI.ProtocolState (AppRuntime, ProtocolCommand, ProtocolState, IndexerQuery)
 import UI.Command (executeCommand)
@@ -331,4 +332,4 @@ logCommandExecution ::
 logCommandExecution command context = do
   log $ context <> ": Executing command (details hidden)"
 
-foreign import unsafeCoerce :: forall a b. a -> b
+-- foreign import unsafeCoerce :: forall a b. a -> b -- Removed to avoid FFI module requirement

@@ -14,10 +14,11 @@ import Effect (Effect)
 
 -- Import types
 import UI.ProtocolState (ProtocolState)
-import Protocol.Token (TokenType(..), TokenMetadata)
+import Protocol.Token (TokenType(..))
 import Protocol.Pool (Duration, Leverage)
 import Protocol.PositionVault (VaultPosition)
 import Protocol.Error (ProtocolError(..))
+import UI.TokenRegistry (TokenInfo)
 
 -- Import actions
 import UI.Action.FeelsSOLActions (enterFeelsSOL)
@@ -38,7 +39,7 @@ type AtomicPositionResult =
 
 -- | Result of atomic token + position creation from JitoSOL
 type AtomicTokenPositionResult =
-  { token :: TokenMetadata
+  { token :: TokenInfo
   , position :: VaultPosition
   , feelsSOLUsed :: Number
   , jitoSOLUsed :: Number
@@ -106,6 +107,41 @@ createTokenAndPositionFromJitoSOL ::
   ProtocolState ->    -- current state
   Effect (Either ProtocolError AtomicTokenPositionResult)
 createTokenAndPositionFromJitoSOL user jitoAmount ticker name duration leverage rollover state = do
-  -- TODO: This function has complex type mismatches that need to be resolved
-  -- For now, return a not implemented error to get clean build
-  pure $ Left $ InvalidCommandError "createTokenAndPositionFromJitoSOL not fully implemented yet"
+  -- 1. Check JitoSOL balance
+  jitoBalance <- getChainAccountBalance state.accounts user
+  if jitoBalance < jitoAmount
+    then pure $ Left $ InsufficientBalanceError $ 
+      "Insufficient JitoSOL balance. Required: " <> show jitoAmount <> ", Available: " <> show jitoBalance
+    else do
+      -- 2. Create the token first
+      tokenResult <- createToken user ticker name state
+      case tokenResult of
+        Left err -> pure $ Left err
+        Right token -> do
+          -- 3. Convert JitoSOL to FeelsSOL
+          conversionResult <- enterFeelsSOL user jitoAmount state
+          case conversionResult of
+            Left err -> pure $ Left err
+            Right { feelsSOLMinted } -> do
+              -- 4. Create position with the new token as target
+              positionResult <- createPosition 
+                user 
+                FeelsSOL           -- Always lend FeelsSOL
+                feelsSOLMinted     -- Use all converted FeelsSOL
+                FeelsSOL           -- Collateral not used in new system
+                0.0                -- No collateral amount
+                duration
+                leverage
+                rollover
+                (Just ticker)      -- Target the newly created token
+                state
+              
+              case positionResult of
+                Left err -> pure $ Left err
+                Right { position } -> 
+                  pure $ Right 
+                    { token: token
+                    , position: position
+                    , feelsSOLUsed: feelsSOLMinted
+                    , jitoSOLUsed: jitoAmount
+                    }

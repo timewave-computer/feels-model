@@ -4,6 +4,8 @@ module UI.Command
   ( commandHandlers
   , executeCommand
   , captureRebaseDifferential
+  , contributeToProtocol
+  , getTotalProtocolPOL
   ) where
 
 import Prelude
@@ -28,6 +30,7 @@ import Protocol.Token (TokenType)
 
 -- Import domain modules
 import Protocol.Pool (Duration, Leverage)
+import Protocol.ProtocolVault (depositForPOL)
 import Protocol.FeelsSOLVault (getTotalJitoSOL, getOraclePrice)
 -- import Protocol.ProtocolVault (getTotalProtocolPOL)  -- function doesn't exist
 import Protocol.Oracle (takeMarketSnapshot)
@@ -70,12 +73,12 @@ captureRebaseDifferential runtime = do
         
         -- Capture to POL
         when (differentialValue > 0.0) $ do
-          -- TODO: contributeToProtocol function doesn't exist yet
+          -- Contribute to POL (default to JitoSOL pool)
+          _ <- contributeToProtocol differentialValue "JITOSOL/FEELSSOL" state
           pure unit
           
           -- Get current POL value
-          -- TODO: getTotalProtocolPOL function doesn't exist yet
-          let polBalance = 0.0
+          polBalance <- getTotalProtocolPOL state
           
           -- Update state with new price and record history
           currentTime <- currentTime
@@ -321,4 +324,25 @@ lookupPool :: String -> PoolRegistry -> Effect (Maybe PoolState3D)
 lookupPool poolId registry = do
   pool <- getPool poolId registry
   pure $ map _.poolState pool
+
+-- | Contribute captured value to protocol POL
+contributeToProtocol :: Number -> String -> ProtocolState -> Effect (Either ProtocolError Unit)
+contributeToProtocol amount poolId state = do
+  if amount <= 0.0
+    then pure $ Right unit  -- Nothing to contribute
+    else do
+      -- Deposit to POL for the specified pool
+      result <- depositForPOL state.polState poolId amount state.currentBlock
+      case result of
+        Left err -> pure $ Left err
+        Right _ -> do
+          Console.log $ "Contributed " <> show amount <> " to POL for pool " <> poolId
+          pure $ Right unit
+
+-- | Get total protocol POL across all pools
+getTotalProtocolPOL :: ProtocolState -> Effect Number
+getTotalProtocolPOL state = do
+  vault <- read state.polState
+  vaultState <- read vault.state
+  pure vaultState.totalBalance
 
